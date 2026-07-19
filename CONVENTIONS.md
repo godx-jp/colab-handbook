@@ -219,6 +219,13 @@ What the handbook does require is an **outcome**: every pull request must run, a
 **secret scan** and a **build**. A committed credential is the one failure you cannot undo by
 reverting — it must be caught before it lands.
 
+A second required outcome: **CI must trigger on pushes to the trunk itself.** A workflow that
+gates only branches the trunk isn't on is CI theater — we found three repos whose trunks had
+moved to `dev` while CI still fired only on `[main, master]`: every trunk merge ran zero
+checks, silently, while the merge gate dutifully "verified" runs that could never exist.
+When a repo's trunk moves, updating the CI triggers is part of the move, and the audit
+checks it.
+
 ### Toolchain versions — strict precedence
 
 Never hardcode a version in CI. Resolve it, in this order:
@@ -316,9 +323,12 @@ Do this **on the day a deploy target exists** — not before. Order matters:
 1. Add the deploy workflow, pointed at the real production host.
 2. `git checkout -b dev main && git push -u origin dev`
 3. Set the repo's default branch to `dev`, so PRs target it by default.
-4. Update `project.yml`: `tier: A`, `trunk: dev`, `deploy: tag`, real `production:` URL.
-5. Swap the topic to `tier-a`; update the internal project table (ports, prod URL).
-6. Tag the first release.
+4. **Add `dev` to every CI workflow's trigger branches.** The trunk just moved; CI that
+   still gates only `main` will run zero checks on your actual work — and nothing will
+   look broken ([§7](#7-ci-and-toolchain)).
+5. Update `project.yml`: `tier: A`, `trunk: dev`, `deploy: tag`, real `production:` URL.
+6. Swap the topic to `tier-a`; update the internal project table (ports, prod URL).
+7. Tag the first release.
 
 Step 1 comes first on purpose. `main` only becomes meaningful once something consumes it.
 

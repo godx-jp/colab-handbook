@@ -77,3 +77,17 @@ Decided 2026-07-19, after a GitHub Actions billing lock stopped every
 Self-hosted job hygiene: no `sudo`, install tools into `$RUNNER_TEMP`, never
 write outside the workspace, prefer the runner's native toolchains. A shared
 runner is infrastructure, not a throwaway VM.
+
+### Self-hosted patterns that earn their place
+
+- **Split a test matrix by purpose.** The leg matching production is the release
+  gate → self-hosted (immune to billing/outage). Forward-compat legs (next PHP,
+  next Node) are reconnaissance → keep them on hosted runners with
+  `continue-on-error: true`. Losing an advisory signal during an outage is fine;
+  losing the gate is not.
+- **Service containers on a shared runner: never fix the host port.** The runner
+  machine likely runs its own database on the default port. Publish the container
+  port unmapped (`- 3306`) and read the randomly assigned host port from the job's
+  service context (`job.services.mysql.ports['3306']`), threading it through your
+  env. A fixed `3306:3306` works exactly until the first job lands on a runner
+  that already listens there.

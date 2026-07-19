@@ -346,6 +346,115 @@ function checkStamps(src, hb, tmplNames, fail, warn) {
   }
 }
 
+// -------------------------------------------------------- workflow `on:` triggers
+//
+// project.yml gets a flat reader; a GitHub workflow's `on:` block is nested, so it
+// gets its own pragmatic parser. Workflows are machine-formatted enough that a small
+// indentation-aware scan (not a full YAML engine) reads triggers reliably. We only
+// need a few facts per workflow: which events fire it, and — for push and
+// pull_request — the branch/tag filter lists. Everything else is ignored on purpose.
+//
+// Returns { found, events:Set,
+//           pushBranches:[]|null, pushBranchesIgnore:[]|null, pushTags:[]|null,
+//           prBranches:[]|null }.
+// A null list means the filter is ABSENT. For push, absent branches + absent tags =
+// "all branches" (a bare `push:` fires on every branch). Absent branches but PRESENT
+// tags = "tags only" — no branch push at all (a release/tag workflow).
+function parseWorkflowOn(text) {
+  const res = { found: false, events: new Set(), pushBranches: null, pushBranchesIgnore: null, pushTags: null, prBranches: null };
+  if (!text) return res;
+  const all = text.split(/\r?\n/);
+  let start = -1;
+  for (let i = 0; i < all.length; i++) {
+    // top-level `on:` at column 0 (YAML also lets it be quoted).
+    if (/^(on|["']on["'])\s*:/.test(all[i])) { start = i; break; }
+  }
+  if (start === -1) return res;
+  res.found = true;
+  const header = all[start];
+  const inline = header.slice(header.indexOf(":") + 1).replace(/#.*$/, "").trim();
+
+  // Inline forms `on: push` / `on: [push, pull_request]` carry no branch filters.
+  if (inline) {
+    const items = inline.startsWith("[") ? inline.replace(/^\[|\].*$/g, "").split(",") : [inline];
+    items.map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean).forEach((e) => res.events.add(e));
+    return res;
+  }
+
+  // Block form: everything indented past column 0 belongs to the `on:` block.
+  const body = [];
+  for (let i = start + 1; i < all.length; i++) {
+    if (/^\S/.test(all[i])) break; // next column-0 key ends the block
+    body.push(all[i]);
+  }
+  const meaningful = body.filter((l) => l.trim() && !/^\s*#/.test(l));
+  if (!meaningful.length) return res;
+  const childIndent = Math.min(...meaningful.map((l) => l.match(/^(\s*)/)[1].length));
+
+  for (let i = 0; i < body.length; i++) {
+    const m = body[i].match(/^(\s*)([A-Za-z_][\w-]*)\s*:\s*(.*)$/);
+    if (!m || m[1].length !== childIndent) continue;
+    const ev = m[2];
+    res.events.add(ev);
+    if (ev !== "push" && ev !== "pull_request" && ev !== "pull_request_target") continue;
+    // The event's sub-block = following lines indented deeper than childIndent.
+    const sub = [];
+    for (let j = i + 1; j < body.length; j++) {
+      if (body[j].trim() === "") { sub.push(body[j]); continue; }
+      if (body[j].match(/^(\s*)/)[1].length <= childIndent) break;
+      sub.push(body[j]);
+    }
+    if (ev === "push") {
+      res.pushBranches = listField(sub, "branches");
+      res.pushBranchesIgnore = listField(sub, "branches-ignore");
+      res.pushTags = listField(sub, "tags");
+    } else {
+      const b = listField(sub, "branches");
+      if (b !== null) res.prBranches = b;
+    }
+  }
+  return res;
+}
+
+// Extract a YAML list field ("branches"/"tags") from an event sub-block. Handles the
+// flow form (`branches: [a, b]`), the block form (`branches:` then `- a` lines) and a
+// bare scalar (`branches: main`). Returns null when the field is absent entirely.
+function listField(subLines, field) {
+  const re = new RegExp("^(\\s*)" + field + "\\s*:\\s*(.*)$");
+  for (let i = 0; i < subLines.length; i++) {
+    const m = subLines[i].match(re);
+    if (!m) continue;
+    const indent = m[1].length;
+    const inline = m[2].replace(/#.*$/, "").trim();
+    if (inline) {
+      if (inline.startsWith("[")) {
+        return inline.replace(/^\[|\].*$/g, "").split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
+      }
+      return [inline.replace(/^["']|["']$/g, "")];
+    }
+    const out = [];
+    for (let j = i + 1; j < subLines.length; j++) {
+      if (subLines[j].trim() === "") continue;
+      const bm = subLines[j].match(/^(\s*)-\s*(.+)$/);
+      if (bm && bm[1].length > indent) {
+        out.push(bm[2].replace(/#.*$/, "").trim().replace(/^["']|["']$/g, ""));
+        continue;
+      }
+      if (subLines[j].match(/^(\s*)/)[1].length <= indent) break; // dedent ends the list
+    }
+    return out;
+  }
+  return null;
+}
+
+// Minimal shell-glob for branch patterns like `release/*`. Plain names compare as
+// equality; only `*` and `?` are honoured — enough for GitHub branch filters.
+function globMatch(pattern, name) {
+  if (!/[*?[]/.test(pattern)) return pattern === name;
+  const rx = "^" + pattern.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$";
+  try { return new RegExp(rx).test(name); } catch { return false; }
+}
+
 // ------------------------------------------------------------------- repo acquisition
 
 function runGh(args) {
@@ -518,6 +627,11 @@ function auditRepo(target, ctx) {
     }
   }
 
+  // ---- trunk is CI-gated ---------------------------------------------------
+  // Merges land on the trunk as PUSHES; if no CI workflow triggers on push to the
+  // declared trunk, every merge runs zero CI while everyone believes it is gated.
+  checkTrunkCiGated(src, trunk, workflows, branches, fail, warn);
+
   // ---- toolchain agreement -------------------------------------------------
   // Report disagreement; never auto-resolve. Three sources can disagree: the
   // descriptor, the ecosystem manifest, and what the workflows actually pin.
@@ -534,6 +648,83 @@ function auditRepo(target, ctx) {
     return info;
   }
   return finish();
+}
+
+// The bug this catches (found in the wild in shoots/hr-double/corebooks): a repo moved
+// its trunk (main -> dev) but its CI workflows' push triggers still named the OLD
+// branches, so every merge to the real trunk ran ZERO CI — silently — while the B1
+// gate ("check trunk CI is green") checked runs that could never exist.
+//
+// Deploy/release workflows are NOT CI gates: a tier-A repo's deploy-*.yml firing on a
+// push to main (dreamlab/talkie push-main deploy) is correct and must not be flagged.
+// We exclude them by filename (deploy*/release*) and by trigger shape (a tags-only or
+// workflow_dispatch-only workflow does no branch gating and is not CI-type).
+function checkTrunkCiGated(src, trunk, workflows, branches, fail, warn) {
+  if (!trunk || !workflows.length) return;
+
+  const ci = []; // CI-type workflows: { wf, pushGate, prGate, refs }
+  for (const wf of workflows) {
+    if (/^(deploy|release)[-.]/.test(wf)) continue; // deploy/release by filename
+    const on = parseWorkflowOn(src.readFile(`.github/workflows/${wf}`));
+    if (!on.found) continue;
+
+    // Effective push branch gate: an array of patterns | "all" | {ignore:[…]} | null.
+    // Bare `push:` = every branch ("all"); `push:` with only tags = no branch push.
+    let pushGate = null;
+    if (on.events.has("push")) {
+      if (on.pushBranches !== null) pushGate = on.pushBranches;
+      else if (on.pushBranchesIgnore !== null) pushGate = { ignore: on.pushBranchesIgnore };
+      else if (on.pushTags !== null) pushGate = null; // tags-only push
+      else pushGate = "all";
+    }
+    const prGate = (on.events.has("pull_request") || on.events.has("pull_request_target"))
+      ? (on.prBranches !== null ? on.prBranches : "all")
+      : null;
+
+    // Not CI-type if it does no branch-based triggering (tags-only + dispatch, etc.).
+    if (pushGate === null && prGate === null) continue;
+
+    // Positive branch references, for the stale-reference advisory (ignore lists and
+    // glob patterns are not concrete "references" to a branch).
+    const refs = [];
+    for (const list of [on.pushBranches, on.prBranches]) {
+      if (Array.isArray(list)) for (const b of list) if (b) refs.push(b);
+    }
+    ci.push({ wf, pushGate, prGate, refs });
+  }
+
+  // No CI at all here is a DIFFERENT concern (does this repo want CI?) — out of scope.
+  // This check only catches CI that exists but points at the wrong branch.
+  if (!ci.length) return;
+
+  const pushGatesTrunk = (g) => {
+    if (g === "all") return true;
+    if (Array.isArray(g)) return g.some((p) => globMatch(p, trunk));
+    if (g && g.ignore) return !g.ignore.some((p) => globMatch(p, trunk));
+    return false;
+  };
+
+  if (!ci.some((c) => pushGatesTrunk(c.pushGate))) {
+    const gates = ci.map((c) => {
+      if (Array.isArray(c.pushGate)) return `${c.wf} gates: ${c.pushGate.join(", ")}`;
+      if (c.pushGate === "all") return `${c.wf} gates: all branches`;
+      return `${c.wf}: pull_request only`;
+    });
+    fail(`trunk "${trunk}" is not CI-gated — no workflow triggers on push to it (${gates.join("; ")})`);
+  }
+
+  // Stale-reference advisory: a workflow names a branch that does not exist. Standard
+  // integration aliases (main/master/dev/trunk) are exempt — teams list them
+  // defensively; the anti-pattern is a project-specific ghost like develop/workos.
+  if (Array.isArray(branches)) {
+    for (const c of ci) {
+      const ghosts = [...new Set(c.refs)]
+        .filter((b) => !/[*?[]/.test(b)) // glob patterns aren't concrete branches
+        .filter((b) => !INTEGRATION_BRANCHES.has(b))
+        .filter((b) => !branches.includes(b));
+      if (ghosts.length) warn(`${c.wf} triggers on nonexistent branch(es): ${ghosts.join(", ")}`);
+    }
+  }
 }
 
 function collectToolchain(src, cfg, workflows) {

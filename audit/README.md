@@ -46,6 +46,29 @@ the handbook's current version, so a scheduled run is self-documenting.
   was silently unchecked before — a tier B repo could quietly ship to production with
   none of the tier A gates.)
 - The declared `trunk` branch actually exists.
+- **Trunk is CI-gated** — at least one CI workflow triggers on **push to the declared
+  trunk**. Merges land on the trunk as pushes; if the CI workflows' `on.push.branches`
+  still name the *old* trunk after a `main → dev` move, every merge runs zero CI while
+  the B1 gate ("check trunk CI is green") checks runs that can never exist (this bit
+  shoots-automation, hr-double, and corebooks for real). **⚠ finding** when no CI-type
+  workflow gates push to the trunk — the message lists what the workflows *do* gate
+  (`trunk "dev" is not CI-gated … (ci.yml gates: main, master)`).
+  - Deploy/release workflows are **not** CI gates and are excluded — by filename
+    (`deploy*`/`release*`) and by trigger shape (a **tags-only** or
+    **`workflow_dispatch`-only** workflow does no branch gating). So a `deploy-*.yml`
+    firing on a push to `main` (the `deploy: push-main` repos) is correct, never
+    flagged; only CI-type gating of the **trunk** is what this checks.
+  - A repo with **no CI-type workflow at all** is out of scope (that is "should this
+    repo have CI?", a different question) — the check only catches CI that *exists but
+    points at the wrong branch*.
+  - **Advisory (·)** when a workflow's branch list names a branch that **does not
+    exist** in the repo — the stale-reference anti-pattern (`ci.yml triggers on
+    nonexistent branch(es): develop, workos`). Standard integration aliases
+    (`main`/`master`/`dev`/`trunk`) are exempt, since teams list them defensively;
+    glob patterns like `release/*` are skipped too.
+  - The `on:` block is read by a small indentation-aware parser (not the flat
+    project.yml reader): it handles flow lists (`branches: [main, dev]`), block lists,
+    inline `on: push` / `on: [push, pull_request]`, and `branches-ignore`.
 - Branch names match `^(feat|fix|docs|chore|refactor|test|perf)/[a-z0-9._-]+$`
   (integration branches `main`/`dev`/`master`/`trunk` exempt).
 - **Toolchain agreement** — flags when `project.yml`, the ecosystem manifest
