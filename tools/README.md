@@ -63,6 +63,79 @@ branch on it.
 - **Claiming and ports work without a worktree.** `colab claim 42` (a trunk claim) and
   `colab port alloc` are standalone.
 
+## Claim lifecycle (enforced)
+
+Claims are **enforced, not advisory**. `colab claim` and `colab worktree new --issues` go through
+three gates; `colab release` and `colab worktree rm` close the loop.
+
+### 1. Refusal — check-then-refuse, two layers
+
+Before a claim is written, colab checks two layers and **refuses with exit 1** if either says the
+issue is taken:
+
+- **Local** (always): if the issue already has a live claim in `state.json` attached to a
+  *different* worktree (or a trunk claim vs. a worktree claim), refuse and print the holder —
+  worktree, branch, host, and the date since. Re-claiming onto the **same** worktree is idempotent
+  and succeeds silently-OK (so re-running a command is safe).
+- **GitHub** (when `gh` is authed and the repo has an `origin`): `gh issue view <n> --json
+  assignees,labels`. If the `in-progress` label is present **and** the assignee set is non-empty
+  **and** does not include your `gh api user` login, refuse and name the assignee. A failed/blank
+  read is *skipped*, never treated as "free" (same rationale as `claims --sync` being add-only). If
+  `gh` is unavailable the check is **local-only** and says so.
+
+`--force` overrides **both** layers and prints exactly what it takes over
+(`--force: taking over #7 from worktree "A" …`) — a takeover is always visible, never silent. Every
+refusal ends by reminding you that stale claims from dead worktrees are freed by
+`colab doctor --prune`, so a crashed session can never block an issue forever.
+
+### 2. Claim comment — metadata on the Issue
+
+On each successful claim (when `gh` is usable) colab posts **one** comment, in this **exact,
+stable, machine-greppable** format (the refusal path and future dashboards parse it — do not reword):
+
+```
+🔒 Claimed — worktree `<name|->` · branch `<branch>` · host `<hostname>` · <ISO timestamp>
+```
+
+On `release` / `worktree rm` it posts `✅ Released` — **unless the issue is already CLOSED**, in
+which case it stays silent (a `Closes #N` merge already ended the story). Comments are
+**best-effort**: a failed comment warns but never fails the claim itself.
+
+### 3. Tie-break — settling a true simultaneous race
+
+GitHub has no atomic check-and-set on labels/assignees, so two sessions can both pass the refusal
+gate in the same instant and both assign themselves. The claim comment is the substrate that breaks
+the tie **deterministically**, so both racers independently reach the *same* verdict:
+
+1. After posting our claim comment, re-read the issue's comments.
+2. Compute the **live** claims: every `🔒 Claimed` comment **not** followed by a later `✅ Released`
+   from the **same author**. Each carries `login`, `host` (parsed from the comment body), and the
+   comment's authoritative GitHub `createdAt`.
+3. Identify **ours** = the live claim whose `login` is our `gh` login **and** `host` is this machine.
+4. If any **other** live claim (different `login` *or* different `host`) has an **earlier**
+   `createdAt` than ours, **we lost**. Exact-timestamp ties break on the identity string
+   `login@host` — the lexicographically smaller identity wins — so the verdict is fully
+   deterministic even at equal timestamps.
+5. On a loss we **yield automatically**: remove our local claim, post
+   `✅ Released (yielded — earlier claim by <who> wins)`, and exit 1 telling the caller to pick
+   another issue. We remove our GitHub `in-progress` label + `@me` assignee **only when the winner
+   is a different GitHub user** — if the winner shares our login (another machine of ours), the
+   label/assignee is a single shared marker the winner still needs, so we leave it and let the
+   comment layer record the handover. (This is a deliberate refinement of "remove our label only if
+   we added them": on GitHub the label/assignee is keyed by login, not by host, so it cannot be
+   split between two machines of the same user.)
+
+In `worktree new`, a lost issue is yielded the same way but the **worktree is kept** (its files may
+already be set up) — reuse it for another issue or `colab worktree rm <name>`; the command exits 1.
+
+### 4. What `doctor` does NOT do
+
+`colab doctor --prune` heals **machine-local** drift only (dead worktrees, orphan/stale claims,
+orphan ports). It deliberately **never posts GitHub comments** and never edits GitHub — a cleanup
+cron may be pruning another person's dead session on a shared machine, and it must not speak on
+their behalf on the Issue. A stale GitHub `in-progress` label is instead healed by the
+`claims --sync --prune` reconcile path (which acts on *your own* assigned issues).
+
 ## State & config files (machine-local)
 
 Everything lives under `~/.colab/` (override the directory with the `COLAB_HOME` env var).
@@ -169,7 +242,7 @@ Run `colab <cmd> --help` for full detail.
 
 | command | purpose |
 |---|---|
-| `claim <issue>... [--worktree N] [--branch B] [--repo P]` | claim one or many issues (atomic; onto one worktree) |
+| `claim <issue>... [--worktree N] [--branch B] [--force] [--repo P]` | claim one or many issues (atomic; onto one worktree). **Enforced** — see *Claim lifecycle* below |
 | `release <issue> [--repo P]` | release a single issue; siblings + worktree survive |
 | `claims [--json] [--sync [--prune]]` | list (grouped by worktree); `--sync` **adds** claims found on GitHub (assigned + in-progress); `--prune` also **removes** local claims GitHub no longer shows |
 | `port alloc [--count N] [--range A-B] [--worktree N \| --claim I \| --label S]` | allocate consecutive free ports |
@@ -258,6 +331,10 @@ succeeds and the script exits 0 when the release steps themselves succeeded.
 
 ## Safety
 
+- **Claims are enforced.** `claim` / `worktree new --issues` refuse (exit 1) an issue already held
+  by another worktree (local) or another GitHub user (`in-progress` + assigned to someone else),
+  naming the holder; `--force` takes over visibly. A simultaneous-claim race is settled
+  deterministically by the tie-break, and the loser auto-yields. See *Claim lifecycle* above.
 - `worktree rm` refuses if the worktree has uncommitted **tracked** changes, unless `--force`.
   (Untracked files like a copied `.env` are expected and don't block.)
 - `claims --sync` is **add-only by default**: it adds claims for issues GitHub shows as assigned +

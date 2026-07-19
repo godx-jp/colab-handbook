@@ -64,6 +64,187 @@ function isGhUsable(repoAbs) {
 }
 
 // ---------------------------------------------------------------------------
+// claim ENFORCEMENT — refusal, claim comments, and the tie-break for the
+// simultaneous-claim race. See tools/README.md "Claim lifecycle" for the model.
+//
+// Claims are ENFORCED, not advisory: a claim held by another worktree (locally) or by
+// another GitHub user (remotely) blocks a second claim unless --force takes it over
+// visibly. The claim comment (feature 2) is both an audit trail on the Issue AND the
+// substrate the tie-break (feature 3) parses to settle a true simultaneous race, since
+// GitHub offers no atomic check-and-set on labels/assignees.
+// ---------------------------------------------------------------------------
+
+// The claim/release comment markers. These strings are a STABLE WIRE FORMAT: the refusal
+// path, the tie-break, and future dashboards grep them. Do not reword casually.
+const CLAIM_MARK = '🔒 Claimed';
+const RELEASE_MARK = '✅ Released';
+// Parses a claim comment body back into {worktree, branch, host, date}. The `· <host>` field
+// is what lets the tie-break tell two machines of the SAME GitHub user apart.
+const CLAIM_RE = /🔒 Claimed — worktree `([^`]*)` · branch `([^`]*)` · host `([^`]*)` · (\S+)/;
+
+/** The exact claim-comment body. Keep in lockstep with CLAIM_RE and the README. */
+function claimCommentBody(wtName, branch) {
+  return `${CLAIM_MARK} — worktree \`${wtName || '-'}\` · branch \`${branch}\` · host \`${HOST}\` · ${nowISO()}`;
+}
+
+/** Issues whose EXISTING local claim sits on a different worktree than the one we're claiming onto. */
+function localClaimConflicts(st, repoAbs, nums, wtName) {
+  const want = wtName || null;
+  const out = [];
+  for (const num of nums) {
+    const ex = st.claims[claimKey(repoAbs, num)];
+    if (ex && (ex.worktree || null) !== want) out.push({ num, holder: ex });
+  }
+  return out;
+}
+
+/**
+ * Issues GitHub shows as claimed by SOMEONE ELSE: label `in-progress` present AND a non-empty
+ * assignee set that does not include us. A read failure (null) is skipped, never treated as free.
+ */
+function ghClaimConflicts(repoAbs, nums, myLogin) {
+  const out = [];
+  for (const num of nums) {
+    const info = git.ghIssueView(repoAbs, num, ['assignees', 'labels']);
+    if (!info) continue; // couldn't read → don't block on a failed read
+    const labeled = (info.labels || []).some((l) => l.name === 'in-progress');
+    const assignees = (info.assignees || []).map((a) => a.login);
+    if (labeled && assignees.length > 0 && !assignees.includes(myLogin)) out.push({ num, assignees });
+  }
+  return out;
+}
+
+/** Print the two-layer refusal and the escape hatches. */
+function printRefusal(localConf, ghConf) {
+  process.stderr.write('✗ Refusing — one or more issues are already claimed:\n');
+  for (const c of localConf) {
+    const h = c.holder;
+    process.stderr.write(
+      `  #${c.num} local: worktree "${h.worktree || '-'}" · branch ${h.branch || '-'} · host ${h.host} · since ${String(h.created).slice(0, 10)}\n`);
+  }
+  for (const c of ghConf) {
+    process.stderr.write(`  #${c.num} GitHub: assigned to ${c.assignees.join(', ')} (labeled in-progress)\n`);
+  }
+  process.stderr.write('  Re-run with --force to take over, or claim a different issue.\n');
+  process.stderr.write('  Stale claims from dead worktrees are freed by: colab doctor --prune\n');
+}
+
+/** Announce exactly what --force overrides (a takeover is visible, never silent). */
+function printTakeover(localConf, ghConf) {
+  for (const c of localConf) {
+    const h = c.holder;
+    print(`  --force: taking over #${c.num} from worktree "${h.worktree || '-'}" (host ${h.host}, since ${String(h.created).slice(0, 10)})`);
+  }
+  for (const c of ghConf) {
+    print(`  --force: taking over #${c.num} from GitHub assignee ${c.assignees.join(', ')}`);
+  }
+}
+
+/**
+ * Live claim comments on an issue = every `🔒 Claimed` not cancelled by a LATER `✅ Released`
+ * from the SAME GitHub author. Returns [{login, host, at, identity}], `at` = the comment's real
+ * GitHub createdAt (authoritative, sub-second), `identity` = `login@host`.
+ */
+function liveClaimComments(comments) {
+  const sorted = [...comments].sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
+  // releases per author login (release comments carry no host — cancellation is by author, per spec)
+  const releasesByLogin = new Map();
+  for (const c of sorted) {
+    if (String(c.body || '').trim().startsWith(RELEASE_MARK)) {
+      const login = (c.author && c.author.login) || '';
+      if (!releasesByLogin.has(login)) releasesByLogin.set(login, []);
+      releasesByLogin.get(login).push(c.createdAt);
+    }
+  }
+  const live = [];
+  for (const c of sorted) {
+    const m = String(c.body || '').trim().match(CLAIM_RE);
+    if (!m) continue;
+    const login = (c.author && c.author.login) || '';
+    const host = m[3];
+    const at = c.createdAt;
+    const cancelled = (releasesByLogin.get(login) || []).some((r) => r > at);
+    if (!cancelled) live.push({ login, host, at, identity: `${login}@${host}` });
+  }
+  return live;
+}
+
+/**
+ * Deterministic verdict on the simultaneous-claim race. Given the issue's comments, our login and
+ * host: if a live claim from a DIFFERENT author-or-host is EARLIER than ours → we lost (returns the
+ * winner). Exact-timestamp ties break on identity string (lexicographically smaller identity wins),
+ * so both racers, reading the same comments, reach the same verdict independently.
+ */
+function tieBreakVerdict(comments, myLogin, myHost) {
+  const live = liveClaimComments(comments);
+  const mine = live
+    .filter((c) => c.login === myLogin && c.host === myHost)
+    .sort((a, b) => (a.at > b.at ? -1 : a.at < b.at ? 1 : 0))[0]; // our latest live claim
+  if (!mine) return { lost: false }; // our own comment not visible yet → don't yield to a phantom
+  let winner = null;
+  for (const c of live) {
+    if (c.login === myLogin && c.host === myHost) continue; // never yield to ourselves
+    const earlier = c.at < mine.at || (c.at === mine.at && c.identity < mine.identity);
+    if (!earlier) continue;
+    if (!winner || c.at < winner.at || (c.at === winner.at && c.identity < winner.identity)) winner = c;
+  }
+  return winner ? { lost: true, winner } : { lost: false };
+}
+
+/** Post the claim comment (best-effort: a failure warns but never fails the claim). */
+function postClaimComment(repoAbs, num, wtName, branch) {
+  const r = git.ghIssueComment(repoAbs, num, claimCommentBody(wtName, branch));
+  if (!r.ok) warn(`could not post claim comment on #${num} (${r.stderr.split('\n')[0] || r.code}) — claim stands`);
+}
+
+/**
+ * Post `✅ Released` on an issue, UNLESS it is already CLOSED (a `Closes #N` merge already ended the
+ * story). Best-effort. Used by release + worktree rm.
+ */
+function postReleaseComment(repoAbs, num) {
+  const info = git.ghIssueView(repoAbs, num, ['state']);
+  if (info && info.state === 'CLOSED') return; // don't chatter on a closed issue
+  const r = git.ghIssueComment(repoAbs, num, RELEASE_MARK);
+  if (!r.ok) warn(`could not post release comment on #${num} (${r.stderr.split('\n')[0] || r.code})`);
+}
+
+/**
+ * We lost the race for #num → yield it. Removes our local claim, posts the yield notice, and
+ * (only when the winner is a DIFFERENT GitHub user) removes our label + @me assignee. When the
+ * winner shares our login (another machine of ours), the GitHub label/assignee is a single shared
+ * marker the winner still needs — so we leave it and let the comment layer record the handover.
+ */
+function yieldIssue(repoAbs, num, winner, myLogin) {
+  if (winner.login !== myLogin) {
+    const r = git.ghIssueEdit(repoAbs, num, ['--remove-label', 'in-progress', '--remove-assignee', '@me']);
+    if (!r.ok) warn(`gh: could not remove our label/assignee on #${num} while yielding (${r.stderr.split('\n')[0] || r.code})`);
+  }
+  const rc = git.ghIssueComment(repoAbs, num, `${RELEASE_MARK} (yielded — earlier claim by ${winner.identity} wins)`);
+  if (!rc.ok) warn(`could not post yield comment on #${num} (${rc.stderr.split('\n')[0] || rc.code})`);
+  state.mutate((st) => { delete st.claims[claimKey(repoAbs, num)]; });
+}
+
+/**
+ * Run the claim comment + tie-break for issues we just claimed on GitHub. Returns the list of
+ * issue numbers we LOST (already yielded). `owner` is {wtName, branch, myLogin}.
+ */
+function commentAndTieBreak(repoAbs, nums, owner) {
+  const lost = [];
+  for (const num of nums) {
+    postClaimComment(repoAbs, num, owner.wtName, owner.branch);
+    const info = git.ghIssueView(repoAbs, num, ['comments']);
+    if (!info || !Array.isArray(info.comments)) continue; // can't read comments → keep the claim
+    const verdict = tieBreakVerdict(info.comments, owner.myLogin, HOST);
+    if (verdict.lost) {
+      yieldIssue(repoAbs, num, verdict.winner, owner.myLogin);
+      warn(`Yielded #${num} — an earlier simultaneous claim by ${verdict.winner.identity} wins. Pick another issue.`);
+      lost.push(num);
+    }
+  }
+  return lost;
+}
+
+// ---------------------------------------------------------------------------
 // claim / release / claims
 // ---------------------------------------------------------------------------
 
@@ -78,56 +259,82 @@ Multiple issues in one call are claimed atomically onto the SAME worktree/branch
 (a group of related issues on one branch is normal practice):
   colab claim 115 114 113 --worktree import-fixes-115-114-113 --branch fix/import-fixes-115-114-113
 
+Claims are ENFORCED, not advisory. Before claiming, colab REFUSES (exit 1) if:
+  • LOCAL:  the issue already has a live claim on a DIFFERENT worktree (holder shown), or
+  • GITHUB: the issue is labeled in-progress AND assigned to someone who isn't you.
+Re-claiming onto the SAME worktree is idempotent (OK). --force takes over either layer,
+printing exactly what it overrides. On a successful claim colab posts a "🔒 Claimed" comment
+on the Issue; if a simultaneous racer claimed microseconds earlier, the tie-break yields to
+them automatically (see tools/README.md "Claim lifecycle").
+
 Options:
   --repo <path>       repo root (default: git root of cwd)
   --worktree <name>   attach these claims to a worktree entity (ports live on the worktree)
   --branch <name>     branch these claims are worked on (informational; default: trunk)
+  --force             take over a claim held by another worktree / GitHub user (logged, never silent)
 `;
 
 function cmdClaim(argv) {
   const opts = parseArgs(argv, {
     values: { '--repo': 'repo', '--worktree': 'worktree', '--branch': 'branch' },
-    flags: { '-h': 'help', '--help': 'help' },
+    flags: { '--force': 'force', '-h': 'help', '--help': 'help' },
   });
   if (opts.help || opts._.length === 0) return print(HELP_CLAIM);
   const repoAbs = resolveRepo(opts);
   const nums = opts._.map(normIssueNum);
   const branch = opts.branch || 'trunk';
   const wtName = opts.worktree || null;
+  const gh = isGhUsable(repoAbs);
+  const myLogin = gh ? git.ghCurrentLogin() : null;
 
+  // ---- REFUSAL (two layers, check-then-refuse) ----
+  const localConf = localClaimConflicts(state.loadState(), repoAbs, nums, wtName);
+  const ghConf = gh ? ghClaimConflicts(repoAbs, nums, myLogin) : [];
+  if (!gh) warn('gh not usable here (no gh auth or no origin remote) — refusal is LOCAL-ONLY');
+  if ((localConf.length || ghConf.length)) {
+    if (!opts.force) { printRefusal(localConf, ghConf); return 1; }
+    printTakeover(localConf, ghConf);
+  }
+
+  // ---- claim locally (idempotent on same worktree; --force overwrites a different holder) ----
   const res = state.mutate((st) => {
     if (wtName && !st.worktrees[wtName]) {
       // allow claiming onto a worktree name that will be created later (informational link)
       st.worktrees[wtName] = { name: wtName, repo: repoAbs, branch, path: null, ports: [], host: HOST, created: nowISO() };
     }
-    const created = [], dupes = [];
+    const created = [], reclaimed = [];
     for (const num of nums) {
       const key = claimKey(repoAbs, num);
-      if (st.claims[key]) { dupes.push(num); continue; }
+      const ex = st.claims[key];
+      if (ex && (ex.worktree || null) === (wtName || null)) { reclaimed.push(num); continue; } // idempotent
       st.claims[key] = { issue: issueTag(num), repo: repoAbs, worktree: wtName, branch, host: HOST, created: nowISO() };
       created.push(num);
     }
-    return { created, dupes };
+    return { created, reclaimed };
   });
 
-  for (const num of res.dupes) warn(`#${num} was already claimed locally — left as is`);
+  for (const num of res.reclaimed) print(`#${num} already claimed by this worktree — OK (idempotent)`);
 
-  // GitHub side (outside the lock — network).
-  const gh = isGhUsable(repoAbs);
+  // ---- GitHub side (outside the lock — network): assign/label, comment, tie-break ----
+  let lost = [];
   if (gh) {
     for (const num of res.created) {
       const r = git.ghIssueEdit(repoAbs, num, ['--add-assignee', '@me', '--add-label', 'in-progress']);
       if (r.ok) print(`  gh: #${num} assigned + labeled in-progress`);
       else warn(`gh edit #${num} failed (${r.stderr.split('\n')[0] || r.code}) — local claim stands`);
     }
+    lost = commentAndTieBreak(repoAbs, res.created, { wtName, branch, myLogin });
   } else {
-    warn(`gh not usable here (no gh auth or no origin remote) — claims are LOCAL-ONLY`);
+    warn('gh not usable here — claims are LOCAL-ONLY (no comment, no tie-break)');
   }
-  if (res.created.length) {
-    print(`Claimed ${res.created.map((n) => '#' + n).join(' ')} in ${shortRepo(repoAbs)}` +
+
+  const kept = res.created.filter((n) => !lost.includes(n));
+  if (kept.length) {
+    print(`Claimed ${kept.map((n) => '#' + n).join(' ')} in ${shortRepo(repoAbs)}` +
       (wtName ? ` → worktree "${wtName}" (branch ${branch})` : ` (trunk)`));
   }
-  return 0;
+  // Lost any issue to the tie-break → non-zero so the caller picks another.
+  return lost.length ? 1 : 0;
 }
 
 const HELP_RELEASE = `colab release <issue> [--repo <path>]
@@ -166,6 +373,7 @@ function cmdRelease(argv) {
     const r = git.ghIssueEdit(out.repo, num, ['--remove-assignee', '@me', '--remove-label', 'in-progress']);
     if (r.ok) print(`  gh: #${num} unassigned + label removed`);
     else warn(`gh edit #${num} failed (${r.stderr.split('\n')[0] || r.code}) — local claim already removed`);
+    postReleaseComment(out.repo, num); // "✅ Released" unless the issue is already CLOSED
   } else {
     warn('gh not usable here — released LOCAL-ONLY');
   }
@@ -433,6 +641,11 @@ dependency symlinking, dev-server restarts) live in OPTIONAL repo hooks, not her
         --name <name>      worktree dir name (default: branch after first '/')
         --trunk <name>     override trunk branch
         --repo <path>      repo root (default: git root of cwd)
+        --force            take over issues already claimed by another worktree / GitHub user
+      Claimed issues are ENFORCED: if --issues names an issue already held (locally on another
+      worktree, or on GitHub by someone else) the command REFUSES before building anything,
+      unless --force. On success each issue gets a "🔒 Claimed" comment + the tie-break runs;
+      if an issue is lost to a simultaneous racer it is yielded and the worktree is kept for reuse.
       Branch naming is YOUR choice; the group convention is <type>/<slug>-N-M-K, e.g.
         colab worktree new fix/import-fixes-115-114-113 --issues 115,114,113 --ports 1
 
@@ -477,7 +690,7 @@ function cmdWorktreeNew(argv) {
   const opts = parseArgs(argv, {
     values: { '--issues': 'issues', '--ports': 'ports', '--range': 'range', '--name': 'name', '--trunk': 'trunk', '--repo': 'repo' },
     aliases: { '--issue': '--issues' },
-    flags: { '-h': 'help', '--help': 'help' },
+    flags: { '--force': 'force', '-h': 'help', '--help': 'help' },
   });
   if (opts.help || opts._.length === 0) return print(HELP_WORKTREE);
   const config = state.loadConfig();
@@ -489,6 +702,19 @@ function cmdWorktreeNew(argv) {
   const issues = opts.issues ? String(opts.issues).split(',').map(normIssueNum) : [];
   const portCount = opts.ports ? parseInt(opts.ports, 10) : 0;
   const range = opts.range || config.portRange;
+  const gh = isGhUsable(repoAbs);
+  const myLogin = gh ? git.ghCurrentLogin() : null;
+
+  // ---- REFUSAL: don't build a worktree around issues someone else already holds ----
+  if (issues.length) {
+    const localConf = localClaimConflicts(state.loadState(), repoAbs, issues, name);
+    const ghConf = gh ? ghClaimConflicts(repoAbs, issues, myLogin) : [];
+    if (!gh) warn('gh not usable here — issue refusal is LOCAL-ONLY');
+    if (localConf.length || ghConf.length) {
+      if (!opts.force) { printRefusal(localConf, ghConf); return 1; }
+      printTakeover(localConf, ghConf);
+    }
+  }
 
   // trunk: project.yml → origin/HEAD
   let trunk = opts.trunk;
@@ -541,15 +767,23 @@ function cmdWorktreeNew(argv) {
     return { chosenPorts, claimedNums, dupes };
   });
 
-  // 4. GitHub claim (network, outside lock)
-  const gh = isGhUsable(repoAbs);
-  for (const num of [...alloc.claimedNums, ...alloc.dupes]) {
-    if (gh) {
+  // 4. GitHub claim (network, outside lock): assign/label, then comment + tie-break
+  let lostIssues = [];
+  if (gh) {
+    const claimedHere = [...alloc.claimedNums, ...alloc.dupes];
+    for (const num of claimedHere) {
       const r = git.ghIssueEdit(repoAbs, num, ['--add-assignee', '@me', '--add-label', 'in-progress']);
       if (!r.ok) warn(`gh edit #${num} failed — local claim stands`);
     }
+    lostIssues = commentAndTieBreak(repoAbs, claimedHere, { wtName: name, branch, myLogin });
+    if (lostIssues.length) {
+      warn(`Worktree "${name}" was created, but issue(s) ${lostIssues.map((n) => '#' + n).join(' ')} were lost to a`);
+      warn(`simultaneous claim and yielded. The worktree remains — reuse it for another issue, or:`);
+      warn(`  colab worktree rm ${name}`);
+    }
+  } else if (issues.length) {
+    warn('gh not usable — issue claims are LOCAL-ONLY (no comment, no tie-break)');
   }
-  if (issues.length && !gh) warn('gh not usable — issue claims are LOCAL-ONLY');
 
   // 5. optional repo hook (machine-specific steps plug in here)
   const hook = runHook(repoAbs, 'post-create', { wtPath, name, branch, ports: alloc.chosenPorts, trunk, issues });
@@ -561,8 +795,10 @@ function cmdWorktreeNew(argv) {
   print(`  branch:   ${branch}  (base origin/${trunk} @ ${baseSha})`);
   print(`  env:      ${envCopied.join(' ') || '—'}`);
   print(`  ports:    ${alloc.chosenPorts.join(', ') || '—'}`);
-  print(`  issues:   ${issues.map((n) => '#' + n).join(' ') || '—'}${gh ? '' : ' (local-only)'}`);
-  return 0;
+  const keptIssues = issues.filter((n) => !lostIssues.includes(n));
+  print(`  issues:   ${keptIssues.map((n) => '#' + n).join(' ') || '—'}${gh ? '' : ' (local-only)'}` +
+    (lostIssues.length ? `  (lost: ${lostIssues.map((n) => '#' + n).join(' ')})` : ''));
+  return lostIssues.length ? 1 : 0;
 }
 
 function cmdWorktreeRm(argv) {
@@ -599,10 +835,13 @@ function cmdWorktreeRm(argv) {
     if (!r.ok) warn(`git worktree remove reported: ${r.stderr.split('\n')[0]}`);
   }
 
-  // GitHub: release each attached issue
+  // GitHub: release each attached issue (unassign + delabel + "✅ Released" unless already CLOSED)
   const gh = isGhUsable(repoAbs);
   for (const num of attachedIssues) {
-    if (gh) git.ghIssueEdit(repoAbs, num, ['--remove-assignee', '@me', '--remove-label', 'in-progress']);
+    if (gh) {
+      git.ghIssueEdit(repoAbs, num, ['--remove-assignee', '@me', '--remove-label', 'in-progress']);
+      postReleaseComment(repoAbs, num);
+    }
   }
 
   // state: drop claims, ports, worktree

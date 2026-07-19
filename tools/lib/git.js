@@ -83,6 +83,31 @@ function ghIssueEdit(repo, issueNum, args) {
   return run('gh', ['issue', 'edit', String(issueNum), ...args], { cwd: repo });
 }
 
+/** The current gh user's login (`gh api user`), or null if it can't be determined. Cached. */
+let _ghLogin;
+function ghCurrentLogin() {
+  if (_ghLogin !== undefined) return _ghLogin;
+  const r = run('gh', ['api', 'user', '-q', '.login']);
+  _ghLogin = r.ok && r.stdout ? r.stdout : null;
+  return _ghLogin;
+}
+
+/**
+ * `gh issue view N --json <fields>` → parsed object, or null on any failure (gh missing,
+ * bad repo, network, unparseable). Callers treat null as "couldn't read" — never as "empty".
+ */
+function ghIssueView(repo, issueNum, fields) {
+  const r = run('gh', ['issue', 'view', String(issueNum), '--json', fields.join(',')], { cwd: repo });
+  if (!r.ok) return null;
+  try { return JSON.parse(r.stdout); }
+  catch (_) { return null; }
+}
+
+/** Post a comment on an issue — returns {ok, stderr}. Best-effort at the call sites. */
+function ghIssueComment(repo, issueNum, body) {
+  return run('gh', ['issue', 'comment', String(issueNum), '--body', body], { cwd: repo });
+}
+
 /**
  * Issues claimed by the current gh user in a repo = assigned to @me AND labeled in-progress
  * (that pairing is exactly what `colab claim` writes). Returns array of numbers, or null on failure.
@@ -98,4 +123,5 @@ function ghAssignedIssues(repo) {
 module.exports = {
   run, git, repoRoot, originUrl, detectTrunk, worktreeList, dirtyTracked,
   ghAvailable, ghIssueEdit, ghAssignedIssues,
+  ghCurrentLogin, ghIssueView, ghIssueComment,
 };

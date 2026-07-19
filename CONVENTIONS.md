@@ -170,8 +170,23 @@ cache and GitHub disagree, **GitHub wins**.
 ### Rules
 
 - Claim **before** you start, not when you open the PR. An unclaimed issue is fair game.
+- **Claims are enforced, not advisory.** `colab claim` and `colab worktree new` *refuse* an
+  issue that already has a live claim (local state for same-machine, GitHub for
+  cross-machine), naming the holder. `--force` takes over loudly — a takeover is always a
+  visible, logged act. Advisory warnings were tried first; measurement showed they get
+  skipped exactly when they matter.
+- **A claim carries its details as a structured Issue comment** —
+  `🔒 Claimed — worktree … · branch … · host … · <timestamp>` on claim, `✅ Released` on
+  release. The label answers *whether* an issue is taken; the comment answers *by what*,
+  from any machine, with an audit trail unlabeling could never keep.
+- **Simultaneous claims break ties deterministically.** GitHub has no atomic check-and-set,
+  so two racers can both claim within the same second. After claiming, re-read the issue:
+  the earliest live claim comment (by GitHub's own `createdAt`) wins; the loser posts
+  `✅ Released (yielded — …)` and moves on. Both racers reach the same verdict
+  independently — no coordinator needed.
 - Release the claim even if you did not finish. A stale claim is worse than no claim, because
-  it silently blocks other people.
+  it silently blocks other people. (`colab doctor --prune` frees claims whose worktrees died,
+  so stale state can never block work forever.)
 - For long-running work, comment on the Issue with progress. The Issue is the feature's
   external memory — anyone resuming should get full context from `gh issue view N` without
   re-reading the codebase.
