@@ -23,6 +23,17 @@ set -u
 # Resolve the handbook root from THIS script's location, not the caller's cwd.
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Resolve node ourselves — the caller's shell may be non-interactive with no nvm/homebrew
+# PATH loaded (a release died at exactly this: `node: command not found` after the tag
+# was already pushed). Never trust the caller's PATH for a step that runs mid-release.
+NODE="$(command -v node 2>/dev/null || true)"
+if [ -z "$NODE" ]; then
+  for c in /opt/homebrew/bin/node /usr/local/bin/node "$HOME/.nvm/versions/node"/*/bin/node; do
+    [ -x "$c" ] && NODE="$c" && break
+  done
+fi
+[ -n "$NODE" ] || { echo "release.sh: node not found (PATH, /opt/homebrew, /usr/local, ~/.nvm) — install node or run from a shell that has it" >&2; exit 1; }
+
 die() { echo "release.sh: $1" >&2; exit 1; }
 
 # ---- parse args: a version, an optional headline, and --dry (order-independent) ------------
@@ -129,10 +140,10 @@ fi
 # so this works even on a checkout where the +x bit was lost.
 NOTES_FILE="$(mktemp "${TMPDIR:-/tmp}/colab-notes.XXXXXX")" || die "mktemp failed"
 if [ "$HEADLINE_SET" -eq 1 ]; then
-  node "$ROOT/tools/colab" release-notes "$RANGE" --repo "$ROOT" --headline "$HEADLINE" > "$NOTES_FILE" \
+  "$NODE" "$ROOT/tools/colab" release-notes "$RANGE" --repo "$ROOT" --headline "$HEADLINE" > "$NOTES_FILE" \
     || die "colab release-notes failed"
 else
-  node "$ROOT/tools/colab" release-notes "$RANGE" --repo "$ROOT" > "$NOTES_FILE" \
+  "$NODE" "$ROOT/tools/colab" release-notes "$RANGE" --repo "$ROOT" > "$NOTES_FILE" \
     || die "colab release-notes failed"
 fi
 
@@ -148,7 +159,7 @@ echo "Released colab-handbook $VER."
 # already succeeded, so we report and still exit 0.
 echo ""
 echo "── Reconciliation @ $VER ──"
-node "$ROOT/audit/audit.mjs"
+"$NODE" "$ROOT/audit/audit.mjs"
 AUDIT_STATUS=$?
 echo ""
 case "$AUDIT_STATUS" in
