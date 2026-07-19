@@ -72,6 +72,37 @@ Keep the window disjoint from every repo's reserved `ports:` — the allocator
 refuses reserved ports anyway, but a disjoint window avoids churn. Parity/pairing
 schemes are not expressed here; use `--at` or a `post-create` hook.
 
+### `autonomy` — optional
+
+```yaml
+autonomy: auto-trunk     # manual (default) · auto-trunk
+```
+
+How much of a session's Phase B (merge to **trunk**) an agent may perform alone.
+
+- `manual` (or absent) — an agent stops after Phase A; a human triggers the merge.
+- `auto-trunk` — an agent may complete the trunk merge itself **through `colab ship`
+  only**, and only when every precondition passes: trunk CI alive and green, no new
+  DB migrations in the branch, no hand-code conflicts after sync-regen. Any ✗ falls
+  back to asking a human.
+
+This grants **trunk** autonomy only. Promotion `dev` → `main`, tags, and anything
+that deploys remain human acts on every repo, always — the field cannot express
+otherwise. The grant lives in the repo file (not the caller's flags) so autonomy is
+a property of the repo's risk profile, reviewed in a commit like any other change.
+
+### `generated` — optional
+
+```yaml
+generated: ["resources/js/routes/**", "schemas/lock.json"]
+```
+
+Path globs that are **regenerated, not authored** (codegen output, lockfiles).
+`colab ship` treats a sync-merge conflict confined to these as resolvable by the
+repo's `.colab/hooks/pre-ship` regen step instead of forcing a human. Extends the
+built-in default set (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
+`composer.lock`, `Cargo.lock`, `go.sum`, `dist/`, `build/`, `public/build/`, `.astro/`).
+
 ### `node`, `php` — optional toolchain pins
 
 ```yaml

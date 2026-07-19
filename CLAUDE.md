@@ -56,6 +56,15 @@ Issue updated.** Prepare a release; do not perform one. If you believe a
 release is overdue (e.g. a production bug fix is merged but unreleased), say
 so explicitly in your report — that situation has bitten us in payroll.
 
+**One graduated exception — the trunk merge itself.** If the repo's
+`project.yml` says `autonomy: auto-trunk`, you may complete Phase B through
+**`colab ship` and no other path** — it checks the preconditions (CI alive and
+green, no new migrations, no hand-code conflicts) and refuses when any fail;
+a refusal means a human finishes, not that you improvise around it. Raw
+`git push` to the trunk is blocked by hook regardless. This exception never
+extends to promotion, tags, or anything that deploys — those are human on
+every repo, with no field that can say otherwise.
+
 ## Worktrees — optional
 
 Claiming and branching work fine without a worktree. If the machine has the

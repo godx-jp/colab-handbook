@@ -276,6 +276,7 @@ Run `colab <cmd> --help` for full detail.
 | `worktree new <branch> [--issues N,M] [--ports N] [--name X] [--trunk T] [--repo P]` | create a worktree (optional) |
 | `worktree rm <name> [--force] [--repo P]` | remove a worktree; release its group; free its ports |
 | `worktrees [--json]` | list worktrees (with on-disk liveness) |
+| `ship [--worktree N \| --branch B] [--message M] [--keep-worktree] [--dry]` | code-wrap **Phase B**: squash-merge a session branch → trunk. Gated by repo autonomy (see *Phase B autonomy ladder*) |
 | `doctor [--prune] [--ttl H] [--json]` | heal dead worktrees / orphan + stale claims / orphan ports |
 | `release-notes [<range>] [--repo P] [--out F] [--headline "..."]` | grouped Markdown release summary from git history (see below) |
 | `template [<name>] [--dest F] [--repo P] [--force]` | copy a handbook workflow template into a repo, **stamped** with the handbook version (see below) |
@@ -354,12 +355,80 @@ It guards (version shape, tag not already present, clean tracked tree, on `main`
 under a `── Reconciliation @ vX.Y.Z ──` banner. Audit findings are advisory — the release still
 succeeds and the script exits 0 when the release steps themselves succeeded.
 
+## Phase B autonomy ladder (`colab ship` + `pre-push-guard`)
+
+`colab ship` is the **one sanctioned door** for code-wrap **Phase B** — squash-merging a finished
+session branch into the repo's trunk. It exists so an agent can close the loop *only where a human
+has granted it*, and so a rogue agent can never raw-push trunk.
+
+### Autonomy is granted by the repo, not the caller
+
+The repo's `.github/project.yml` carries an `autonomy:` field:
+
+```yaml
+autonomy: auto-trunk   # colab ship may squash-merge session branches into trunk
+# autonomy: manual     # (or absent) — ship refuses; a human runs Phase B
+```
+
+`auto-trunk` is the *only* value that enables `ship`. Anything else (or absent) → ship refuses. This
+gate has **no override** — `--force` does not exist on `ship`. Autonomy is a property of the repo a
+human configured, never a flag the caller can pass. `ship` **never** touches `main` when `trunk ≠
+main`, **never** tags, and **never** promotes — those remain human/`scripts/release.sh` territory.
+
+### The gated sequence
+
+Each step is checked; any failure aborts **before the push**, so trunk is never left half-shipped:
+
+| step | what | abort condition |
+|---|---|---|
+| a. autonomy | repo grants `auto-trunk` | not granted → refuse (no override) |
+| b. preconditions | reported as a ✓/✗ table | any ✗ → abort |
+| | · trunk CI alive **and** green (`gh run list --branch <trunk> -L 1`) | not `completed`+`success` (billing fail-to-start counts as ✗) |
+| | · **no new migration files** on the branch (`database/migrations/`, `prisma/migrations/`) | any present → human must run Phase B (no override) |
+| | · trunk checkout is on trunk and clean | wrong branch / dirty tracked tree |
+| c. B0 sync | merge trunk **into** the branch | conflict in a **non-generated** file → abort (hand-merge); generated-only conflict → the repo's `.colab/hooks/pre-ship` regenerates, else abort |
+| d. B1 squash | re-verify CI green, then squash-merge branch → trunk | CI no longer green / squash fails |
+| e. B2 push | push trunk with `COLAB_SHIP=1` in the env | push rejected (commit stays local, unpushed) |
+| f. B3 teardown | `colab worktree rm` (releases claims + ports + `✅` comments) unless `--keep-worktree` | — |
+| g/h. B4 + summary | verify each issue auto-closed; post `🚢 Shipped to <trunk> by colab ship — <sha>` | non-closing issues are reported, not fatal |
+
+The squash commit message is `--message` (or `"<type>: <branch slug>"`) with a
+`— Closes #N, #M, …` trailer built from **every** issue the branch claims in `state.json` (a group
+branch closes all its siblings). A **generated** file is one matching `package-lock.json`,
+`pnpm-lock.yaml`, `yarn.lock`, `composer.lock`, `Cargo.lock`, `go.sum`, `dist/`, `build/`,
+`public/build/`, `.astro/`, **plus** the repo's `.github/project.yml` `generated: [...]` globs.
+
+`--dry` prints the plan + the precondition table and changes nothing (exit 0 if READY, 1 if not).
+
+### `pre-push-guard` — trunk is push-protected locally
+
+`templates/pre-push-guard` is a POSIX-sh git `pre-push` hook that **refuses a raw push to the
+repo's trunk** (read from `.github/project.yml`) unless `COLAB_SHIP=1` (set by `colab ship`) or
+`COLAB_HUMAN=1` (a human/main-loop's deliberate manual push) is in the env. Non-trunk pushes always
+pass; a missing `project.yml` degrades to *allow* with a warning (never blocks work). Install
+copy-and-own, per repo:
+
+```sh
+cp templates/pre-push-guard .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+# or into a shared hooks dir:
+cp templates/pre-push-guard "$(git config core.hooksPath)/pre-push"
+```
+
+Together they form the ladder: an agent may `ship` **only** where the repo granted `auto-trunk`,
+and even a mis-behaving agent can't get around it with a bare `git push trunk` — the guard blocks
+that path.
+
 ## Safety
 
 - **Claims are enforced.** `claim` / `worktree new --issues` refuse (exit 1) an issue already held
   by another worktree (local) or another GitHub user (`in-progress` + assigned to someone else),
   naming the holder; `--force` takes over visibly. A simultaneous-claim race is settled
   deterministically by the tie-break, and the loser auto-yields. See *Claim lifecycle* above.
+- **Phase B is gated + push-protected.** `colab ship` merges to trunk only where the repo's
+  `project.yml` grants `autonomy: auto-trunk` (no flag override), and aborts before any push if CI
+  isn't green, the branch adds migrations, or a non-generated merge conflict appears. The
+  `pre-push-guard` hook blocks raw pushes to trunk without `COLAB_SHIP=1`/`COLAB_HUMAN=1`. See
+  *Phase B autonomy ladder* above.
 - `worktree rm` refuses if the worktree has uncommitted **tracked** changes, unless `--force`.
   (Untracked files like a copied `.env` are expected and don't block.)
 - `claims --sync` is **add-only by default**: it adds claims for issues GitHub shows as assigned +

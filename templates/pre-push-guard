@@ -1,0 +1,35 @@
+#!/bin/sh
+# pre-push-guard — refuse a raw `git push` to this repo's TRUNK unless a sanctioned path set it.
+# colab ship exports COLAB_SHIP=1; a human/main-loop may export COLAB_HUMAN=1 for a deliberate
+# manual push. Non-trunk pushes always pass. Trunk is read from .github/project.yml; if that file
+# is missing the guard degrades to ALLOW (with a warning) rather than block work.
+#
+# Install (copy-and-own, per repo):
+#   cp templates/pre-push-guard .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+#   # or, if you use a shared hooks dir:  cp templates/pre-push-guard "$(git config core.hooksPath)/pre-push"
+set -eu
+
+root=$(git rev-parse --show-toplevel 2>/dev/null || echo .)
+pj="$root/.github/project.yml"
+if [ ! -f "$pj" ]; then
+  echo "pre-push-guard: no .github/project.yml — allowing push (cannot determine trunk)." >&2
+  exit 0
+fi
+
+trunk=$(sed -n 's/^trunk:[[:space:]]*//p' "$pj" | head -1 | tr -d "\"'" | awk '{print $1}')
+[ -z "$trunk" ] && exit 0
+
+# Are any of the refs being pushed the trunk branch? (stdin: <localref> <localsha> <remoteref> <remotesha>)
+pushing_trunk=0
+while read -r _localref _localsha remoteref _remotesha; do
+  [ "${remoteref:-}" = "refs/heads/$trunk" ] && pushing_trunk=1
+done
+[ "$pushing_trunk" -eq 0 ] && exit 0
+
+if [ "${COLAB_SHIP:-}" = "1" ] || [ "${COLAB_HUMAN:-}" = "1" ]; then
+  exit 0
+fi
+
+echo "pre-push-guard: refusing raw push to trunk '$trunk'." >&2
+echo "  Use 'colab ship' for Phase B, or export COLAB_HUMAN=1 for a sanctioned manual push." >&2
+exit 1

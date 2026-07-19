@@ -109,6 +109,20 @@ function ghIssueComment(repo, issueNum, body) {
 }
 
 /**
+ * Latest CI run for a branch: { status, conclusion } (e.g. {status:'completed', conclusion:'success'}),
+ * or null if gh fails. An empty history returns {status:'none', conclusion:null} — treated as NOT green
+ * by the caller, which is also how a billing-style fail-to-start (no run created) reads.
+ */
+function ghRunLatest(repo, branch) {
+  const r = run('gh', ['run', 'list', '--branch', branch, '-L', '1', '--json', 'status,conclusion'], { cwd: repo });
+  if (!r.ok) return null;
+  try {
+    const arr = JSON.parse(r.stdout);
+    return arr[0] || { status: 'none', conclusion: null };
+  } catch (_) { return null; }
+}
+
+/**
  * Issues claimed by the current gh user in a repo = assigned to @me AND labeled in-progress
  * (that pairing is exactly what `colab claim` writes). Returns array of numbers, or null on failure.
  */
@@ -123,5 +137,5 @@ function ghAssignedIssues(repo) {
 module.exports = {
   run, git, repoRoot, originUrl, detectTrunk, worktreeList, dirtyTracked,
   ghAvailable, ghIssueEdit, ghAssignedIssues,
-  ghCurrentLogin, ghIssueView, ghIssueComment,
+  ghCurrentLogin, ghIssueView, ghIssueComment, ghRunLatest,
 };

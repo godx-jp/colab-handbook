@@ -8,6 +8,7 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
@@ -1491,6 +1492,280 @@ function cmdTemplate(argv) {
 }
 
 // ---------------------------------------------------------------------------
+// ship — the ONE sanctioned door for code-wrap Phase B (session branch → TRUNK).
+//
+// Autonomy is granted by the REPO (project.yml `autonomy: auto-trunk`), never by the caller: a
+// human decides which repos an agent may auto-merge, and --force cannot override that. ship never
+// touches main (when trunk != main), never tags, never promotes — those stay human. Every step is
+// gated; any failure aborts cleanly BEFORE the push, so trunk is never left half-shipped.
+// ---------------------------------------------------------------------------
+
+// Files that are regenerated, not authored — a merge conflict here is resolvable by re-running the
+// repo's codegen, so it doesn't force a human. Repos extend this via project.yml `generated: [...]`.
+const DEFAULT_GENERATED = [
+  'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'composer.lock', 'Cargo.lock', 'go.sum',
+  'dist/', 'build/', 'public/build/', '.astro/',
+];
+
+function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+/** Does a path look generated per the pattern list? `foo/` = prefix, `*` = wildcard, else exact/basename. */
+function isGeneratedPath(file, patterns) {
+  const base = file.split('/').pop();
+  for (const pat of patterns) {
+    if (pat.endsWith('/')) { if (file === pat.slice(0, -1) || file.startsWith(pat) || file.includes('/' + pat)) return true; }
+    else if (pat.includes('*')) {
+      const re = new RegExp('^' + pat.split('*').map(escapeRe).join('.*') + '$');
+      if (re.test(file) || re.test(base)) return true;
+    } else if (file === pat || base === pat) return true;
+  }
+  return false;
+}
+
+/** Parsed .github/project.yml doc, or {} if absent/unparseable. */
+function projectDoc(repoAbs) {
+  try { return require('./lib/yaml').parse(fs.readFileSync(path.join(repoAbs, '.github', 'project.yml'), 'utf8')) || {}; }
+  catch (_) { return {}; }
+}
+
+/** Trunk for a repo: project.yml `trunk:` → origin/HEAD. */
+function resolveTrunk(repoAbs, doc) {
+  if (doc && doc.trunk) return String(doc.trunk);
+  return git.detectTrunk(repoAbs);
+}
+
+/** New migration files introduced on <branch> vs <trunk> (Laravel + Prisma layouts). */
+function newMigrations(mainRoot, trunk, branch) {
+  const r = git.git(['diff', '--name-only', `${trunk}...${branch}`], mainRoot);
+  if (!r.ok) return [];
+  return r.stdout.split('\n').filter(Boolean)
+    .filter((f) => /(^|\/)database\/migrations\//.test(f) || /(^|\/)prisma\/migrations\//.test(f));
+}
+
+const HELP_SHIP = `colab ship [--repo <path>] [--worktree <name> | --branch <br>] [--message "<msg>"] [--keep-worktree] [--dry]
+
+The ONE sanctioned door for code-wrap Phase B: squash-merge a session branch into TRUNK. Autonomy is
+granted by the repo's .github/project.yml (\`autonomy: auto-trunk\`) — NOT by any flag. Without that
+grant, ship refuses and a human must run Phase B. ship NEVER touches main (when trunk≠main), NEVER
+tags, NEVER promotes.
+
+Sequence (each step gated; any failure aborts before the push — trunk is never half-shipped):
+  a. autonomy gate      repo must grant auto-trunk (no --force override)
+  b. preconditions      trunk CI alive+green · no new migrations on branch · trunk checkout clean
+  c. B0 sync            merge trunk INTO the branch; non-generated conflict → abort (human merge);
+                        generated-only conflict → repo's .colab/hooks/pre-ship regenerates, else abort
+  d. B1 squash          re-check CI green, then squash-merge branch → trunk (Closes every claimed issue)
+  e. B2 push            push trunk (COLAB_SHIP=1 in env so a pre-push-guard lets it through)
+  f. B3 teardown        colab worktree rm (releases claims + ports + ✅ comments) unless --keep-worktree
+  g. B4 verify + h.     confirm each issue auto-closed; post "🚢 Shipped to <trunk>" per issue
+
+Options:
+  --repo <path>       repo root (default: git root of cwd)
+  --worktree <name>   the session worktree to ship (its branch + claims are used)
+  --branch <br>       ship by branch name (its worktree, if any, is found in state)
+  --message "<msg>"   subject for the squash commit (Closes trailer is always appended)
+  --keep-worktree     do not remove the worktree after shipping
+  --dry               print the plan + precondition table and change NOTHING
+`;
+
+/** Resolve the session (branch, worktree name/path, claimed issue numbers) from --worktree/--branch. */
+function resolveShipSession(st, repoAbs, opts) {
+  let name = null, branch = null, wtPath = null;
+  if (opts.worktree) {
+    const wt = st.worktrees[opts.worktree];
+    if (!wt) throw new UserError(`No worktree "${opts.worktree}" in state`);
+    name = wt.name; branch = wt.branch; wtPath = wt.path;
+  } else if (opts.branch) {
+    branch = opts.branch;
+    const wt = Object.values(st.worktrees).find((w) => w.repo === repoAbs && w.branch === branch);
+    if (wt) { name = wt.name; wtPath = wt.path; }
+  } else {
+    throw new UserError('ship needs --worktree <name> or --branch <br>');
+  }
+  // Claimed issues for this session: by worktree if we have one, else by branch.
+  const issues = Object.values(st.claims)
+    .filter((c) => c.repo === repoAbs && (name ? c.worktree === name : c.branch === branch))
+    .map((c) => normIssueNum(c.issue))
+    .sort((a, b) => a - b);
+  return { name, branch, wtPath, issues };
+}
+
+function cmdShip(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--repo': 'repo', '--worktree': 'worktree', '--branch': 'branch', '--message': 'message' },
+    flags: { '--keep-worktree': 'keepWorktree', '--dry': 'dry', '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help) return print(HELP_SHIP);
+  const repoAbs = resolveRepo(opts);
+  if (!git.repoRoot(repoAbs)) throw new UserError(`${repoAbs} is not a git repo`);
+  const doc = projectDoc(repoAbs);
+  const st = state.loadState();
+  const sess = resolveShipSession(st, repoAbs, opts);
+  const trunk = resolveTrunk(repoAbs, doc);
+  if (!trunk) throw new UserError('Could not determine trunk branch (set project.yml trunk:)');
+  if (sess.branch === trunk) throw new UserError(`Refusing: --branch is the trunk itself (${trunk}) — nothing to ship`);
+
+  // ---- (a) AUTONOMY GATE — granted by the repo file, never by the caller ----
+  const autonomy = doc.autonomy ? String(doc.autonomy) : 'manual';
+  if (autonomy !== 'auto-trunk') {
+    process.stderr.write(`✗ ${shortRepo(repoAbs)} does not grant auto-trunk (project.yml autonomy: ${doc.autonomy ? autonomy : 'absent'}).\n`);
+    process.stderr.write('  A human must trigger Phase B. (Autonomy is granted by the repo, not by a flag — --force cannot override.)\n');
+    return 1;
+  }
+
+  // ---- (b) PRECONDITIONS (report each ✓/✗) ----
+  const gh = isGhUsable(repoAbs);
+  const checks = [];
+  // CI alive + green on trunk
+  let ciOk = false;
+  if (!gh) { checks.push(['✗', 'trunk CI green', 'gh not usable (no auth / no origin) — cannot confirm CI']); }
+  else {
+    const run = git.ghRunLatest(repoAbs, trunk);
+    if (!run) checks.push(['✗', 'trunk CI green', 'gh run list failed']);
+    else if (run.status === 'completed' && run.conclusion === 'success') { ciOk = true; checks.push(['✓', 'trunk CI green', `latest run success`]); }
+    else checks.push(['✗', 'trunk CI green', `latest run status=${run.status} conclusion=${run.conclusion || 'none'} (fail-to-start counts as not green)`]);
+  }
+  // No new migrations on the branch
+  const migrations = newMigrations(repoAbs, trunk, sess.branch);
+  const migOk = migrations.length === 0;
+  checks.push([migOk ? '✓' : '✗', 'no new migrations', migOk ? 'none vs trunk' : `${migrations.length} present — human must run Phase B: ${migrations.join(', ')}`]);
+  // Trunk checkout clean + actually on trunk
+  const headBranch = git.git(['rev-parse', '--abbrev-ref', 'HEAD'], repoAbs).stdout;
+  const onTrunk = headBranch === trunk;
+  const dirty = git.dirtyTracked(repoAbs);
+  const treeOk = onTrunk && !dirty;
+  checks.push([treeOk ? '✓' : '✗', 'trunk checkout ready',
+    !onTrunk ? `main checkout is on "${headBranch}", not "${trunk}"` : (dirty ? 'tracked changes uncommitted in trunk checkout' : `on ${trunk}, clean`)]);
+
+  const preOk = ciOk && migOk && treeOk;
+
+  // ---- report the table ----
+  print(`ship ${shortRepo(repoAbs)} · branch ${sess.branch} → ${trunk}` + (opts.dry ? '  [DRY RUN]' : ''));
+  print(`  issues: ${sess.issues.map((n) => '#' + n).join(' ') || '(none claimed)'}` + (sess.name ? ` · worktree ${sess.name}` : ''));
+  print('');
+  print(table(checks.map((c) => [c[0], c[1], c[2]]), ['', 'PRECONDITION', 'DETAIL']));
+  print('');
+
+  if (opts.dry) {
+    print(preOk ? '→ READY: preconditions pass. Re-run without --dry to ship.' : '→ NOT READY: fix the ✗ rows above.');
+    print('  Plan: B0 sync trunk→branch · B1 squash-merge → ' + trunk + ' · B2 push · B3 ' +
+      (opts.keepWorktree ? 'keep worktree' : 'worktree rm') + ' · B4 verify closed · post 🚢 summary');
+    return preOk ? 0 : 1;
+  }
+  if (!preOk) { process.stderr.write('✗ Aborting: one or more preconditions failed (see ✗ above). Nothing was pushed.\n'); return 1; }
+
+  // ---- (c) B0: merge trunk INTO the branch (in the worktree, or an ephemeral one) ----
+  const generated = [...DEFAULT_GENERATED, ...(Array.isArray(doc.generated) ? doc.generated.map(String) : [])];
+  const hasPreShip = fs.existsSync(path.join(repoAbs, '.colab', 'hooks', 'pre-ship'));
+  let branchDir = sess.wtPath && fs.existsSync(sess.wtPath) ? sess.wtPath : null;
+  let ephemeral = false;
+  if (!branchDir) {
+    branchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'colab-ship-'));
+    const add = git.git(['worktree', 'add', branchDir, sess.branch], repoAbs);
+    if (!add.ok) { try { fs.rmdirSync(branchDir); } catch (_) {} throw new UserError(`could not check out ${sess.branch} for B0: ${add.stderr.split('\n')[0]}`); }
+    ephemeral = true;
+  }
+  const cleanupEphemeral = () => { if (ephemeral) git.git(['worktree', 'remove', '--force', branchDir], repoAbs); };
+
+  print('B0: syncing trunk into the branch …');
+  git.git(['fetch', 'origin', trunk], branchDir);
+  let mergeRef = `origin/${trunk}`;
+  if (!git.git(['rev-parse', '--verify', '--quiet', mergeRef], branchDir).ok) mergeRef = trunk;
+  const merge = git.git(['merge', '--no-edit', mergeRef], branchDir);
+  if (!merge.ok) {
+    const uf = git.git(['diff', '--name-only', '--diff-filter=U'], branchDir).stdout.split('\n').filter(Boolean);
+    const nonGen = uf.filter((f) => !isGeneratedPath(f, generated));
+    if (nonGen.length) {
+      git.git(['merge', '--abort'], branchDir); cleanupEphemeral();
+      process.stderr.write(`✗ B0: merge conflicts in NON-generated files — hand-merge needed, human Phase B:\n  ${nonGen.join('\n  ')}\n`);
+      return 1;
+    }
+    if (hasPreShip) {
+      const hk = runHook(repoAbs, 'pre-ship', { wtPath: branchDir, name: sess.name || sess.branch, branch: sess.branch, ports: [], trunk, issues: sess.issues });
+      const committed = hk.ran && hk.ok && git.git(['commit', '--no-edit'], branchDir).ok;
+      if (!committed) {
+        git.git(['merge', '--abort'], branchDir); cleanupEphemeral();
+        process.stderr.write('✗ B0: generated-file conflicts and pre-ship hook could not resolve them. Nothing pushed.\n');
+        return 1;
+      }
+      print(`  generated-file conflicts resolved by .colab/hooks/pre-ship (${uf.join(', ')})`);
+    } else {
+      git.git(['merge', '--abort'], branchDir); cleanupEphemeral();
+      process.stderr.write(`✗ B0: generated-file conflicts and no .colab/hooks/pre-ship to regenerate:\n  ${uf.join('\n  ')}\n`);
+      return 1;
+    }
+  } else {
+    print('  branch is in sync with trunk.');
+  }
+
+  // ---- (d) B1: re-verify CI, then squash-merge into trunk ----
+  if (gh) {
+    const run2 = git.ghRunLatest(repoAbs, trunk);
+    if (!(run2 && run2.status === 'completed' && run2.conclusion === 'success')) {
+      cleanupEphemeral();
+      process.stderr.write('✗ B1: trunk CI is no longer green — aborting before merge. Nothing pushed.\n');
+      return 1;
+    }
+  }
+  const type = sess.branch.includes('/') ? sess.branch.slice(0, sess.branch.indexOf('/')) : 'chore';
+  const slug = sess.branch.includes('/') ? sess.branch.slice(sess.branch.indexOf('/') + 1) : sess.branch;
+  const subject = opts.message || `${type}: ${slug.replace(/-\d+(?:-\d+)*$/, '').replace(/-/g, ' ')}`;
+  const closes = sess.issues.length ? ` — ${sess.issues.map((n) => 'Closes #' + n).join(', ')}` : '';
+  const commitMsg = `${subject}${closes}`;
+
+  print(`B1: squash-merging ${sess.branch} → ${trunk} …`);
+  const sq = git.git(['merge', '--squash', sess.branch], repoAbs);
+  if (!sq.ok) {
+    git.git(['merge', '--abort'], repoAbs); cleanupEphemeral();
+    process.stderr.write(`✗ B1: squash-merge failed: ${sq.stderr.split('\n')[0]}. Nothing pushed.\n`);
+    return 1;
+  }
+  const commit = git.run('git', ['commit', '-m', commitMsg], { cwd: repoAbs });
+  if (!commit.ok) {
+    git.git(['reset', '--hard', `origin/${trunk}`], repoAbs); cleanupEphemeral();
+    // if there was genuinely nothing to commit, say so plainly
+    process.stderr.write(`✗ B1: commit failed (${commit.stderr.split('\n')[0] || 'nothing to commit?'}). Trunk reset, nothing pushed.\n`);
+    return 1;
+  }
+  const sha = git.git(['rev-parse', '--short', 'HEAD'], repoAbs).stdout;
+  print(`  committed ${sha}: ${commitMsg}`);
+
+  // ---- (e) B2: push trunk with COLAB_SHIP=1 (the sanctioned-path signal for pre-push-guard) ----
+  print(`B2: pushing ${trunk} …`);
+  const push = git.run('git', ['push', 'origin', trunk], { cwd: repoAbs, env: { ...process.env, COLAB_SHIP: '1' } });
+  if (!push.ok) {
+    process.stderr.write(`✗ B2: push failed: ${push.stderr.split('\n')[0]}. Trunk committed locally at ${sha} but NOT pushed — resolve and push by hand (COLAB_HUMAN=1).\n`);
+    cleanupEphemeral();
+    return 1;
+  }
+  print('  pushed.');
+  cleanupEphemeral();
+
+  // ---- (f) B3: teardown the worktree (releases claims + ports + ✅ comments) ----
+  if (sess.name && !opts.keepWorktree) {
+    print(`B3: removing worktree ${sess.name} …`);
+    try { cmdWorktreeRm([sess.name, '--repo', repoAbs, '--force']); }
+    catch (e) { warn(`worktree rm reported: ${e.message}`); }
+  } else if (sess.name) {
+    print(`B3: keeping worktree ${sess.name} (--keep-worktree)`);
+  }
+
+  // ---- (g/h) B4 verify auto-close + post 🚢 summary per issue ----
+  if (gh) {
+    for (const num of sess.issues) {
+      const info = git.ghIssueView(repoAbs, num, ['state']);
+      if (info && info.state !== 'CLOSED') warn(`#${num} did not auto-close (state=${info.state}) — the Closes trailer needs a push to the DEFAULT branch; close it by hand if trunk isn't default`);
+      const r = git.ghIssueComment(repoAbs, num, `🚢 Shipped to ${trunk} by colab ship — ${sha}`);
+      if (!r.ok) warn(`could not post ship comment on #${num}`);
+    }
+  }
+
+  print('');
+  print(`✓ Shipped ${sess.branch} → ${trunk} @ ${sha}${sess.issues.length ? ' (' + sess.issues.map((n) => '#' + n).join(' ') + ')' : ''}`);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // dispatch
 // ---------------------------------------------------------------------------
 
@@ -1514,6 +1789,7 @@ Commands:
   worktree rm <name> [--force] [--repo P]
   worktrees [--json]
 
+  ship [--worktree N | --branch B] [--message M] [--keep-worktree] [--dry]   code-wrap Phase B → trunk
   doctor [--prune] [--ttl H] [--json]   heal dead worktrees / orphan + stale claims / orphan ports
   release-notes [<range>] [--repo P] [--out F] [--headline "..."]   grouped Markdown release summary
   template [<name>] [--dest F] [--repo P] [--force]   copy a handbook workflow template, stamped
@@ -1538,6 +1814,7 @@ function main(argv) {
     case 'ports': return cmdPorts(rest);
     case 'worktree': return cmdWorktree(rest);
     case 'worktrees': return cmdWorktrees(rest);
+    case 'ship': return cmdShip(rest);
     case 'doctor': return cmdDoctor(rest);
     case 'release-notes': return cmdReleaseNotes(rest);
     case 'template': return cmdTemplate(rest);
