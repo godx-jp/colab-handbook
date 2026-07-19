@@ -64,9 +64,12 @@ jobs:
           # organization-owned repositories. The plain release binary is MIT.
           curl -sSL -o gitleaks.tar.gz \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          tar -xzf gitleaks.tar.gz gitleaks
-          chmod +x gitleaks
-          sudo mv gitleaks /usr/local/bin/gitleaks
+          # Into $RUNNER_TEMP, not /usr/local/bin: no sudo, no global write — the same
+          # step then works on BOTH GitHub-hosted and shared self-hosted runners
+          # (a shared runner is infrastructure; jobs must not mutate it).
+          tar -xzf gitleaks.tar.gz -C "$RUNNER_TEMP" gitleaks
+          chmod +x "$RUNNER_TEMP/gitleaks"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
           rm -f gitleaks.tar.gz
 
       - name: gitleaks detect
