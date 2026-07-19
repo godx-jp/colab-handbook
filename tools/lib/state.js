@@ -40,6 +40,7 @@ const STATE_VERSION = 1;
 const DEFAULT_CONFIG = {
   repos: [],              // absolute repo roots to scan for .github/project.yml `ports:`
   extraReserved: [],      // reserved ports for non-repo services (e.g. a preview server)
+  reservedFiles: [],      // machine-local files of reserved ports (lenient: whitespace ints, # comments)
   claimTTLHours: 24,      // worktree-less claims older than this are flagged by `doctor`
   portRange: '5200-5999', // default search window for `port alloc` / `worktree new`
 };

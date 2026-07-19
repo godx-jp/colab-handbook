@@ -55,6 +55,23 @@ currently down. One declaration here replaces any hand-maintained central list.
 
 Omit if the repo has no dev server (CLI tools, libraries).
 
+### `worktreePorts` — optional
+
+```yaml
+worktreePorts: [47150, 47199]
+```
+
+A two-element `[lo, hi]` range naming the window that **worktrees of this repo**
+allocate ports from. Distinct from `ports:` — those are the repo's *reserved trunk*
+ports (never handed out); `worktreePorts` is where `colab worktree new` /
+`colab port alloc` *search* for free ones when working on this repo.
+
+Precedence when allocating: explicit `--range`/`--at` flag > this field > the
+machine-global `config.portRange`. Malformed values fall through to the default.
+Keep the window disjoint from every repo's reserved `ports:` — the allocator
+refuses reserved ports anyway, but a disjoint window avoids churn. Parity/pairing
+schemes are not expressed here; use `--at` or a `post-create` hook.
+
 ### `node`, `php` — optional toolchain pins
 
 ```yaml

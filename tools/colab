@@ -491,12 +491,18 @@ dev server, declared in each repo's .github/project.yml as \`ports: [5220]\`, ag
 across all repos colab knows) are NEVER allocated to a worktree — even when that trunk
 server is currently down.
 
-  colab port alloc [--count N] [--range A-B] [--worktree <name>] [--claim <issue>] [--label <s>]
-      Allocate N (default 1) consecutive free ports. Owner is one of:
+  colab port alloc [--count N] [--range A-B | --at p1,p2,...] [--worktree <name>] [--claim <issue>] [--label <s>]
+      Allocate ports. Owner is one of:
         --worktree <name>  ports attach to that worktree entity (the normal path)
         --claim <issue>    ports attach to a standalone claim
         --label <s>        a manual label for a non-repo service
-      Default range comes from config.portRange (${state.DEFAULT_CONFIG.portRange}).
+      Allocation mode:
+        --count N          N (default 1) CONSECUTIVE free ports found within the range
+        --at p1,p2,...     pin EXACTLY these ports; refuses (exit 1) if any is reserved or already
+                           allocated. Mutually exclusive with --count/--range. Use this for exact
+                           parity (e.g. --at 47150,47151 for an even/odd pair).
+      Range resolution (for --count): --range flag > the repo's project.yml worktreePorts > the
+      global default config.portRange (${state.DEFAULT_CONFIG.portRange}).
 
   colab port free <port>            free one port by number
   colab port free --worktree <name> free all ports owned by a worktree
@@ -527,23 +533,67 @@ function cmdPort(argv) {
   return print(HELP_PORT);
 }
 
+/**
+ * Resolve the port search window for a worktree/port allocation, in precedence order:
+ *   1. an explicit --range flag
+ *   2. the repo's .github/project.yml worktreePorts: [lo, hi]  (worktrees of THIS repo)
+ *   3. the global config.portRange
+ */
+function resolveWorktreeRange(opts, config, repoAbs) {
+  if (opts.range) return opts.range;
+  if (repoAbs) {
+    const w = ports.repoWorktreePorts(repoAbs);
+    if (w) return `${w[0]}-${w[1]}`;
+  }
+  return config.portRange;
+}
+
+/** Parse `--at p1,p2,...` into a sorted, de-duplicated int array, or null if not given. */
+function parseAtPorts(opts) {
+  if (!opts.at) return null;
+  const list = String(opts.at).split(',').map((s) => {
+    const n = parseInt(s.trim(), 10);
+    if (!Number.isInteger(n) || n <= 0) throw new UserError(`Bad --at port "${s.trim()}" (expected a positive integer)`);
+    return n;
+  });
+  return [...new Set(list)].sort((a, b) => a - b);
+}
+
 function cmdPortAlloc(argv) {
   const opts = parseArgs(argv, {
-    values: { '--count': 'count', '--range': 'range', '--worktree': 'worktree', '--claim': 'claim', '--label': 'label', '--repo': 'repo' },
+    values: { '--count': 'count', '--range': 'range', '--at': 'at', '--worktree': 'worktree', '--claim': 'claim', '--label': 'label', '--repo': 'repo' },
     flags: { '-h': 'help', '--help': 'help' },
   });
   if (opts.help) return print(HELP_PORT);
+  if (opts.at && (opts.count || opts.range)) throw new UserError('--at pins exact ports — it cannot be combined with --count / --range');
   const config = state.loadConfig();
   const count = opts.count ? parseInt(opts.count, 10) : 1;
   if (!Number.isInteger(count) || count < 1) throw new UserError('--count must be a positive integer');
-  const range = opts.range || config.portRange;
-  const repoAbs = opts.repo ? resolveRepo(opts) : (git.repoRoot(process.cwd()) || null);
+  const explicitRepo = opts.repo ? resolveRepo(opts) : (git.repoRoot(process.cwd()) || null);
+  const atPorts = parseAtPorts(opts);
+
+  // For range resolution, a --worktree owner's repo wins over cwd (its project.yml window applies).
+  let repoForRange = explicitRepo;
+  if (!opts.repo && opts.worktree) {
+    const wt = state.loadState().worktrees[opts.worktree];
+    if (wt && wt.repo) repoForRange = wt.repo;
+  }
+  const range = resolveWorktreeRange(opts, config, repoForRange);
 
   const chosen = state.mutate((st) => {
     const reserved = ports.reservedSet(config, knownRepos(config));
-    const found = ports.findConsecutive(count, range, st, reserved);
-    if (!found) throw new UserError(`Could not find ${count} consecutive free port(s) in ${range}`);
-    const owner = loadOwnerRefForPortAlloc(st, opts, repoAbs);
+    let found;
+    if (atPorts) {
+      const conflicts = ports.checkExact(atPorts, st, reserved);
+      if (conflicts.length) {
+        throw new UserError(`Cannot pin ${conflicts.map((c) => `${c.port} (${c.reason})`).join(', ')} — pick free ports`);
+      }
+      found = atPorts;
+    } else {
+      found = ports.findConsecutive(count, range, st, reserved);
+      if (!found) throw new UserError(`Could not find ${count} consecutive free port(s) in ${range}`);
+    }
+    const owner = loadOwnerRefForPortAlloc(st, opts, explicitRepo);
     for (const p of found) {
       st.ports[String(p)] = { port: p, owner, host: HOST, created: nowISO() };
     }
@@ -554,7 +604,9 @@ function cmdPortAlloc(argv) {
     return { found, owner };
   });
 
-  print(`Allocated ${chosen.found.join(', ')} → ${chosen.owner.type}:${chosen.owner.ref}`);
+  // A listening port pinned via --at is allowed but worth surfacing.
+  if (atPorts) for (const p of atPorts) if (ports.isListening(p)) warn(`port ${p} is currently LISTENing — pinned anyway (--at)`);
+  print(`Allocated ${chosen.found.join(', ')} → ${chosen.owner.type}:${chosen.owner.ref}${atPorts ? ' (pinned)' : ''}`);
   return 0;
 }
 
@@ -637,7 +689,8 @@ dependency symlinking, dev-server restarts) live in OPTIONAL repo hooks, not her
       Options:
         --issues N,M,K     claim these issues onto the new worktree (alias: --issue <n>)
         --ports N          allocate N consecutive ports for the worktree
-        --range A-B        port search window (default config.portRange)
+        --at p1,p2,...     pin EXACTLY these ports (refuses if reserved/allocated); excludes --ports/--range
+        --range A-B        port search window (default: repo project.yml worktreePorts, else config.portRange)
         --name <name>      worktree dir name (default: branch after first '/')
         --trunk <name>     override trunk branch
         --repo <path>      repo root (default: git root of cwd)
@@ -688,11 +741,12 @@ function runHook(repoAbs, name, ctx) {
 
 function cmdWorktreeNew(argv) {
   const opts = parseArgs(argv, {
-    values: { '--issues': 'issues', '--ports': 'ports', '--range': 'range', '--name': 'name', '--trunk': 'trunk', '--repo': 'repo' },
+    values: { '--issues': 'issues', '--ports': 'ports', '--range': 'range', '--at': 'at', '--name': 'name', '--trunk': 'trunk', '--repo': 'repo' },
     aliases: { '--issue': '--issues' },
     flags: { '--force': 'force', '-h': 'help', '--help': 'help' },
   });
   if (opts.help || opts._.length === 0) return print(HELP_WORKTREE);
+  if (opts.at && (opts.ports || opts.range)) throw new UserError('--at pins exact ports — it cannot be combined with --ports / --range');
   const config = state.loadConfig();
   const repoAbs = resolveRepo(opts);
   if (!git.repoRoot(repoAbs)) throw new UserError(`${repoAbs} is not a git repo`);
@@ -701,7 +755,8 @@ function cmdWorktreeNew(argv) {
   const name = opts.name || (branch.includes('/') ? branch.slice(branch.indexOf('/') + 1) : branch);
   const issues = opts.issues ? String(opts.issues).split(',').map(normIssueNum) : [];
   const portCount = opts.ports ? parseInt(opts.ports, 10) : 0;
-  const range = opts.range || config.portRange;
+  const atPorts = parseAtPorts(opts);
+  const range = resolveWorktreeRange(opts, config, repoAbs); // --range > repo worktreePorts > default
   const gh = isGhUsable(repoAbs);
   const myLogin = gh ? git.ghCurrentLogin() : null;
 
@@ -749,7 +804,14 @@ function cmdWorktreeNew(argv) {
   // 3. allocate ports + record worktree + claims (atomic)
   const alloc = state.mutate((st) => {
     let chosenPorts = [];
-    if (portCount > 0) {
+    if (atPorts) {
+      const reserved = ports.reservedSet(config, [repoAbs, ...knownRepos(config)]);
+      const conflicts = ports.checkExact(atPorts, st, reserved);
+      if (conflicts.length) {
+        throw new UserError(`Cannot pin ${conflicts.map((c) => `${c.port} (${c.reason})`).join(', ')} — pick free ports`);
+      }
+      chosenPorts = atPorts;
+    } else if (portCount > 0) {
       const reserved = ports.reservedSet(config, [repoAbs, ...knownRepos(config)]);
       const found = ports.findConsecutive(portCount, range, st, reserved);
       if (!found) throw new UserError(`Could not find ${portCount} consecutive free ports in ${range}`);
@@ -1258,12 +1320,15 @@ function registerList() {
 // config (show / manage the aggregation inputs)
 // ---------------------------------------------------------------------------
 
-const HELP_CONFIG = `colab config [show|add-repo <path>|rm-repo <path>|set <key> <value>]
+const HELP_CONFIG = `colab config [show|add-repo <path>|rm-repo <path>|add-reserved-file <path>|rm-reserved-file <path>|set <key> <value>]
 
-  show                 print resolved config, file paths, and the aggregated reserved set
-  add-repo <path>      add a repo root to scan for .github/project.yml reserved ports
-  rm-repo <path>       remove a repo root
-  set <key> <value>    set claimTTLHours | portRange | worktreeSubdir
+  show                       print resolved config, file paths, and the aggregated reserved set
+  add-repo <path>            add a repo root to scan for .github/project.yml reserved ports
+  rm-repo <path>             remove a repo root
+  add-reserved-file <path>   add a machine-local reserved-ports file (~ is expanded); its ports join
+                             the reserved set (lenient parse: whitespace ints per line, # comments)
+  rm-reserved-file <path>    remove a reserved-ports file
+  set <key> <value>          set claimTTLHours | portRange | worktreeSubdir
 `;
 
 function cmdConfig(argv) {
@@ -1287,6 +1352,22 @@ function cmdConfig(argv) {
     const p = path.resolve(argv[1] || '');
     cfg.repos = cfg.repos.filter((r) => r !== p);
     state.saveConfig(cfg); print(`repos: ${cfg.repos.join(', ') || '(none)'}`); return 0;
+  }
+  if (sub === 'add-reserved-file') {
+    if (!argv[1]) throw new UserError('add-reserved-file needs a path');
+    cfg.reservedFiles = cfg.reservedFiles || [];
+    // Keep the path as written (may contain ~); expansion happens at read time.
+    if (!cfg.reservedFiles.includes(argv[1])) cfg.reservedFiles.push(argv[1]);
+    state.saveConfig(cfg);
+    const found = ports.parseReservedFile(argv[1]);
+    print(`reservedFiles: ${cfg.reservedFiles.join(', ')}`);
+    print(`  ${argv[1]} → ${found.length} port(s) parsed`);
+    return 0;
+  }
+  if (sub === 'rm-reserved-file') {
+    if (!argv[1]) throw new UserError('rm-reserved-file needs a path');
+    cfg.reservedFiles = (cfg.reservedFiles || []).filter((f) => f !== argv[1]);
+    state.saveConfig(cfg); print(`reservedFiles: ${cfg.reservedFiles.join(', ') || '(none)'}`); return 0;
   }
   if (sub === 'set') {
     const [k, v] = [argv[1], argv[2]];

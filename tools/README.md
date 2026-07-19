@@ -148,6 +148,7 @@ concurrent sessions don't lose writes.
 {
   "repos": ["/abs/path/repoA", "/abs/path/repoB"],
   "extraReserved": [8765],
+  "reservedFiles": ["~/Future/.claude/ports.reserved"],
   "claimTTLHours": 24,
   "portRange": "5200-5999",
   "worktreeSubdir": ".worktrees"
@@ -158,6 +159,7 @@ concurrent sessions don't lose writes.
 |---|---|
 | `repos` | repo roots to scan for reserved ports (`.github/project.yml` → `ports:`). The current repo is always included automatically. |
 | `extraReserved` | reserved ports for **non-repo** services (a preview server, etc.). |
+| `reservedFiles` | machine-local files of reserved ports to aggregate — for ports of repos **not** registered with colab (e.g. a pre-handbook global `ports.reserved`). Each file is parsed leniently: whitespace-separated port numbers per line, `#` starts a comment, non-numeric tokens ignored. `~` is expanded. Manage with `colab config add-reserved-file <path>` / `rm-reserved-file <path>`. |
 | `claimTTLHours` | `doctor` flags worktree-less claims older than this (default 24). |
 | `portRange` | default search window for `port alloc` / `worktree new` (default `5200-5999`). |
 | `worktreeSubdir` | where worktrees are created inside a repo (default `.worktrees` — gitignore it). |
@@ -200,12 +202,35 @@ sync. Instead, **each repo declares its own** reserved ports in `.github/project
 
 ```yaml
 trunk: main
-ports: [5220]          # this project's trunk dev server port(s)
+ports: [5220]                 # this project's trunk dev server port(s) — never allocated
+worktreePorts: [47150, 47199] # OPTIONAL: window this repo's worktrees allocate from
 ```
 
 `colab` aggregates the reserved set across every repo it knows (`config.repos` + the current repo)
-plus `config.extraReserved`. One source of truth per project, no central duplication. See it with
-`colab ports` or `colab config show`.
+plus `config.extraReserved` **plus every `config.reservedFiles` entry**. One source of truth per
+project, no central duplication. See it with `colab ports` or `colab config show`.
+
+### Worktree port window (`worktreePorts`)
+
+`ports:` is a repo's **reserved trunk** ports. `worktreePorts: [lo, hi]` is the separate, optional
+window that **worktrees of this repo** allocate from. When allocating for a worktree of repo *R*,
+the search range resolves in precedence order:
+
+1. an explicit `--range A-B` (or `--at`) flag,
+2. *R*'s `.github/project.yml` `worktreePorts`,
+3. the global `config.portRange`.
+
+So a repo can keep its worktree servers in a dedicated band (e.g. `47150–47199`) without touching
+the global default. Pairing (even/odd, etc.) is **not** built into the CLI — it's too repo-specific;
+use `--at` for exact ports (below) or let the repo's `post-create` hook adjust.
+
+### Exact port pinning (`--at`)
+
+`colab port alloc --at p1,p2,...` and `colab worktree new --at p1,p2,...` pin **exactly** those
+ports instead of first-fit within a range. Any port that is reserved or already allocated is
+**refused (exit 1)** — the same refusal semantics as reserved ports. `--at` is mutually exclusive
+with `--count`/`--range`/`--ports`. It's the way to get a specific parity, e.g. an even base for a
+pair: `--at 47150,47151`.
 
 ## Worktree hooks contract
 
@@ -245,7 +270,7 @@ Run `colab <cmd> --help` for full detail.
 | `claim <issue>... [--worktree N] [--branch B] [--force] [--repo P]` | claim one or many issues (atomic; onto one worktree). **Enforced** — see *Claim lifecycle* below |
 | `release <issue> [--repo P]` | release a single issue; siblings + worktree survive |
 | `claims [--json] [--sync [--prune]]` | list (grouped by worktree); `--sync` **adds** claims found on GitHub (assigned + in-progress); `--prune` also **removes** local claims GitHub no longer shows |
-| `port alloc [--count N] [--range A-B] [--worktree N \| --claim I \| --label S]` | allocate consecutive free ports |
+| `port alloc [--count N] [--range A-B \| --at p1,p2,...] [--worktree N \| --claim I \| --label S]` | allocate consecutive free ports, or pin exact ports with `--at` |
 | `port free <port> \| --worktree N \| --claim I` | free ports |
 | `ports [--json]` | list allocated ports + the reserved set |
 | `worktree new <branch> [--issues N,M] [--ports N] [--name X] [--trunk T] [--repo P]` | create a worktree (optional) |
@@ -255,7 +280,7 @@ Run `colab <cmd> --help` for full detail.
 | `release-notes [<range>] [--repo P] [--out F] [--headline "..."]` | grouped Markdown release summary from git history (see below) |
 | `template [<name>] [--dest F] [--repo P] [--force]` | copy a handbook workflow template into a repo, **stamped** with the handbook version (see below) |
 | `register [<path>] [--remove] [--list]` | add/remove a repo in **both** fleet registries at once; `--list` flags drift (see below) |
-| `config [show \| add-repo P \| rm-repo P \| set K V]` | manage config |
+| `config [show \| add-repo P \| rm-repo P \| add-reserved-file P \| rm-reserved-file P \| set K V]` | manage config |
 
 ### Release notes
 
