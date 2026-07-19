@@ -62,3 +62,18 @@ silent updates, just an honest report that you are behind.
 is missing or incoherent, when a declared toolchain disagrees with what CI actually
 pins, when branch names drift, and when a stamped copy has fallen behind its template.
 It is advisory — run it locally or on a schedule. It is **not** wired into any repo's CI.
+
+## Runner policy
+
+Decided 2026-07-19, after a GitHub Actions billing lock stopped every
+`ubuntu-latest` job org-wide while self-hosted runners kept working:
+
+| Repo class | `runs-on` | Why |
+|---|---|---|
+| **Public** repo | `ubuntu-latest` | Free minutes, unaffected by billing — and **never** self-hosted: a fork PR would execute arbitrary code on your runner. |
+| **Private** CI | `[self-hosted, ...]` org runner | Immune to billing, persistent tool caches, local network. |
+| **Private** deploy | its own runner label | Deploys must never queue behind CI jobs. |
+
+Self-hosted job hygiene: no `sudo`, install tools into `$RUNNER_TEMP`, never
+write outside the workspace, prefer the runner's native toolchains. A shared
+runner is infrastructure, not a throwaway VM.
