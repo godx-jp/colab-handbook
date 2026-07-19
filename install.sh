@@ -35,9 +35,11 @@ link_dir() {
       echo "  ✓ link-ok: $name"
       return
     fi
-    # a symlink, but to somewhere else — it's ours to repoint
-    [ "$DRY" = 1 ] && { echo "  [dry] repoint: $name"; return; }
-    rm -f "$dest"; ln -s "$src" "$dest"; echo "  ↻ repoint: $name → $src"
+    # a symlink to somewhere else — someone chose that target deliberately.
+    # Repointing it silently shadows their version (this bit a machine whose
+    # user-level skills pointed at a richer local variant). Never touch it.
+    echo "  ⚠ skip: $name is a symlink to $(readlink "$dest") (not ours) → left untouched"
+    echo "          to adopt the handbook version: rm '$dest' && re-run install.sh"
     return
   fi
   if [ -e "$dest" ]; then
