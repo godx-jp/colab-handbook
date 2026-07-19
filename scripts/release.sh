@@ -50,28 +50,45 @@ done
 echo "$VER" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
   || die "version must look like vX.Y.Z (got: $VER)"
 
+# If the tag exists WITHOUT a published Release, a prior run died between the tag push and
+# `gh release create` (it happened: a transient API failure orphaned v1.1.0). That state is
+# resumable — refusing it with "pick a new version" would force a bogus version bump.
+RESUME=0
 if git -C "$ROOT" rev-parse -q --verify "refs/tags/$VER" >/dev/null 2>&1; then
-  die "tag $VER already exists — pick a new version"
+  if ( cd "$ROOT" && gh release view "$VER" >/dev/null 2>&1 ); then
+    die "tag $VER already exists AND its Release is published — pick a new version"
+  fi
+  echo "tag $VER exists but has no Release — resuming from the publish step."
+  RESUME=1
 fi
 
-if [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ]; then
-  die "working tree has uncommitted tracked changes — commit or stash before releasing"
+if [ "$RESUME" -eq 0 ]; then
+  # Tagging-safety guards — only meaningful when we are about to create the tag.
+  if [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ]; then
+    die "working tree has uncommitted tracked changes — commit or stash before releasing"
+  fi
+
+  BRANCH="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+  [ "$BRANCH" = "main" ] || die "releases are cut from main, but HEAD is on '$BRANCH'"
+
+  git -C "$ROOT" fetch origin main >/dev/null 2>&1 \
+    || die "git fetch origin main failed — check the remote and your network/credentials"
+
+  LOCAL_SHA="$(git -C "$ROOT" rev-parse main 2>/dev/null || echo local)"
+  REMOTE_SHA="$(git -C "$ROOT" rev-parse origin/main 2>/dev/null || echo remote)"
+  [ "$LOCAL_SHA" = "$REMOTE_SHA" ] \
+    || die "local main ($LOCAL_SHA) and origin/main ($REMOTE_SHA) differ — push or pull to sync first"
 fi
-
-BRANCH="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
-[ "$BRANCH" = "main" ] || die "releases are cut from main, but HEAD is on '$BRANCH'"
-
-git -C "$ROOT" fetch origin main >/dev/null 2>&1 \
-  || die "git fetch origin main failed — check the remote and your network/credentials"
-
-LOCAL_SHA="$(git -C "$ROOT" rev-parse main 2>/dev/null || echo local)"
-REMOTE_SHA="$(git -C "$ROOT" rev-parse origin/main 2>/dev/null || echo remote)"
-[ "$LOCAL_SHA" = "$REMOTE_SHA" ] \
-  || die "local main ($LOCAL_SHA) and origin/main ($REMOTE_SHA) differ — push or pull to sync first"
 
 # ---- compute the notes range (previous tag .. this version) --------------------------------
-# describe finds the most recent tag reachable from HEAD; empty on the very first release.
-PREV="$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null || true)"
+if [ "$RESUME" -eq 1 ]; then
+  # HEAD may have moved past the tag since the failed run — derive PREV from the tag's own
+  # ancestry, not from HEAD, so the notes cover exactly what the tag covers.
+  PREV="$(git -C "$ROOT" describe --tags --abbrev=0 "$VER^" 2>/dev/null || true)"
+else
+  # describe finds the most recent tag reachable from HEAD; empty on the very first release.
+  PREV="$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null || true)"
+fi
 if [ -n "$PREV" ]; then
   RANGE="$PREV..$VER"
 else
@@ -84,7 +101,11 @@ echo "  version:    $VER"
 echo "  prev tag:   ${PREV:-<none> (first release)}"
 echo "  notes range: $RANGE"
 [ "$HEADLINE_SET" -eq 1 ] && echo "  headline:   $HEADLINE"
-echo "  steps:      git tag $VER -> git push origin $VER -> gh release create $VER -> node audit/audit.mjs (reconcile)"
+if [ "$RESUME" -eq 1 ]; then
+  echo "  steps:      (resume) gh release create $VER -> node audit/audit.mjs (reconcile)"
+else
+  echo "  steps:      git tag $VER -> git push origin $VER -> gh release create $VER -> node audit/audit.mjs (reconcile)"
+fi
 
 if [ "$DRY" -eq 1 ]; then
   echo ""
@@ -94,8 +115,13 @@ fi
 
 # ---- real release steps --------------------------------------------------------------------
 
-git -C "$ROOT" tag "$VER"            || die "git tag $VER failed"
-git -C "$ROOT" push origin "$VER"    || die "git push origin $VER failed (tag was created locally — delete it with: git tag -d $VER)"
+if [ "$RESUME" -eq 0 ]; then
+  git -C "$ROOT" tag "$VER"            || die "git tag $VER failed"
+  git -C "$ROOT" push origin "$VER"    || die "git push origin $VER failed (tag was created locally — delete it with: git tag -d $VER)"
+else
+  # Idempotent: make sure the remote has the tag (no-op when it already does).
+  git -C "$ROOT" push origin "$VER" >/dev/null 2>&1 || true
+fi
 
 # Build the grouped notes with `colab release-notes` and publish via gh. We materialize the
 # notes to a temp file rather than piping straight into gh so a release-notes failure is caught
