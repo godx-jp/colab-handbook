@@ -1,8 +1,10 @@
 #!/bin/sh
-# pre-push-guard — refuse a raw `git push` to this repo's TRUNK unless a sanctioned path set it.
-# colab ship exports COLAB_SHIP=1; a human/main-loop may export COLAB_HUMAN=1 for a deliberate
-# manual push. Non-trunk pushes always pass. Trunk is read from .github/project.yml; if that file
-# is missing the guard degrades to ALLOW (with a warning) rather than block work.
+# pre-push-guard — refuse raw `git push` to protected branches unless a sanctioned path set the env.
+#   TRUNK (from .github/project.yml): allowed by COLAB_SHIP=1 (colab ship) or COLAB_HUMAN=1.
+#   MAIN, only on tier A (trunk != main): allowed by COLAB_PROMOTE=1 (colab promote) or COLAB_HUMAN=1.
+#     COLAB_SHIP does NOT open main — ship is trunk-only by design.
+# On tier B (trunk == main) the trunk rule already covers main. Non-protected pushes always pass.
+# Missing .github/project.yml → degrade to ALLOW (with a warning) rather than block work.
 #
 # Install (copy-and-own, per repo):
 #   cp templates/pre-push-guard .git/hooks/pre-push && chmod +x .git/hooks/pre-push
@@ -19,17 +21,28 @@ fi
 trunk=$(sed -n 's/^trunk:[[:space:]]*//p' "$pj" | head -1 | tr -d "\"'" | awk '{print $1}')
 [ -z "$trunk" ] && exit 0
 
-# Are any of the refs being pushed the trunk branch? (stdin: <localref> <localsha> <remoteref> <remotesha>)
+# Which protected refs are being pushed? (stdin: <localref> <localsha> <remoteref> <remotesha>)
 pushing_trunk=0
+pushing_main=0
 while read -r _localref _localsha remoteref _remotesha; do
-  [ "${remoteref:-}" = "refs/heads/$trunk" ] && pushing_trunk=1
+  case "${remoteref:-}" in
+    refs/heads/"$trunk") pushing_trunk=1 ;;
+    refs/heads/main)     pushing_main=1 ;;
+  esac
 done
-[ "$pushing_trunk" -eq 0 ] && exit 0
 
-if [ "${COLAB_SHIP:-}" = "1" ] || [ "${COLAB_HUMAN:-}" = "1" ]; then
-  exit 0
+# TRUNK guard (also covers tier B, where trunk == main).
+if [ "$pushing_trunk" -eq 1 ] && [ "${COLAB_SHIP:-}" != "1" ] && [ "${COLAB_HUMAN:-}" != "1" ]; then
+  echo "pre-push-guard: refusing raw push to trunk '$trunk'." >&2
+  echo "  Use 'colab ship' for Phase B, or export COLAB_HUMAN=1 for a sanctioned manual push." >&2
+  exit 1
 fi
 
-echo "pre-push-guard: refusing raw push to trunk '$trunk'." >&2
-echo "  Use 'colab ship' for Phase B, or export COLAB_HUMAN=1 for a sanctioned manual push." >&2
-exit 1
+# MAIN guard — only on tier A (trunk != main). COLAB_SHIP intentionally does NOT open main.
+if [ "$trunk" != "main" ] && [ "$pushing_main" -eq 1 ] && [ "${COLAB_PROMOTE:-}" != "1" ] && [ "${COLAB_HUMAN:-}" != "1" ]; then
+  echo "pre-push-guard: refusing raw push to 'main' (promotion target)." >&2
+  echo "  Use 'colab promote' for trunk→main, or export COLAB_HUMAN=1 for a sanctioned manual push." >&2
+  exit 1
+fi
+
+exit 0

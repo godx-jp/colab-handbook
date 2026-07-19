@@ -91,6 +91,28 @@ that deploys remain human acts on every repo, always — the field cannot expres
 otherwise. The grant lives in the repo file (not the caller's flags) so autonomy is
 a property of the repo's risk profile, reviewed in a commit like any other change.
 
+### `promotion` — optional
+
+```yaml
+promotion: main-loop     # human (default) · main-loop
+```
+
+Who may run the **promotion** (`trunk → main`, via `colab promote`) without a
+per-instance human word. Distinct from **release** (the tag), which is always human.
+
+- `human` (or absent) — promotion needs `COLAB_HUMAN=1`.
+- `main-loop` — the main loop may promote unattended, **but only on a
+  `deploy: tag` repo**, where promotion is verification-only (main runs the heavy
+  suite; nothing deploys).
+
+Unknown values fail closed to `human`. This field **cannot** lower the bar set by
+`deploy:` — on a `deploy: push-main` repo promotion *is* the production deploy and
+always requires `COLAB_HUMAN=1`. Nothing here ever authorizes tagging.
+
+The full permission ladder, one rung per boundary:
+**ship** (branch→trunk, gated by `autonomy`) · **promote** (trunk→main, gated by
+`deploy`+`promotion`) · **release** (tag, always human).
+
 ### `generated` — optional
 
 ```yaml

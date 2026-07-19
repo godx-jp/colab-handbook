@@ -2015,6 +2015,180 @@ function cmdShip(argv) {
 }
 
 // ---------------------------------------------------------------------------
+// promote — the checked door for PROMOTION (trunk → main), distinct from RELEASE (the tag).
+//
+// The ladder is: ship (branch → trunk) · promote (trunk → main) · release (tag, always human).
+// Promotion permission is split from release permission on purpose: advancing main can be a heavy
+// CI verification step (deploy: tag) that the main-loop may do unattended, OR a production deploy
+// (deploy: push-main) that always needs a human. `promote` NEVER tags and NEVER deploys directly.
+// ---------------------------------------------------------------------------
+
+const HELP_PROMOTE = `colab promote [--repo <path>] [--message "<msg>"] [--dry]
+
+Promote the trunk into main (a --no-ff merge). The SECOND rung after \`ship\`: ship lands work on
+trunk; promote advances main. It NEVER tags and NEVER deploys directly — RELEASE (the tag) stays a
+human step. There is no --tag/--release flag; promote only ever merges trunk→main and pushes main.
+
+Two gates, both must pass:
+  • HARD SAFETY (from the repo's deploy semantics — no field or flag can lower it):
+      deploy: push-main → promoting IS a production deploy → requires COLAB_HUMAN=1
+      deploy: tag       → promotion is verification-only (heavy CI on main, no deploy)
+      anything else / absent → treated as production-risk → requires COLAB_HUMAN=1 (fail-closed)
+  • promotion field (project.yml \`promotion: human | main-loop\`, default human, fail-closed):
+      on a deploy:tag repo, \`promotion: main-loop\` lets the main-loop promote with no human word;
+      otherwise a human (COLAB_HUMAN=1) is required.
+  Tier B (trunk == main) has NO promotion — ship goes straight to main; promote refuses.
+
+Preconditions (✓/✗): trunk CI green · trunk == origin/trunk · main == origin/main · main checkout usable.
+
+Options:
+  --repo <path>     repo root (default: git root of cwd)
+  --message "<msg>" full override of the merge commit message (default: the release: line)
+  --dry             print the precondition table + plan; change nothing
+`;
+
+function cmdPromote(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--repo': 'repo', '--message': 'message' },
+    flags: { '--dry': 'dry', '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help) return print(HELP_PROMOTE);
+  const repoAbs = resolveRepo(opts);
+  if (!git.repoRoot(repoAbs)) throw new UserError(`${repoAbs} is not a git repo`);
+  const doc = projectDoc(repoAbs);
+  const trunk = resolveTrunk(repoAbs, doc);
+  if (!trunk) throw new UserError('Could not determine trunk branch (set project.yml trunk:)');
+  const MAIN = 'main';
+
+  // Tier B: trunk IS main → there is no promotion to run.
+  if (trunk === MAIN) {
+    process.stderr.write(`✗ ${shortRepo(repoAbs)}: trunk is "main" (Tier B) — no promotion exists on this repo. Ship goes straight to main.\n`);
+    return 1;
+  }
+
+  const deploy = doc.deploy ? String(doc.deploy) : '';
+  const promotion = doc.promotion === 'main-loop' ? 'main-loop' : 'human'; // fail-closed on unknown
+  const human = process.env.COLAB_HUMAN === '1';
+  const deployIsTag = deploy === 'tag';
+
+  // ---- GATE (returns before any table, like ship's autonomy gate) ----
+  if (deployIsTag) {
+    // verification-only promotion: main-loop may run it, else a human must.
+    if (promotion !== 'main-loop' && !human) {
+      process.stderr.write(`✗ ${shortRepo(repoAbs)}: promotion=${doc.promotion ? promotion : 'human (default)'} — a human must promote ${trunk}→main.\n`);
+      process.stderr.write('  Re-run with COLAB_HUMAN=1, or set project.yml promotion: main-loop (deploy is by tag, so promotion is verification-only).\n');
+      return 1;
+    }
+  } else {
+    // push-main (or unknown/absent) → promoting main is a production deploy → human required, always.
+    if (!human) {
+      const why = deploy === 'push-main'
+        ? `deploy=push-main — promoting ${trunk}→main IS a PRODUCTION DEPLOY`
+        : `deploy=${deploy || '(absent)'} — promoting ${trunk}→main may deploy to production (fail-closed)`;
+      process.stderr.write(`✗ ${shortRepo(repoAbs)}: ${why}.\n`);
+      process.stderr.write('  This requires a human: re-run with COLAB_HUMAN=1. (No field or flag can lower this bar.)\n');
+      return 1;
+    }
+  }
+
+  // ---- PRECONDITIONS (✓/✗) ----
+  const gh = isGhUsable(repoAbs);
+  const checks = [];
+  git.git(['fetch', 'origin', trunk, MAIN], repoAbs); // best-effort: refresh both refs before comparing
+
+  let ciOk = false;
+  if (!gh) checks.push(['✗', 'trunk CI green', 'gh not usable (no auth / no origin) — cannot confirm CI']);
+  else {
+    const run = git.ghRunLatest(repoAbs, trunk);
+    if (!run) checks.push(['✗', 'trunk CI green', 'gh run list failed']);
+    else if (run.status === 'completed' && run.conclusion === 'success') { ciOk = true; checks.push(['✓', 'trunk CI green', 'latest run success']); }
+    else checks.push(['✗', 'trunk CI green', `latest run status=${run.status} conclusion=${run.conclusion || 'none'} (fail-to-start counts as not green)`]);
+  }
+
+  const localTrunk = git.git(['rev-parse', trunk], repoAbs);
+  const originTrunk = git.git(['rev-parse', `origin/${trunk}`], repoAbs);
+  const trunkSyncOk = localTrunk.ok && originTrunk.ok && localTrunk.stdout === originTrunk.stdout;
+  checks.push([trunkSyncOk ? '✓' : '✗', `${trunk} == origin/${trunk}`, trunkSyncOk ? 'in sync' : 'local trunk differs from origin (push/pull first)']);
+
+  const localMain = git.git(['rev-parse', MAIN], repoAbs);
+  const originMain = git.git(['rev-parse', `origin/${MAIN}`], repoAbs);
+  const mainSyncOk = localMain.ok && originMain.ok && localMain.stdout === originMain.stdout;
+  checks.push([mainSyncOk ? '✓' : '✗', `${MAIN} == origin/${MAIN}`,
+    !localMain.ok ? 'no local main branch (create it tracking origin/main)' : (mainSyncOk ? 'in sync' : 'local main differs from origin')]);
+
+  // main checkout usable: reuse the repo checkout only if it is ON main and clean; else a temp worktree.
+  const headBranch = git.git(['rev-parse', '--abbrev-ref', 'HEAD'], repoAbs).stdout;
+  let useRepoDir = false, checkoutOk, checkoutDetail;
+  if (headBranch === MAIN) {
+    const dirty = git.dirtyTracked(repoAbs);
+    checkoutOk = !dirty; useRepoDir = !dirty;
+    checkoutDetail = dirty ? 'main checkout has uncommitted tracked changes' : 'on main, clean';
+  } else {
+    checkoutOk = localMain.ok; // will use a temp worktree; needs a local main ref to check out
+    checkoutDetail = localMain.ok ? `checkout on "${headBranch}" — will use a temp worktree for main` : 'no local main to check out';
+  }
+  checks.push([checkoutOk ? '✓' : '✗', 'main checkout usable', checkoutDetail]);
+
+  const preOk = ciOk && trunkSyncOk && mainSyncOk && checkoutOk;
+
+  // ---- report ----
+  print(`promote ${shortRepo(repoAbs)} · ${trunk} → ${MAIN}` + (opts.dry ? '  [DRY RUN]' : ''));
+  print(`  deploy: ${deploy || '(absent)'} · promotion: ${promotion}${human ? ' · COLAB_HUMAN=1' : ''}`);
+  print('');
+  print(table(checks.map((c) => [c[0], c[1], c[2]]), ['', 'PRECONDITION', 'DETAIL']));
+  print('');
+
+  const nextRelease = deployIsTag
+    ? '  Release is a SEPARATE human step: git tag vX.Y.Z && git push origin vX.Y.Z'
+    : '  (deploy: push-main — this promotion IS the deploy; there is no separate tag step)';
+
+  if (opts.dry) {
+    print(preOk ? '→ READY: preconditions pass. Re-run without --dry to promote.' : '→ NOT READY: fix the ✗ rows above.');
+    print(`  Plan: git merge --no-ff ${trunk} into ${MAIN} · push ${MAIN} (COLAB_PROMOTE=1)`);
+    print(nextRelease);
+    return preOk ? 0 : 1;
+  }
+  if (!preOk) { process.stderr.write('✗ Aborting: one or more preconditions failed (see ✗ above). Nothing was pushed.\n'); return 1; }
+
+  // ---- ACTION: merge --no-ff trunk → main, push main (never tag, never anything else) ----
+  let mainDir = useRepoDir ? repoAbs : null, ephemeral = false;
+  if (!mainDir) {
+    mainDir = fs.mkdtempSync(path.join(os.tmpdir(), 'colab-promote-'));
+    const add = git.git(['worktree', 'add', mainDir, MAIN], repoAbs);
+    if (!add.ok) { try { fs.rmdirSync(mainDir); } catch (_) {} throw new UserError(`could not check out main for promotion: ${add.stderr.split('\n')[0]}`); }
+    ephemeral = true;
+  }
+  const cleanup = () => { if (ephemeral) git.git(['worktree', 'remove', '--force', mainDir], repoAbs); };
+
+  const msg = opts.message || `release: ${trunk} → main — ${today()} (promotion via colab promote)`;
+  print(`merge --no-ff ${trunk} → ${MAIN} …`);
+  const merge = git.run('git', ['merge', '--no-ff', trunk, '-m', msg], { cwd: mainDir });
+  if (!merge.ok) {
+    git.git(['merge', '--abort'], mainDir); cleanup();
+    process.stderr.write(`✗ merge --no-ff failed: ${merge.stderr.split('\n')[0]}. Nothing pushed.\n`);
+    return 1;
+  }
+  const sha = git.git(['rev-parse', '--short', 'HEAD'], mainDir).stdout;
+
+  print(`push ${MAIN} …`);
+  const push = git.run('git', ['push', 'origin', MAIN], { cwd: mainDir, env: { ...process.env, COLAB_PROMOTE: '1' } });
+  if (!push.ok) {
+    cleanup();
+    process.stderr.write(`✗ push failed: ${push.stderr.split('\n')[0]}. main merged locally at ${sha} but NOT pushed — resolve and push by hand (COLAB_HUMAN=1).\n`);
+    return 1;
+  }
+  cleanup();
+
+  print('');
+  print(`✓ Promoted ${trunk} → ${MAIN} @ ${sha}`);
+  print(deployIsTag
+    ? '  main CI now runs the heavy verification suite (no deploy — deploy is by tag).'
+    : '  main push will now DEPLOY to production (deploy: push-main).');
+  print(nextRelease);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // dispatch
 // ---------------------------------------------------------------------------
 
@@ -2039,6 +2213,7 @@ Commands:
   worktrees [--json]
 
   ship [--worktree N | --branch B] [--message M] [--keep-worktree] [--dry]   code-wrap Phase B → trunk
+  promote [--repo P] [--message M] [--dry]   trunk → main (--no-ff); gated by deploy + promotion; never tags
   doctor [--prune] [--ttl H] [--json]   heal dead worktrees / orphan + stale claims / orphan ports
   release-notes [<range>] [--repo P] [--out F] [--headline "..."]   grouped Markdown release summary
   template [<name>] [--dest F] [--repo P] [--force]   copy a handbook workflow template, stamped
@@ -2064,6 +2239,7 @@ function main(argv) {
     case 'worktree': return cmdWorktree(rest);
     case 'worktrees': return cmdWorktrees(rest);
     case 'ship': return cmdShip(rest);
+    case 'promote': return cmdPromote(rest);
     case 'doctor': return cmdDoctor(rest);
     case 'release-notes': return cmdReleaseNotes(rest);
     case 'template': return cmdTemplate(rest);

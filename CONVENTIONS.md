@@ -205,6 +205,13 @@ git tag v1.2.0 && git push origin v1.2.0     # ← this is what deploys
 Pushing the tag is the deploy trigger. Pushing `main` is **not** — that only runs the full
 test suite. This separation lets you promote code and decide to ship it later.
 
+That separation is also a permission ladder, one rung per boundary: **ship**
+(branch→trunk, gated by `autonomy:`) · **promote** (trunk→main, gated by `deploy:` +
+`promotion:` — safe to automate only where deploy is tag-gated) · **release** (the tag —
+always a human act, on every repo, with no field that can say otherwise). The
+`pre-push-guard` hook enforces the first two rungs mechanically; `COLAB_SHIP` never opens
+`main`.
+
 **Versioning** — SemVer. Patch for fixes, minor for features, major for breaking changes.
 Pre-1.0 repos use `v0.x.y` and treat minor as "meaningful increment".
 
