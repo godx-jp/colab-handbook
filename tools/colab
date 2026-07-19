@@ -866,6 +866,156 @@ function cmdReleaseNotes(argv) {
 }
 
 // ---------------------------------------------------------------------------
+// register — keep the TWO machine-local registries in sync in one act
+//
+// The fleet lives in two files that used to be hand-edited separately (the two-places-drift
+// disease this handbook fights):
+//   1. <COLAB_HOME>/repos.txt      the audit fleet list (audit.mjs reads it; COLAB_HOME-aware)
+//   2. <COLAB_HOME>/config.json    repos[] — the reserved-ports aggregation source (this CLI)
+// `colab register` writes BOTH, dedups, and `--list` flags any drift between them.
+// ---------------------------------------------------------------------------
+
+const REPOS_TXT_HEADER =
+`# Fleet registry — MACHINE-LOCAL, not committed. Read by audit.mjs and colab.
+# One entry per line: an absolute repo path, or an owner/name slug. '#' starts a comment.
+# Managed by \`colab register\` (which keeps this file and config.json repos[] in sync).
+`;
+
+function reposTxtPath() { return path.join(state.COLAB_DIR, 'repos.txt'); }
+
+function readReposTxt() {
+  try { return fs.readFileSync(reposTxtPath(), 'utf8'); }
+  catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+}
+
+/** Stripped, non-empty entry values from repos.txt content. */
+function reposTxtEntries(text) {
+  if (!text) return [];
+  return text.split(/\r?\n/).map((l) => l.replace(/#.*$/, '').trim()).filter(Boolean);
+}
+
+/** An owner/name slug (audit-only) rather than a local path — can't be a port-scan root. */
+function isSlug(x) { return !x.startsWith('/') && !x.startsWith('~') && /^[^/]+\/[^/]+$/.test(x); }
+
+const HELP_REGISTER = `colab register [<path>] [--remove] [--list]
+
+Register a repo into BOTH machine-local registries at once, so they never drift:
+  • <COLAB_HOME>/repos.txt   — the audit fleet list (audit.mjs)
+  • <COLAB_HOME>/config.json  — repos[], the reserved-ports aggregation source (this CLI)
+
+  <path>      repo to register (default: the git root of the current directory). Must be a
+              git repo — non-git paths are refused. The path is normalized to its toplevel.
+  --remove    remove the repo from BOTH registries.
+  --list      show every registered repo and which registry knows it (T = repos.txt,
+              C = config.json). A local path present in only one registry is DRIFT and is
+              flagged; slugs are audit-only (repos.txt) and never counted as drift.
+              Exits non-zero if any drift is found (scriptable), 0 otherwise.
+
+Idempotent: registering an already-registered repo reports it and exits 0.
+`;
+
+function cmdRegister(argv) {
+  const opts = parseArgs(argv, {
+    flags: { '--remove': 'remove', '--list': 'list', '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help) return print(HELP_REGISTER);
+  if (opts.list) return registerList();
+
+  // Resolve target: explicit path arg, else the current repo root. Refuse non-git.
+  let target = opts._[0] ? path.resolve(opts._[0]) : git.repoRoot(process.cwd());
+  if (!target) throw new UserError('Not inside a git repo — pass a <path> to register');
+  const root = git.repoRoot(target);
+  if (!root) throw new UserError(`Not a git repo: ${target} — register only tracks git repos`);
+  target = root; // normalize to the worktree toplevel
+
+  return opts.remove ? registerRemove(target) : registerAdd(target);
+}
+
+function registerAdd(target) {
+  // One lock guards both files so the two registries update together.
+  const res = state.withLock(() => {
+    fs.mkdirSync(state.COLAB_DIR, { recursive: true });
+    // repos.txt
+    const text = readReposTxt();
+    const inTxt = reposTxtEntries(text).includes(target);
+    if (!inTxt) {
+      let base;
+      if (text == null) base = REPOS_TXT_HEADER + '\n';
+      else base = text === '' || text.endsWith('\n') ? text : text + '\n';
+      state.atomicWrite(reposTxtPath(), base + target + '\n');
+    }
+    // config.json repos[]
+    const cfg = state.loadConfig();
+    const inCfg = cfg.repos.includes(target);
+    if (!inCfg) { cfg.repos.push(target); state.saveConfig(cfg); }
+    return { inTxt, inCfg };
+  });
+
+  if (res.inTxt && res.inCfg) { print(`Already registered in both registries: ${target}`); return 0; }
+  const added = [];
+  if (!res.inTxt) added.push('repos.txt');
+  if (!res.inCfg) added.push('config.json');
+  const healed = (res.inTxt || res.inCfg) ? '  (other registry already had it — drift healed)' : '';
+  print(`Registered ${target}`);
+  print(`  added to: ${added.join(' + ')}${healed}`);
+  return 0;
+}
+
+function registerRemove(target) {
+  const res = state.withLock(() => {
+    const text = readReposTxt();
+    let removedTxt = false;
+    if (text != null) {
+      const lines = text.split(/\r?\n/);
+      const kept = lines.filter((l) => l.replace(/#.*$/, '').trim() !== target);
+      removedTxt = kept.length !== lines.length;
+      if (removedTxt) state.atomicWrite(reposTxtPath(), kept.join('\n'));
+    }
+    const cfg = state.loadConfig();
+    const before = cfg.repos.length;
+    cfg.repos = cfg.repos.filter((r) => r !== target);
+    const removedCfg = cfg.repos.length !== before;
+    if (removedCfg) state.saveConfig(cfg);
+    return { removedTxt, removedCfg };
+  });
+
+  if (!res.removedTxt && !res.removedCfg) { print(`Was not registered in either registry: ${target}`); return 0; }
+  const from = [];
+  if (res.removedTxt) from.push('repos.txt');
+  if (res.removedCfg) from.push('config.json');
+  print(`Unregistered ${target}`);
+  print(`  removed from: ${from.join(' + ')}`);
+  return 0;
+}
+
+function registerList() {
+  const txtEntries = reposTxtEntries(readReposTxt());
+  const cfgRepos = state.loadConfig().repos || [];
+  const all = [...new Set([...txtEntries, ...cfgRepos])].sort();
+  if (all.length === 0) { print('No repos registered. Add one with: colab register [<path>]'); return 0; }
+
+  let drift = 0;
+  const rows = all.map((e) => {
+    const inTxt = txtEntries.includes(e);
+    const inCfg = cfgRepos.includes(e);
+    const slug = isSlug(e);
+    let note = '';
+    if (slug) note = 'slug — audit-only';
+    else if (inTxt && !inCfg) { note = 'DRIFT: only in repos.txt'; drift++; }
+    else if (!inTxt && inCfg) { note = 'DRIFT: only in config.json'; drift++; }
+    return [inTxt ? 'T' : '-', slug ? 'n/a' : (inCfg ? 'C' : '-'), e, note];
+  });
+  print(table(rows, ['TXT', 'CFG', 'REPO', 'NOTE']));
+  if (drift) {
+    print('');
+    print(`${drift} repo(s) drifted between the two registries.`);
+    print('  Fix: `colab register <path>` re-syncs both, or `colab register <path> --remove` drops from both.');
+    return 1;
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // config (show / manage the aggregation inputs)
 // ---------------------------------------------------------------------------
 
@@ -1047,6 +1197,7 @@ Commands:
   doctor [--prune] [--ttl H] [--json]   heal dead worktrees / orphan + stale claims / orphan ports
   release-notes [<range>] [--repo P] [--out F] [--headline "..."]   grouped Markdown release summary
   template [<name>] [--dest F] [--repo P] [--force]   copy a handbook workflow template, stamped
+  register [<path>] [--remove] [--list]   add a repo to BOTH fleet registries (repos.txt + config.json)
   config [show|add-repo P|rm-repo P|set K V]
 
 State is machine-local at ~/.colab/ (override with COLAB_HOME). Run any command with
@@ -1070,6 +1221,7 @@ function main(argv) {
     case 'doctor': return cmdDoctor(rest);
     case 'release-notes': return cmdReleaseNotes(rest);
     case 'template': return cmdTemplate(rest);
+    case 'register': return cmdRegister(rest);
     case 'config': return cmdConfig(rest);
     case undefined:
     case '-h': case '--help': case 'help': return print(HELP_ROOT);

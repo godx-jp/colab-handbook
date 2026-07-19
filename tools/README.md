@@ -181,6 +181,7 @@ Run `colab <cmd> --help` for full detail.
 | `doctor [--prune] [--ttl H] [--json]` | heal dead worktrees / orphan + stale claims / orphan ports |
 | `release-notes [<range>] [--repo P] [--out F] [--headline "..."]` | grouped Markdown release summary from git history (see below) |
 | `template [<name>] [--dest F] [--repo P] [--force]` | copy a handbook workflow template into a repo, **stamped** with the handbook version (see below) |
+| `register [<path>] [--remove] [--list]` | add/remove a repo in **both** fleet registries at once; `--list` flags drift (see below) |
 | `config [show \| add-repo P \| rm-repo P \| set K V]` | manage config |
 
 ### Release notes
@@ -214,6 +215,46 @@ unless `--force` (and prints a `diff` hint instead). The stamp exists so
 `../audit/audit.mjs` can later tell an adopter that the source template has changed since
 they copied it — copy-and-own with a reconciliation trail, never a remote call. Making
 copy+stamp one command matters because a manual stamp is the step people skip.
+
+### Register (fleet registries)
+
+There are two machine-local registries under `~/.colab/` (honoring `COLAB_HOME`):
+
+- `repos.txt` — the audit fleet list, read by `../audit/audit.mjs`.
+- `config.json` `repos[]` — the reserved-ports aggregation source used by this CLI.
+
+They serve different tools, so they used to be hand-edited separately — the exact
+two-places-drift disease this handbook exists to kill. `colab register` writes **both** in one
+act (dedup, atomic, under the same lock):
+
+```sh
+colab register                 # register the current repo (its git toplevel) into both
+colab register /path/to/repo   # register an explicit repo (must be a git repo; non-git refused)
+colab register /path/to/repo --remove   # remove from both
+colab register --list          # show every registered repo and which registry knows it
+```
+
+`--list` marks each repo `T` (in `repos.txt`) and `C` (in `config.json`). A **local path in only
+one** registry is drift and is flagged with a fix hint; `--list` exits non-zero when any drift
+exists (scriptable). Owner/name **slugs** are audit-only (they can't be a local port-scan root),
+so they show `n/a` in the `CFG` column and are never counted as drift. Registering a
+one-registry-only repo re-syncs both ("drift healed").
+
+## Releasing the handbook itself
+
+The handbook ships **no** `release-tag.yml` workflow of its own (that file is a *template* it
+hands to other repos). Its release path is `scripts/release.sh`:
+
+```sh
+sh scripts/release.sh vX.Y.Z ["optional headline sentence"]
+sh scripts/release.sh vX.Y.Z --dry    # run every guard + print the plan, change nothing
+```
+
+It guards (version shape, tag not already present, clean tracked tree, on `main`, `main` ==
+`origin/main`), then tags, pushes the tag, publishes a GitHub Release whose body comes from
+`colab release-notes`, and finally runs `../audit/audit.mjs` as a **fleet reconciliation report**
+under a `── Reconciliation @ vX.Y.Z ──` banner. Audit findings are advisory — the release still
+succeeds and the script exits 0 when the release steps themselves succeeded.
 
 ## Safety
 

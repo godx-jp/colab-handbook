@@ -302,8 +302,12 @@ here.
 6. **Make sure CI meets the outcome in [§7](#7-ci-and-toolchain)** — secret scan + build,
    toolchain resolved not hardcoded. Copy a template if useful — via
    `colab template <name>`, which stamps the copy for reconciliation ([§8](#8-conformance-and-reconciliation)).
-7. **Leave existing branches alone.** Grandfathered ([§4](#4-branches-and-commits)).
-8. **Do not create `dev`** unless the repo is genuinely Tier A.
+7. **Register the repo in the machine's fleet registries** — `colab register` (from
+   anywhere inside the repo). One command, both registries: the audit fleet list and
+   the reserved-ports aggregation. An unregistered repo is invisible to the fleet
+   audit, so drift in it accumulates unseen.
+8. **Leave existing branches alone.** Grandfathered ([§4](#4-branches-and-commits)).
+9. **Do not create `dev`** unless the repo is genuinely Tier A.
 
 ### Promoting Tier B → Tier A
 
