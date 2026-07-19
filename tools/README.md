@@ -131,10 +131,56 @@ already be set up) — reuse it for another issue or `colab worktree rm <name>`;
 ### 4. What `doctor` does NOT do
 
 `colab doctor --prune` heals **machine-local** drift only (dead worktrees, orphan/stale claims,
-orphan ports). It deliberately **never posts GitHub comments** and never edits GitHub — a cleanup
-cron may be pruning another person's dead session on a shared machine, and it must not speak on
-their behalf on the Issue. A stale GitHub `in-progress` label is instead healed by the
-`claims --sync --prune` reconcile path (which acts on *your own* assigned issues).
+orphan ports, and merged-worktree sweeps). It deliberately **never posts GitHub comments** and never
+edits GitHub — a cleanup cron may be pruning another person's dead session on a shared machine, and
+it must not speak on their behalf on the Issue. A stale GitHub `in-progress` label is instead healed
+by the `claims --sync --prune` reconcile path (which acts on *your own* assigned issues).
+
+## Session identity (which conversation)
+
+Every claim and worktree can record a **Claude session identity** — a free-form string, typically a
+session URL (`https://claude.ai/code/session_…`) or a short human name. Resolution precedence:
+`--session <string>` flag **>** the `COLAB_SESSION` env var **>** absent (empty — never an error).
+
+- Stored as `session` on both worktree and claim entries; a claim made via `worktree new --issues`
+  **inherits the worktree's session**. Standalone `colab claim` reads the same flag/env.
+- Surfaced in `colab claims` and `colab worktrees` (URLs shown as their `session_…` tail; full value
+  in `--json`); appended to the `🔒 Claimed` and `🚢 Shipped` comments as ` · session <value>`; and
+  included in refusal / takeover / doctor holder details.
+- The `🔒 Claimed` comment format stays **byte-identical when no session is set** (parsers depend on
+  it) — the ` · session …` field is only appended when present.
+
+Why: `host` says which *machine* holds a claim; `session` says which *conversation*. When a claim
+looks stale, that's the difference between "which laptop is this?" and one click to the exact chat —
+staleness triage becomes trivial.
+
+## Worktree lifecycle (`status`)
+
+A worktree entry carries a `status`, backfilled-on-read (older/absent → `running`):
+
+```
+  running ───────────────► merged ───────────────► (killed)
+  created by              branch landed on trunk    teardown removes the
+  worktree new / claim    AND no live claims        entry entirely — no
+                          · ship sets it after B1   "killed" status is stored
+                          · doctor auto-detects      (worktree rm, or doctor
+                            & records on --prune       --prune sweeping a merged one)
+```
+
+- **running → merged** has two writers: (1) `colab ship` sets it right after B1 lands the squash on
+  trunk (so a `--keep-worktree` entry survives as `merged`); (2) `colab doctor` auto-detects — for a
+  `running` worktree with **no live claims** whose branch is **tree-contained in trunk**, it records
+  the flip on `--prune`. Containment is checked with `git merge-tree --write-tree` (merging the branch
+  into trunk yields trunk's exact tree), which is correct for **squash merges** — an ancestry/rev-list
+  test would miss them — and stays correct when trunk has moved on. When it can't tell, it leaves the
+  worktree `running`.
+- **Any live claim keeps a worktree `running`**, even if the current branch is already contained — a
+  group with an unfinished sibling is not done.
+- **merged → killed**: `colab doctor --prune` now **sweeps** merged worktrees still on disk (full
+  teardown: pre-remove hook → `git worktree remove` → free ports → drop the entry, all local-only). It
+  **refuses** a merged worktree with uncommitted **tracked** changes (reports it instead). `running`
+  worktrees are **never** swept. Teardown removes the entry outright — "killed" is the absence of a
+  record, not a stored status (per Boss: no need to save it).
 
 ## State & config files (machine-local)
 
@@ -173,14 +219,18 @@ concurrent sessions don't lose writes.
     "import-fixes-115-114-113": {
       "name": "...", "repo": "/abs/repo", "branch": "fix/...",
       "path": "/abs/repo/.worktrees/...", "ports": [5230],
-      "host": "machine", "created": "<iso>"
+      "host": "machine", "session": "https://claude.ai/code/session_…",
+      "status": "running",              // running → merged (killed = entry removed)
+      "created": "<iso>"
     }
   },
   "claims": {
     "/abs/repo#115": {
       "issue": "#115", "repo": "/abs/repo",
       "worktree": "import-fixes-115-114-113",   // or null for a trunk claim
-      "branch": "fix/...", "host": "machine", "created": "<iso>"
+      "branch": "fix/...", "host": "machine",
+      "session": "https://claude.ai/code/session_…",   // inherited from the worktree
+      "created": "<iso>"
     }
   },
   "ports": {
@@ -193,6 +243,9 @@ concurrent sessions don't lose writes.
 - **Global per machine**: ports are unique across *all* repos, so it's one file, not per-repo.
 - Port `owner.type` is `worktree` | `claim` | `manual`; `ref` is the worktree name, claim key, or
   a manual label.
+- `session` and `status` are **backward-compatible**: entries written before they existed render as
+  blank session / `running` status — no migration needed. See *Session identity* and *Worktree
+  lifecycle* below.
 
 ## Reserved ports — the design change
 
@@ -267,17 +320,17 @@ Run `colab <cmd> --help` for full detail.
 
 | command | purpose |
 |---|---|
-| `claim <issue>... [--worktree N] [--branch B] [--force] [--repo P]` | claim one or many issues (atomic; onto one worktree). **Enforced** — see *Claim lifecycle* below |
+| `claim <issue>... [--worktree N] [--branch B] [--session S] [--force] [--repo P]` | claim one or many issues (atomic; onto one worktree). **Enforced** — see *Claim lifecycle* below |
 | `release <issue> [--repo P]` | release a single issue; siblings + worktree survive |
 | `claims [--json] [--sync [--prune]]` | list (grouped by worktree); `--sync` **adds** claims found on GitHub (assigned + in-progress); `--prune` also **removes** local claims GitHub no longer shows |
 | `port alloc [--count N] [--range A-B \| --at p1,p2,...] [--worktree N \| --claim I \| --label S]` | allocate consecutive free ports, or pin exact ports with `--at` |
 | `port free <port> \| --worktree N \| --claim I` | free ports |
 | `ports [--json]` | list allocated ports + the reserved set |
-| `worktree new <branch> [--issues N,M] [--ports N] [--name X] [--trunk T] [--repo P]` | create a worktree (optional) |
+| `worktree new <branch> [--issues N,M] [--ports N \| --at p1,..] [--name X] [--trunk T] [--session S] [--repo P]` | create a worktree (optional) |
 | `worktree rm <name> [--force] [--repo P]` | remove a worktree; release its group; free its ports |
-| `worktrees [--json]` | list worktrees (with on-disk liveness) |
+| `worktrees [--json]` | list worktrees (status + on-disk liveness) |
 | `ship [--worktree N \| --branch B] [--message M] [--keep-worktree] [--dry]` | code-wrap **Phase B**: squash-merge a session branch → trunk. Gated by repo autonomy (see *Phase B autonomy ladder*) |
-| `doctor [--prune] [--ttl H] [--json]` | heal dead worktrees / orphan + stale claims / orphan ports |
+| `doctor [--prune] [--ttl H] [--json]` | heal dead worktrees / orphan + stale claims / orphan ports; flip + sweep **merged** worktrees (see *Worktree lifecycle*) |
 | `release-notes [<range>] [--repo P] [--out F] [--headline "..."]` | grouped Markdown release summary from git history (see below) |
 | `template [<name>] [--dest F] [--repo P] [--force]` | copy a handbook workflow template into a repo, **stamped** with the handbook version (see below) |
 | `register [<path>] [--remove] [--list]` | add/remove a repo in **both** fleet registries at once; `--list` flags drift (see below) |
@@ -436,6 +489,10 @@ that path.
   it removes and why). Removal is opt-in because a successful-but-partial GitHub response (rate
   limit, paging) is indistinguishable from a complete one, so a destructive reconcile must be
   deliberate. Repos gh can't reach are skipped, never treated as "GitHub shows no claims".
-- `doctor` without `--prune` never changes anything — it only reports.
+- `doctor` without `--prune` never changes anything — it only reports (including would-be `running →
+  merged` flips and merged-worktree sweep candidates).
 - Worktree-less ("trunk") claims are never auto-removed; `doctor` only *flags* stale ones. You
   remove them with `--prune`. This is deliberate — a trunk claim may be a long-running deliberate one.
+- `doctor --prune` sweeps only **merged** worktrees, and only when their tracked tree is clean;
+  `running` worktrees (and any worktree with a live claim) are never swept. The sweep is local-only —
+  `doctor` never touches GitHub.

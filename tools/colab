@@ -80,12 +80,42 @@ function isGhUsable(repoAbs) {
 const CLAIM_MARK = '🔒 Claimed';
 const RELEASE_MARK = '✅ Released';
 // Parses a claim comment body back into {worktree, branch, host, date}. The `· <host>` field
-// is what lets the tie-break tell two machines of the SAME GitHub user apart.
+// is what lets the tie-break tell two machines of the SAME GitHub user apart. The optional
+// trailing `· session <value>` (added 2026-07) is captured separately by SESSION_RE so this
+// regex — and every existing parser — stays byte-stable for session-less comments.
 const CLAIM_RE = /🔒 Claimed — worktree `([^`]*)` · branch `([^`]*)` · host `([^`]*)` · (\S+)/;
+const SESSION_RE = /· session (.+)$/;
+
+/**
+ * Resolve the Claude session identity for this invocation: --session flag > COLAB_SESSION env >
+ * '' (absent, never an error). Free-form — a session URL or a short human name.
+ */
+function resolveSession(opts) {
+  const s = opts.session || process.env.COLAB_SESSION || '';
+  return String(s).trim();
+}
+
+/** Compact a session for table/message display: the `session_…` tail, or the name, capped. */
+function shortSession(s) {
+  if (!s) return '';
+  s = String(s);
+  const m = s.match(/session_[\w-]+/);
+  const v = m ? m[0] : s;
+  return v.length > 18 ? v.slice(0, 17) + '…' : v;
+}
+
+/**
+ * Worktree lifecycle status, backfilled-on-read: entries created before this field existed (or by
+ * an older colab) render as `running`. Values: `running` (default, at create) → `merged` (branch
+ * landed on trunk + no live claims; set by ship after B1, or auto-detected by doctor). "Killed" is
+ * not a status — teardown removes the entry entirely.
+ */
+function wtStatus(wt) { return (wt && wt.status) || 'running'; }
 
 /** The exact claim-comment body. Keep in lockstep with CLAIM_RE and the README. */
-function claimCommentBody(wtName, branch) {
-  return `${CLAIM_MARK} — worktree \`${wtName || '-'}\` · branch \`${branch}\` · host \`${HOST}\` · ${nowISO()}`;
+function claimCommentBody(wtName, branch, session) {
+  const base = `${CLAIM_MARK} — worktree \`${wtName || '-'}\` · branch \`${branch}\` · host \`${HOST}\` · ${nowISO()}`;
+  return session ? `${base} · session ${session}` : base; // session-less body stays EXACTLY as before
 }
 
 /** Issues whose EXISTING local claim sits on a different worktree than the one we're claiming onto. */
@@ -120,8 +150,9 @@ function printRefusal(localConf, ghConf) {
   process.stderr.write('✗ Refusing — one or more issues are already claimed:\n');
   for (const c of localConf) {
     const h = c.holder;
+    const sess = h.session ? ` · session ${shortSession(h.session)}` : '';
     process.stderr.write(
-      `  #${c.num} local: worktree "${h.worktree || '-'}" · branch ${h.branch || '-'} · host ${h.host} · since ${String(h.created).slice(0, 10)}\n`);
+      `  #${c.num} local: worktree "${h.worktree || '-'}" · branch ${h.branch || '-'} · host ${h.host}${sess} · since ${String(h.created).slice(0, 10)}\n`);
   }
   for (const c of ghConf) {
     process.stderr.write(`  #${c.num} GitHub: assigned to ${c.assignees.join(', ')} (labeled in-progress)\n`);
@@ -134,7 +165,8 @@ function printRefusal(localConf, ghConf) {
 function printTakeover(localConf, ghConf) {
   for (const c of localConf) {
     const h = c.holder;
-    print(`  --force: taking over #${c.num} from worktree "${h.worktree || '-'}" (host ${h.host}, since ${String(h.created).slice(0, 10)})`);
+    const sess = h.session ? `, session ${shortSession(h.session)}` : '';
+    print(`  --force: taking over #${c.num} from worktree "${h.worktree || '-'}" (host ${h.host}${sess}, since ${String(h.created).slice(0, 10)})`);
   }
   for (const c of ghConf) {
     print(`  --force: taking over #${c.num} from GitHub assignee ${c.assignees.join(', ')}`);
@@ -159,13 +191,16 @@ function liveClaimComments(comments) {
   }
   const live = [];
   for (const c of sorted) {
-    const m = String(c.body || '').trim().match(CLAIM_RE);
+    const body = String(c.body || '').trim();
+    const m = body.match(CLAIM_RE);
     if (!m) continue;
     const login = (c.author && c.author.login) || '';
     const host = m[3];
+    const sm = body.match(SESSION_RE);
+    const session = sm ? sm[1].trim() : '';
     const at = c.createdAt;
     const cancelled = (releasesByLogin.get(login) || []).some((r) => r > at);
-    if (!cancelled) live.push({ login, host, at, identity: `${login}@${host}` });
+    if (!cancelled) live.push({ login, host, session, at, identity: `${login}@${host}` });
   }
   return live;
 }
@@ -193,8 +228,8 @@ function tieBreakVerdict(comments, myLogin, myHost) {
 }
 
 /** Post the claim comment (best-effort: a failure warns but never fails the claim). */
-function postClaimComment(repoAbs, num, wtName, branch) {
-  const r = git.ghIssueComment(repoAbs, num, claimCommentBody(wtName, branch));
+function postClaimComment(repoAbs, num, wtName, branch, session) {
+  const r = git.ghIssueComment(repoAbs, num, claimCommentBody(wtName, branch, session));
   if (!r.ok) warn(`could not post claim comment on #${num} (${r.stderr.split('\n')[0] || r.code}) — claim stands`);
 }
 
@@ -232,13 +267,15 @@ function yieldIssue(repoAbs, num, winner, myLogin) {
 function commentAndTieBreak(repoAbs, nums, owner) {
   const lost = [];
   for (const num of nums) {
-    postClaimComment(repoAbs, num, owner.wtName, owner.branch);
+    postClaimComment(repoAbs, num, owner.wtName, owner.branch, owner.session);
     const info = git.ghIssueView(repoAbs, num, ['comments']);
     if (!info || !Array.isArray(info.comments)) continue; // can't read comments → keep the claim
     const verdict = tieBreakVerdict(info.comments, owner.myLogin, HOST);
     if (verdict.lost) {
       yieldIssue(repoAbs, num, verdict.winner, owner.myLogin);
-      warn(`Yielded #${num} — an earlier simultaneous claim by ${verdict.winner.identity} wins. Pick another issue.`);
+      const w = verdict.winner;
+      const wsess = w.session ? ` · session ${shortSession(w.session)}` : '';
+      warn(`Yielded #${num} — an earlier simultaneous claim by ${w.identity}${wsess} wins. Pick another issue.`);
       lost.push(num);
     }
   }
@@ -272,12 +309,14 @@ Options:
   --repo <path>       repo root (default: git root of cwd)
   --worktree <name>   attach these claims to a worktree entity (ports live on the worktree)
   --branch <name>     branch these claims are worked on (informational; default: trunk)
+  --session <string>  Claude session identity (URL or name) recorded on the claim + comment;
+                      defaults to the COLAB_SESSION env var if set
   --force             take over a claim held by another worktree / GitHub user (logged, never silent)
 `;
 
 function cmdClaim(argv) {
   const opts = parseArgs(argv, {
-    values: { '--repo': 'repo', '--worktree': 'worktree', '--branch': 'branch' },
+    values: { '--repo': 'repo', '--worktree': 'worktree', '--branch': 'branch', '--session': 'session' },
     flags: { '--force': 'force', '-h': 'help', '--help': 'help' },
   });
   if (opts.help || opts._.length === 0) return print(HELP_CLAIM);
@@ -285,6 +324,7 @@ function cmdClaim(argv) {
   const nums = opts._.map(normIssueNum);
   const branch = opts.branch || 'trunk';
   const wtName = opts.worktree || null;
+  const session = resolveSession(opts);
   const gh = isGhUsable(repoAbs);
   const myLogin = gh ? git.ghCurrentLogin() : null;
 
@@ -301,14 +341,14 @@ function cmdClaim(argv) {
   const res = state.mutate((st) => {
     if (wtName && !st.worktrees[wtName]) {
       // allow claiming onto a worktree name that will be created later (informational link)
-      st.worktrees[wtName] = { name: wtName, repo: repoAbs, branch, path: null, ports: [], host: HOST, created: nowISO() };
+      st.worktrees[wtName] = { name: wtName, repo: repoAbs, branch, path: null, ports: [], host: HOST, session, status: 'running', created: nowISO() };
     }
     const created = [], reclaimed = [];
     for (const num of nums) {
       const key = claimKey(repoAbs, num);
       const ex = st.claims[key];
       if (ex && (ex.worktree || null) === (wtName || null)) { reclaimed.push(num); continue; } // idempotent
-      st.claims[key] = { issue: issueTag(num), repo: repoAbs, worktree: wtName, branch, host: HOST, created: nowISO() };
+      st.claims[key] = { issue: issueTag(num), repo: repoAbs, worktree: wtName, branch, host: HOST, session, created: nowISO() };
       created.push(num);
     }
     return { created, reclaimed };
@@ -324,7 +364,7 @@ function cmdClaim(argv) {
       if (r.ok) print(`  gh: #${num} assigned + labeled in-progress`);
       else warn(`gh edit #${num} failed (${r.stderr.split('\n')[0] || r.code}) — local claim stands`);
     }
-    lost = commentAndTieBreak(repoAbs, res.created, { wtName, branch, myLogin });
+    lost = commentAndTieBreak(repoAbs, res.created, { wtName, branch, myLogin, session });
   } else {
     warn('gh not usable here — claims are LOCAL-ONLY (no comment, no tie-break)');
   }
@@ -425,8 +465,8 @@ function cmdClaims(argv) {
     const wt = st.worktrees[g];
     const portStr = wt && wt.ports.length ? ` ports:${wt.ports.join(',')}` : '';
     print(`\n▸ ${g}${portStr}`);
-    const rows = cs.map((c) => [c.issue, shortRepo(c.repo), c.branch || '-', c.host, c.created.slice(0, 10)]);
-    print(table(rows, ['ISSUE', 'REPO', 'BRANCH', 'HOST', 'SINCE']).split('\n').map((l) => '  ' + l).join('\n'));
+    const rows = cs.map((c) => [c.issue, shortRepo(c.repo), c.branch || '-', c.host, shortSession(c.session) || '-', c.created.slice(0, 10)]);
+    print(table(rows, ['ISSUE', 'REPO', 'BRANCH', 'HOST', 'SESSION', 'SINCE']).split('\n').map((l) => '  ' + l).join('\n'));
   }
   return 0;
 }
@@ -695,6 +735,8 @@ dependency symlinking, dev-server restarts) live in OPTIONAL repo hooks, not her
         --name <name>      worktree dir name (default: branch after first '/')
         --trunk <name>     override trunk branch
         --repo <path>      repo root (default: git root of cwd)
+        --session <string> Claude session identity recorded on the worktree + its claims
+                           (defaults to the COLAB_SESSION env var)
         --force            take over issues already claimed by another worktree / GitHub user
       Claimed issues are ENFORCED: if --issues names an issue already held (locally on another
       worktree, or on GitHub by someone else) the command REFUSES before building anything,
@@ -742,7 +784,7 @@ function runHook(repoAbs, name, ctx) {
 
 function cmdWorktreeNew(argv) {
   const opts = parseArgs(argv, {
-    values: { '--issues': 'issues', '--ports': 'ports', '--range': 'range', '--at': 'at', '--name': 'name', '--trunk': 'trunk', '--repo': 'repo' },
+    values: { '--issues': 'issues', '--ports': 'ports', '--range': 'range', '--at': 'at', '--name': 'name', '--trunk': 'trunk', '--repo': 'repo', '--session': 'session' },
     aliases: { '--issue': '--issues' },
     flags: { '--force': 'force', '-h': 'help', '--help': 'help' },
   });
@@ -758,6 +800,7 @@ function cmdWorktreeNew(argv) {
   const portCount = opts.ports ? parseInt(opts.ports, 10) : 0;
   const atPorts = parseAtPorts(opts);
   const range = resolveWorktreeRange(opts, config, repoAbs); // --range > repo worktreePorts > default
+  const session = resolveSession(opts);
   const gh = isGhUsable(repoAbs);
   const myLogin = gh ? git.ghCurrentLogin() : null;
 
@@ -818,13 +861,14 @@ function cmdWorktreeNew(argv) {
       if (!found) throw new UserError(`Could not find ${portCount} consecutive free ports in ${range}`);
       chosenPorts = found;
     }
-    st.worktrees[name] = { name, repo: repoAbs, branch, path: wtPath, ports: chosenPorts, host: HOST, created: nowISO() };
+    st.worktrees[name] = { name, repo: repoAbs, branch, path: wtPath, ports: chosenPorts, host: HOST, session, status: 'running', created: nowISO() };
     for (const p of chosenPorts) st.ports[String(p)] = { port: p, owner: { type: 'worktree', ref: name }, host: HOST, created: nowISO() };
     const claimedNums = [], dupes = [];
     for (const num of issues) {
       const key = claimKey(repoAbs, num);
-      if (st.claims[key]) { dupes.push(num); st.claims[key].worktree = name; st.claims[key].branch = branch; continue; }
-      st.claims[key] = { issue: issueTag(num), repo: repoAbs, worktree: name, branch, host: HOST, created: nowISO() };
+      // claim inherits the worktree's session
+      if (st.claims[key]) { dupes.push(num); st.claims[key].worktree = name; st.claims[key].branch = branch; st.claims[key].session = session; continue; }
+      st.claims[key] = { issue: issueTag(num), repo: repoAbs, worktree: name, branch, host: HOST, session, created: nowISO() };
       claimedNums.push(num);
     }
     return { chosenPorts, claimedNums, dupes };
@@ -838,7 +882,7 @@ function cmdWorktreeNew(argv) {
       const r = git.ghIssueEdit(repoAbs, num, ['--add-assignee', '@me', '--add-label', 'in-progress']);
       if (!r.ok) warn(`gh edit #${num} failed — local claim stands`);
     }
-    lostIssues = commentAndTieBreak(repoAbs, claimedHere, { wtName: name, branch, myLogin });
+    lostIssues = commentAndTieBreak(repoAbs, claimedHere, { wtName: name, branch, myLogin, session });
     if (lostIssues.length) {
       warn(`Worktree "${name}" was created, but issue(s) ${lostIssues.map((n) => '#' + n).join(' ')} were lost to a`);
       warn(`simultaneous claim and yielded. The worktree remains — reuse it for another issue, or:`);
@@ -940,9 +984,9 @@ function cmdWorktrees(argv) {
   const rows = wts.map((wt) => {
     const claims = Object.values(st.claims).filter((c) => c.worktree === wt.name).map((c) => c.issue).join(' ') || '-';
     const alive = wt.path ? (fs.existsSync(wt.path) ? 'yes' : 'MISSING') : 'n/a';
-    return [wt.name, shortRepo(wt.repo), wt.branch, wt.ports.join(',') || '-', claims, alive];
+    return [wt.name, shortRepo(wt.repo), wt.branch, wt.ports.join(',') || '-', claims, wtStatus(wt), shortSession(wt.session) || '-', alive];
   });
-  print(table(rows, ['NAME', 'REPO', 'BRANCH', 'PORTS', 'ISSUES', 'ON-DISK']));
+  print(table(rows, ['NAME', 'REPO', 'BRANCH', 'PORTS', 'ISSUES', 'STATUS', 'SESSION', 'ON-DISK']));
   return 0;
 }
 
@@ -960,6 +1004,12 @@ Health-check the machine-local state and heal drift.
     auto-removed (they may be deliberate trunk claims). --prune removes them too and frees
     any ports they own.
   - Ports owned by a vanished worktree/claim are freed on --prune.
+  - A \`running\` worktree whose branch has landed on trunk (tree-contained, incl. squash merges) AND
+    holds NO live claims is flipped to \`merged\` (recorded on --prune). ANY live claim keeps it
+    running (an unfinished group sibling). \`merged\` worktrees still on disk are sweep candidates;
+    --prune tears them down fully (pre-remove hook, git worktree remove, free ports) — but refuses
+    ones with uncommitted TRACKED changes, reporting them instead. \`running\` worktrees are NEVER
+    swept.
 
 This exists because claims made without a worktree were never auto-healed before, and a
 real repo accumulated 17 stale same-day claims. Run \`colab doctor\` regularly; \`--prune\`
@@ -978,7 +1028,8 @@ function cmdDoctor(argv) {
   const config = state.loadConfig();
   const ttl = opts.ttl ? parseFloat(opts.ttl) : config.claimTTLHours;
 
-  const report = { deadWorktrees: [], orphanClaims: [], staleClaims: [], orphanPorts: [], prunedPorts: [], pruned: !!opts.prune };
+  const report = { deadWorktrees: [], orphanClaims: [], staleClaims: [], orphanPorts: [], prunedPorts: [],
+    mergedFlips: [], mergedSweep: [], mergedDirty: [], mergedHookFail: [], pruned: !!opts.prune };
 
   const apply = (fn) => opts.prune ? state.mutate(fn) : fn(state.loadState());
 
@@ -988,7 +1039,7 @@ function cmdDoctor(argv) {
       const dead = wt.path && !fs.existsSync(wt.path);
       if (!dead) continue;
       const claims = Object.entries(st.claims).filter(([, c]) => c.worktree === wt.name);
-      report.deadWorktrees.push({ name: wt.name, repo: shortRepo(wt.repo), path: wt.path, ports: wt.ports, claims: claims.map(([, c]) => c.issue) });
+      report.deadWorktrees.push({ name: wt.name, repo: shortRepo(wt.repo), path: wt.path, ports: wt.ports, claims: claims.map(([, c]) => c.issue), session: wt.session || '' });
       if (opts.prune) {
         for (const [k] of claims) delete st.claims[k];
         for (const p of wt.ports) { delete st.ports[String(p)]; report.prunedPorts.push(p); }
@@ -1007,7 +1058,7 @@ function cmdDoctor(argv) {
       if (!c.worktree) {
         const age = hoursSince(c.created);
         if (age > ttl) {
-          report.staleClaims.push({ issue: c.issue, repo: shortRepo(c.repo), ageHours: Math.round(age), host: c.host });
+          report.staleClaims.push({ issue: c.issue, repo: shortRepo(c.repo), ageHours: Math.round(age), host: c.host, session: c.session || '' });
           if (opts.prune) {
             // free any ports owned by this claim
             for (const p of Object.keys(st.ports)) {
@@ -1027,7 +1078,50 @@ function cmdDoctor(argv) {
         if (opts.prune) { delete st.ports[p]; report.prunedPorts.push(Number(p)); }
       }
     }
+    // 5. running worktrees whose branch has landed on trunk AND that hold no live claims → merged.
+    //    ANY live claim (an unfinished group sibling) keeps it running, regardless of branch content.
+    for (const wt of Object.values(st.worktrees)) {
+      if (wtStatus(wt) !== 'running') continue;
+      if (!wt.path || !fs.existsSync(wt.path)) continue; // dead handled in pass 1; stubs have no tree
+      const liveClaims = Object.values(st.claims).filter((c) => c.worktree === wt.name).length;
+      if (liveClaims > 0) continue;
+      const res = branchContainedInTrunk(wt.repo, wt.branch);
+      if (res.contained) {
+        report.mergedFlips.push({ name: wt.name, repo: shortRepo(wt.repo), branch: wt.branch });
+        if (opts.prune) wt.status = 'merged';
+      }
+    }
   });
+
+  // 6. merged worktrees still on disk = sweep candidates. Report always; --prune tears them down
+  //    (pre-remove hook → git worktree remove → free ports → drop entry). Done OUTSIDE the pass-1..5
+  //    lock to avoid nesting state.mutate; refuse ones with uncommitted TRACKED files (report instead).
+  //    running worktrees are NEVER touched by this sweep.
+  {
+    const st2 = state.loadState();
+    for (const wt of Object.values(st2.worktrees)) {
+      if (wtStatus(wt) !== 'merged') continue;
+      if (!wt.path || !fs.existsSync(wt.path)) continue;
+      const dirty = git.dirtyTracked(wt.path);
+      if (dirty) { report.mergedDirty.push({ name: wt.name, repo: shortRepo(wt.repo) }); continue; }
+      report.mergedSweep.push({ name: wt.name, repo: shortRepo(wt.repo), ports: wt.ports });
+      if (!opts.prune) continue;
+      const attached = Object.values(st2.claims).filter((c) => c.worktree === wt.name).map((c) => normIssueNum(c.issue));
+      const hook = runHook(wt.repo, 'pre-remove', { wtPath: wt.path, name: wt.name, branch: wt.branch, ports: wt.ports, issues: attached });
+      if (hook.ran && !hook.ok) { report.mergedHookFail.push(wt.name); continue; } // pre-remove veto → leave it
+      if (fs.existsSync(wt.path)) git.git(['worktree', 'remove', '--force', wt.path], wt.repo);
+      // LOCAL-ONLY: doctor never touches GitHub (a cron may be pruning a shared machine). A flipped
+      // merged worktree has no claims by the flip guard; a ship --keep-worktree residual claim is for
+      // an already-shipped (Closes) issue, so we drop it locally and let claims --sync reconcile GitHub.
+      state.mutate((st3) => {
+        for (const k of Object.keys(st3.claims)) if (st3.claims[k].worktree === wt.name) delete st3.claims[k];
+        for (const p of Object.keys(st3.ports)) {
+          if (st3.ports[p].owner.type === 'worktree' && st3.ports[p].owner.ref === wt.name) { delete st3.ports[p]; report.prunedPorts.push(Number(p)); }
+        }
+        delete st3.worktrees[wt.name];
+      });
+    }
+  }
 
   if (opts.json) { print(JSON.stringify(report, null, 2)); return 0; }
 
@@ -1036,7 +1130,7 @@ function cmdDoctor(argv) {
   if (report.deadWorktrees.length) {
     issues += report.deadWorktrees.length;
     print(`${verb} ${report.deadWorktrees.length} dead worktree(s) (directory gone):`);
-    for (const w of report.deadWorktrees) print(`  ${w.name} [${w.repo}] claims=${w.claims.join(' ') || '-'} ports=${w.ports.join(',') || '-'}`);
+    for (const w of report.deadWorktrees) print(`  ${w.name} [${w.repo}] claims=${w.claims.join(' ') || '-'} ports=${w.ports.join(',') || '-'}${w.session ? ` session=${shortSession(w.session)}` : ''}`);
   }
   if (report.orphanClaims.length) {
     issues += report.orphanClaims.length;
@@ -1045,15 +1139,34 @@ function cmdDoctor(argv) {
   }
   if (report.staleClaims.length) {
     print(`${opts.prune ? 'Pruned' : 'Flagged'} ${report.staleClaims.length} stale worktree-less claim(s) (> ${ttl}h):`);
-    for (const c of report.staleClaims) print(`  ${c.issue} [${c.repo}] age=${c.ageHours}h host=${c.host}`);
+    for (const c of report.staleClaims) print(`  ${c.issue} [${c.repo}] age=${c.ageHours}h host=${c.host}${c.session ? ` session=${shortSession(c.session)}` : ''}`);
     if (!opts.prune) print('  (worktree-less claims are not auto-removed — re-run with --prune to remove)');
   }
   if (report.orphanPorts.length) {
     print(`${verb} ${report.orphanPorts.length} orphan port(s):`);
     for (const p of report.orphanPorts) print(`  ${p.port} owner=${p.owner}`);
   }
+  if (report.mergedFlips.length) {
+    print(`${opts.prune ? 'Flipped' : 'Detected'} ${report.mergedFlips.length} worktree(s) running → merged (branch landed on trunk, no live claims):`);
+    for (const w of report.mergedFlips) print(`  ${w.name} [${w.repo}] branch=${w.branch}`);
+    if (!opts.prune) print('  (status recorded on --prune, which also sweeps merged worktrees)');
+  }
+  if (report.mergedSweep.length) {
+    print(`${opts.prune ? 'Swept' : 'Sweep candidates —'} ${report.mergedSweep.length} merged worktree(s) on disk:`);
+    for (const w of report.mergedSweep) print(`  ${w.name} [${w.repo}] ports=${w.ports.join(',') || '-'}`);
+    if (!opts.prune) print('  (re-run with --prune to tear these down: hook + git worktree remove + free ports)');
+  }
+  if (report.mergedDirty.length) {
+    print(`Skipped ${report.mergedDirty.length} merged worktree(s) with uncommitted TRACKED changes (not swept):`);
+    for (const w of report.mergedDirty) print(`  ${w.name} [${w.repo}] — commit/stash, or remove with: colab worktree rm ${w.name} --force`);
+  }
+  if (report.mergedHookFail.length) {
+    print(`Left ${report.mergedHookFail.length} merged worktree(s) — pre-remove hook vetoed teardown: ${report.mergedHookFail.join(' ')}`);
+  }
   if (opts.prune && report.prunedPorts.length) print(`Freed ports: ${[...new Set(report.prunedPorts)].sort((a, b) => a - b).join(', ')}`);
-  if (issues === 0 && report.staleClaims.length === 0 && report.orphanPorts.length === 0) print('All healthy — nothing to prune.');
+  const nothing = issues === 0 && report.staleClaims.length === 0 && report.orphanPorts.length === 0 &&
+    report.mergedFlips.length === 0 && report.mergedSweep.length === 0 && report.mergedDirty.length === 0;
+  if (nothing) print('All healthy — nothing to prune.');
   return 0;
 }
 
@@ -1534,6 +1647,39 @@ function resolveTrunk(repoAbs, doc) {
   return git.detectTrunk(repoAbs);
 }
 
+/**
+ * Is <branch>'s content already contained in <trunk>? This must be TRUE after a SQUASH merge, where
+ * the branch tip is never an ancestor of trunk (so `rev-list branch ^trunk` won't hit 0) — an
+ * ancestry test is the wrong tool. Instead we ask the real question: "does merging branch into trunk
+ * change trunk's tree at all?" If `git merge-tree --write-tree trunk branch` yields exactly trunk's
+ * current tree, the branch adds nothing → it is contained. This is correct for squash merges of any
+ * number of commits AND stays correct when trunk has moved on with unrelated work (the merge keeps
+ * that work, so the tree still matches only if branch introduces nothing new).
+ * Returns:
+ *   { contained:true }               merged tree == trunk tree → branch is in trunk
+ *   { contained:false }              merge introduces changes (not merged) → leave running
+ *   { contained:false, ambiguous }   refs missing / conflict / old git / error → LEAVE running (safe)
+ */
+function branchContainedInTrunk(repoAbs, branch) {
+  const trunk = resolveTrunk(repoAbs, projectDoc(repoAbs));
+  if (!trunk || trunk === branch) return { contained: false, ambiguous: true };
+  const okT = git.git(['rev-parse', '--verify', '--quiet', trunk], repoAbs).ok;
+  const okB = git.git(['rev-parse', '--verify', '--quiet', branch], repoAbs).ok;
+  if (!okT || !okB) return { contained: false, ambiguous: true };
+  const trunkTree = git.git(['rev-parse', `${trunk}^{tree}`], repoAbs);
+  const mt = git.git(['merge-tree', '--write-tree', trunk, branch], repoAbs);
+  if (mt.code === 0 && trunkTree.ok) {
+    const mergedTree = mt.stdout.split('\n')[0].trim();
+    return { contained: mergedTree === trunkTree.stdout };
+  }
+  if (mt.code === 1) return { contained: false }; // clean merge with changes → not contained
+  // Old git without --write-tree, or a conflict, or an error → fall back to a two-dot tree compare
+  // (correct when trunk hasn't advanced), else stay ambiguous. Never guess "contained".
+  const d = git.git(['diff', '--quiet', trunk, branch], repoAbs);
+  if (d.code === 0) return { contained: true };
+  return { contained: false, ambiguous: true };
+}
+
 /** New migration files introduced on <branch> vs <trunk> (Laravel + Prisma layouts). */
 function newMigrations(mainRoot, trunk, branch) {
   const r = git.git(['diff', '--name-only', `${trunk}...${branch}`], mainRoot);
@@ -1611,23 +1757,24 @@ Options:
 /** Resolve the session (branch, worktree name/path, claimed issue numbers) from --worktree/--branch. */
 function resolveShipSession(st, repoAbs, opts) {
   let name = null, branch = null, wtPath = null;
+  let session = '';
   if (opts.worktree) {
     const wt = st.worktrees[opts.worktree];
     if (!wt) throw new UserError(`No worktree "${opts.worktree}" in state`);
-    name = wt.name; branch = wt.branch; wtPath = wt.path;
+    name = wt.name; branch = wt.branch; wtPath = wt.path; session = wt.session || '';
   } else if (opts.branch) {
     branch = opts.branch;
     const wt = Object.values(st.worktrees).find((w) => w.repo === repoAbs && w.branch === branch);
-    if (wt) { name = wt.name; wtPath = wt.path; }
+    if (wt) { name = wt.name; wtPath = wt.path; session = wt.session || ''; }
   } else {
     throw new UserError('ship needs --worktree <name> or --branch <br>');
   }
   // Claimed issues for this session: by worktree if we have one, else by branch.
-  const issues = Object.values(st.claims)
-    .filter((c) => c.repo === repoAbs && (name ? c.worktree === name : c.branch === branch))
-    .map((c) => normIssueNum(c.issue))
-    .sort((a, b) => a - b);
-  return { name, branch, wtPath, issues };
+  const claims = Object.values(st.claims)
+    .filter((c) => c.repo === repoAbs && (name ? c.worktree === name : c.branch === branch));
+  const issues = claims.map((c) => normIssueNum(c.issue)).sort((a, b) => a - b);
+  if (!session) { const withSess = claims.find((c) => c.session); if (withSess) session = withSess.session; } // fall back to a claim's session
+  return { name, branch, wtPath, issues, session };
 }
 
 function cmdShip(argv) {
@@ -1774,6 +1921,10 @@ function cmdShip(argv) {
   const sha = git.git(['rev-parse', '--short', 'HEAD'], repoAbs).stdout;
   print(`  committed ${sha}: ${commitMsg}`);
 
+  // B1 has landed the squash on trunk → the worktree's branch is now merged. Record it before B3,
+  // so a --keep-worktree entry survives with status=merged (and doctor treats it as a sweep candidate).
+  if (sess.name) state.mutate((st) => { if (st.worktrees[sess.name]) st.worktrees[sess.name].status = 'merged'; });
+
   // ---- (e) B2: push trunk with COLAB_SHIP=1 (the sanctioned-path signal for pre-push-guard) ----
   print(`B2: pushing ${trunk} …`);
   const push = git.run('git', ['push', 'origin', trunk], { cwd: repoAbs, env: { ...process.env, COLAB_SHIP: '1' } });
@@ -1799,7 +1950,8 @@ function cmdShip(argv) {
     for (const num of sess.issues) {
       const info = git.ghIssueView(repoAbs, num, ['state']);
       if (info && info.state !== 'CLOSED') warn(`#${num} did not auto-close (state=${info.state}) — the Closes trailer needs a push to the DEFAULT branch; close it by hand if trunk isn't default`);
-      const r = git.ghIssueComment(repoAbs, num, `🚢 Shipped to ${trunk} by colab ship — ${sha}`);
+      const shipSess = sess.session ? ` · session ${sess.session}` : '';
+      const r = git.ghIssueComment(repoAbs, num, `🚢 Shipped to ${trunk} by colab ship — ${sha}${shipSess}`);
       if (!r.ok) warn(`could not post ship comment on #${num}`);
     }
   }
