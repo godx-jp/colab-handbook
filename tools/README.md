@@ -179,7 +179,29 @@ Run `colab <cmd> --help` for full detail.
 | `worktree rm <name> [--force] [--repo P]` | remove a worktree; release its group; free its ports |
 | `worktrees [--json]` | list worktrees (with on-disk liveness) |
 | `doctor [--prune] [--ttl H] [--json]` | heal dead worktrees / orphan + stale claims / orphan ports |
+| `release-notes [<range>] [--repo P] [--out F] [--headline "..."]` | grouped Markdown release summary from git history (see below) |
 | `config [show \| add-repo P \| rm-repo P \| set K V]` | manage config |
+
+### Release notes
+
+`colab release-notes` builds a grouped Markdown release summary from git history — the same
+grouping the release workflow (`templates/release-tag.yml`) produces, but runnable locally. It
+exists because when org GitHub Actions was billing-locked the workflow couldn't run and the
+summary had to be hand-built; this makes that path first-class and non-drifting. The subcommand
+and the workflow's summary step are **deliberate copies** of each other (the workflow must stay
+self-contained git+shell, so they can't share code) — a comment in both says to edit them together.
+
+Non-merge commit subjects in the range are grouped by Conventional Commit type
+(`feat, fix, perf, refactor, docs, chore, test`) with per-group counts, plus an `Other` bucket for
+unprefixed subjects. The range defaults to `<most recent tag reachable from HEAD>..HEAD`; with no
+tags and no explicit range it errors rather than guessing. `--headline "..."` inserts one sentence
+after the commit-count line; `--out <file>` writes to a file instead of stdout.
+
+Composable — pipe straight into `gh`:
+
+```sh
+colab release-notes v0.3.0..v0.4.0 | gh release create v0.4.0 --notes-file - --generate-notes
+```
 
 ## Safety
 

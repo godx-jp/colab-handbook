@@ -195,7 +195,15 @@ Pre-1.0 repos use `v0.x.y` and treat minor as "meaningful increment".
 
 **Every tag gets a release summary** — a published GitHub Release whose notes group the
 commits since the previous tag by Conventional-Commit type. This is the changelog; we do not
-maintain `CHANGELOG.md` by hand. How you generate it is your repo's business.
+maintain `CHANGELOG.md` by hand. How you generate it is your repo's business —
+[`templates/release-tag.yml`](templates/release-tag.yml) automates it on tag push.
+
+When the workflow cannot run (Actions outage, billing lock — it has happened), the summary
+is still owed. Manual fallback, same output:
+
+```sh
+colab release-notes v1.1.0..v1.2.0 | gh release create v1.2.0 --notes-file - --generate-notes
+```
 
 Do not tag from `dev`. Do not tag a commit that has not passed the full suite on `main`.
 

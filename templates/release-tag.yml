@@ -87,6 +87,12 @@ jobs:
             echo "Release $TAG — first release, summarising all history"
           fi
 
+      # MIRRORS the `colab release-notes` subcommand (tools/colab in this handbook). The two
+      # CANNOT share code — this workflow must stay copy-and-own self-contained (git + shell,
+      # no Node) — so they are deliberate duplicates of the same grouping logic. If you change
+      # the grouping or output format here, make the matching edit in tools/colab (and vice
+      # versa). `colab release-notes` exists so this summary can be built by hand when CI can't
+      # run (e.g. an org billing-lock on Actions).
       - name: Build grouped release summary
         id: notes
         env:

@@ -756,6 +756,116 @@ function cmdDoctor(argv) {
 }
 
 // ---------------------------------------------------------------------------
+// release-notes
+//
+// MIRRORS templates/release-tag.yml "Build grouped release summary" step. The two CANNOT
+// share code — the workflow must stay copy-and-own self-contained (git+shell, no Node) — so
+// they are deliberate duplicates. If you change the grouping/format here, make the matching
+// edit in templates/release-tag.yml (and vice versa). Born from a real gap: when org GitHub
+// Actions was billing-locked the workflow couldn't run, and the summary had to be built by
+// hand locally. This subcommand makes that manual path first-class and non-drifting.
+// ---------------------------------------------------------------------------
+
+// Conventional Commit types, in display order. Keep in lockstep with the workflow's emit_group
+// calls + its Other/Breaking grep alternation.
+const CC_TYPES = ['feat', 'fix', 'perf', 'refactor', 'docs', 'chore', 'test'];
+
+const HELP_RELEASE_NOTES = `colab release-notes [<range>] [--repo <path>] [--out <file>] [--headline "<text>"]
+
+Build a grouped Markdown release summary from git history — the same grouping the release
+workflow (templates/release-tag.yml) produces, but runnable locally (e.g. when CI is down).
+
+  <range>       a git revision range, e.g. v0.3.0..v0.4.0
+                Default: <most recent tag reachable from HEAD>..HEAD
+                If the repo has no tags and no range is given, this errors (it will not guess).
+  --repo <path> repo root (default: git root of cwd)
+  --out <file>  write to a file instead of stdout
+  --headline "<text>"   one sentence inserted right after the commit-count line (e.g. the
+                        highlight of the release). Optional; nothing is hardcoded.
+
+Output: an H2 "Release summary", a line stating N non-merge commits since <base>, the optional
+headline, then "### <type> (<count>)" sections (feat, fix, perf, refactor, docs, chore, test)
+with "- <subject>" bullets, plus an "### Other (<count>)" bucket for unprefixed subjects.
+
+Composable — pipe straight into gh:
+  colab release-notes v0.3.0..v0.4.0 | gh release create v0.4.0 --notes-file - --generate-notes
+`;
+
+/** Left-hand side of a git range as the "base" label, or null if the range isn't a two-dot range. */
+function rangeBase(range) {
+  const m = String(range).split(/\.\.\.?/); // handles both A..B and A...B
+  if (m.length < 2) return null;            // single revision → whole history, no base
+  return m[0] || null;                      // guard against "..HEAD"
+}
+
+function cmdReleaseNotes(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--repo': 'repo', '--out': 'out', '--headline': 'headline' },
+    flags: { '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help) return print(HELP_RELEASE_NOTES);
+  const repoAbs = resolveRepo(opts);
+  if (!git.repoRoot(repoAbs)) throw new UserError(`${repoAbs} is not a git repo`);
+
+  // Resolve the range + its base label.
+  let range = opts._[0];
+  let base;
+  if (range) {
+    base = rangeBase(range);
+  } else {
+    // Default: since the most recent tag reachable from HEAD.
+    const d = git.git(['describe', '--tags', '--abbrev=0'], repoAbs);
+    if (!d.ok || !d.stdout) {
+      throw new UserError('No tags in this repo — pass an explicit <range> (e.g. v0.1.0..HEAD). Refusing to guess.');
+    }
+    base = d.stdout;
+    range = `${base}..HEAD`;
+  }
+
+  // Non-merge commit subjects in the range. A merge subject carries no Conventional Commit
+  // meaning and would double-count its own commits, so --no-merges (same as the workflow).
+  const log = git.git(['log', range, '--no-merges', '--format=%s'], repoAbs);
+  if (!log.ok) {
+    throw new UserError(`git log ${range} failed: ${log.stderr.split('\n')[0] || `exit ${log.code}`}`);
+  }
+  const subjects = log.stdout.split('\n').filter(Boolean);
+
+  // Group by type. Match 'feat: x', 'feat(scope): x', and the breaking 'feat!: x' / 'feat(x)!: y'.
+  const groups = Object.fromEntries(CC_TYPES.map((t) => [t, []]));
+  const other = [];
+  const re = new RegExp(`^(${CC_TYPES.join('|')})(\\([^)]*\\))?!?:`);
+  for (const s of subjects) {
+    const m = s.match(re);
+    if (m) groups[m[1]].push(s); else other.push(s);
+  }
+
+  // Build Markdown.
+  let out = `## Release summary\n\n`;
+  out += base
+    ? `${subjects.length} commits since \`${base}\`.\n`
+    : `${subjects.length} commits.\n`;
+  if (opts.headline) out += `\n${opts.headline}\n`;
+  out += `\n`;
+  for (const t of CC_TYPES) {
+    if (!groups[t].length) continue;
+    out += `### ${t} (${groups[t].length})\n`;
+    out += groups[t].map((s) => `- ${s}`).join('\n') + '\n\n';
+  }
+  if (other.length) {
+    out += `### Other (${other.length})\n`;
+    out += other.map((s) => `- ${s}`).join('\n') + '\n\n';
+  }
+
+  if (opts.out) {
+    fs.writeFileSync(opts.out, out.endsWith('\n') ? out : out + '\n');
+    process.stderr.write(`Wrote ${subjects.length} commits (${range}) → ${opts.out}\n`);
+  } else {
+    process.stdout.write(out);
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // config (show / manage the aggregation inputs)
 // ---------------------------------------------------------------------------
 
@@ -825,6 +935,7 @@ Commands:
   worktrees [--json]
 
   doctor [--prune] [--ttl H] [--json]   heal dead worktrees / orphan + stale claims / orphan ports
+  release-notes [<range>] [--repo P] [--out F] [--headline "..."]   grouped Markdown release summary
   config [show|add-repo P|rm-repo P|set K V]
 
 State is machine-local at ~/.colab/ (override with COLAB_HOME). Run any command with
@@ -846,6 +957,7 @@ function main(argv) {
     case 'worktree': return cmdWorktree(rest);
     case 'worktrees': return cmdWorktrees(rest);
     case 'doctor': return cmdDoctor(rest);
+    case 'release-notes': return cmdReleaseNotes(rest);
     case 'config': return cmdConfig(rest);
     case undefined:
     case '-h': case '--help': case 'help': return print(HELP_ROOT);
