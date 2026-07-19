@@ -1542,6 +1542,46 @@ function newMigrations(mainRoot, trunk, branch) {
     .filter((f) => /(^|\/)database\/migrations\//.test(f) || /(^|\/)prisma\/migrations\//.test(f));
 }
 
+/**
+ * Build the default squash-commit message when --message is absent, PRESERVING the branch's crafted
+ * commit. We use the newest NON-merge commit on the branch (i.e. the crafted HEAD — a B0 merge commit
+ * is skipped) as the squash subject + body verbatim, so the scoped subject and the Co-Authored-By /
+ * Claude-Session footers survive the squash (the branch is deleted at B3, so this is the only record).
+ *
+ * Then, ABOVE the original body (before the footers, blank-line separated):
+ *   - a `Closes #N, Closes #M` line for every claimed issue not ALREADY present in the message
+ *     (GitHub parses Closes anywhere; subjects stay short so it goes in the body, never the subject);
+ *   - for a multi-commit branch, the earlier commit subjects as a bulleted list (newest first,
+ *     skipping `chore(sync)` merge-noise).
+ */
+function buildSquashMessage(mainRoot, trunk, branch, issues) {
+  const logShas = git.git(['log', `${trunk}..${branch}`, '--no-merges', '--format=%H'], mainRoot);
+  const shas = logShas.ok ? logShas.stdout.split('\n').filter(Boolean) : [];
+  const headSha = shas[0] || git.git(['rev-parse', branch], mainRoot).stdout; // fallback: branch tip
+  const full = git.git(['log', '-1', '--format=%B', headSha], mainRoot).stdout;
+
+  const nl = full.indexOf('\n');
+  const subject = (nl === -1 ? full : full.slice(0, nl)).replace(/\s+$/, '');
+  const origBody = (nl === -1 ? '' : full.slice(nl + 1)).replace(/^\n+/, '').replace(/\s+$/, '');
+
+  // Closes for issues not already referenced anywhere in the crafted message.
+  const missing = issues.filter((n) => !new RegExp(`[Cc]loses #${n}\\b`).test(full));
+  const closesLine = missing.length ? missing.map((n) => `Closes #${n}`).join(', ') : '';
+
+  // Earlier commit subjects (newest first), skipping sync-merge noise.
+  const bullets = shas.slice(1)
+    .map((s) => git.git(['log', '-1', '--format=%s', s], mainRoot).stdout)
+    .filter((s) => s && !/^chore\(sync\)/.test(s))
+    .map((s) => `- ${s}`);
+
+  const blocks = [];
+  if (closesLine) blocks.push(closesLine);
+  if (bullets.length) blocks.push(bullets.join('\n'));
+  if (origBody) blocks.push(origBody);
+  const body = blocks.join('\n\n');
+  return body ? `${subject}\n\n${body}` : subject;
+}
+
 const HELP_SHIP = `colab ship [--repo <path>] [--worktree <name> | --branch <br>] [--message "<msg>"] [--keep-worktree] [--dry]
 
 The ONE sanctioned door for code-wrap Phase B: squash-merge a session branch into TRUNK. Autonomy is
@@ -1707,11 +1747,15 @@ function cmdShip(argv) {
       return 1;
     }
   }
-  const type = sess.branch.includes('/') ? sess.branch.slice(0, sess.branch.indexOf('/')) : 'chore';
-  const slug = sess.branch.includes('/') ? sess.branch.slice(sess.branch.indexOf('/') + 1) : sess.branch;
-  const subject = opts.message || `${type}: ${slug.replace(/-\d+(?:-\d+)*$/, '').replace(/-/g, ' ')}`;
-  const closes = sess.issues.length ? ` — ${sess.issues.map((n) => 'Closes #' + n).join(', ')}` : '';
-  const commitMsg = `${subject}${closes}`;
+  let commitMsg;
+  if (opts.message) {
+    // --message overrides everything (Closes trailer still appended so the issues auto-close).
+    const closes = sess.issues.length ? ` — ${sess.issues.map((n) => 'Closes #' + n).join(', ')}` : '';
+    commitMsg = `${opts.message}${closes}`;
+  } else {
+    // Preserve the branch's crafted commit (subject + footers); insert Closes above the footers.
+    commitMsg = buildSquashMessage(repoAbs, trunk, sess.branch, sess.issues);
+  }
 
   print(`B1: squash-merging ${sess.branch} → ${trunk} …`);
   const sq = git.git(['merge', '--squash', sess.branch], repoAbs);
