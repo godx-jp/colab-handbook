@@ -28,7 +28,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # was already pushed). Never trust the caller's PATH for a step that runs mid-release.
 NODE="$(command -v node 2>/dev/null || true)"
 if [ -z "$NODE" ]; then
-  for c in /opt/homebrew/bin/node /usr/local/bin/node "$HOME/.nvm/versions/node"/*/bin/node; do
+  for c in "$HOME/.local/bin/node" /opt/homebrew/bin/node /usr/local/bin/node "$HOME/.nvm/versions/node"/*/bin/node; do
     [ -x "$c" ] && NODE="$c" && break
   done
 fi
