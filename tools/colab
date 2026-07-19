@@ -84,24 +84,70 @@ const RELEASE_MARK = '✅ Released';
 // trailing `· session <value>` (added 2026-07) is captured separately by SESSION_RE so this
 // regex — and every existing parser — stays byte-stable for session-less comments.
 const CLAIM_RE = /🔒 Claimed — worktree `([^`]*)` · branch `([^`]*)` · host `([^`]*)` · (\S+)/;
+// The `· session <field>` tail, captured as the rest of the line. parseSessionField() then decodes
+// the THREE shapes it can take — `[name](url)`, a bare URL, or a bare name — plus the legacy
+// plain-URL form written before sessionName existed.
 const SESSION_RE = /· session (.+)$/;
 
 /**
- * Resolve the Claude session identity for this invocation: --session flag > COLAB_SESSION env >
- * '' (absent, never an error). Free-form — a session URL or a short human name.
+ * Resolve the Claude session URL for this invocation: --session flag > COLAB_SESSION env >
+ * '' (absent, never an error). Free-form — typically a session URL.
  */
 function resolveSession(opts) {
   const s = opts.session || process.env.COLAB_SESSION || '';
   return String(s).trim();
 }
 
-/** Compact a session for table/message display: the `session_…` tail, or the name, capped. */
+/**
+ * Resolve the short human session LABEL: --session-name flag > COLAB_SESSION_NAME env > ''.
+ * A friendly name (e.g. `colab-handbook`, `pilot-issue-30`) shown in tables instead of a URL tail.
+ */
+function resolveSessionName(opts) {
+  const s = opts.sessionName || process.env.COLAB_SESSION_NAME || '';
+  return String(s).trim();
+}
+
+/** Compact a session URL for display: the `session_…` tail, or the raw value, capped. */
 function shortSession(s) {
   if (!s) return '';
   s = String(s);
   const m = s.match(/session_[\w-]+/);
   const v = m ? m[0] : s;
   return v.length > 18 ? v.slice(0, 17) + '…' : v;
+}
+
+/**
+ * The friendly identity for tables / plain-text messages: prefer the human `sessionName`, fall back
+ * to the compacted URL, else '' (callers render '-'). `--json` always carries both raw fields.
+ */
+function displayIdentity(sessionName, session) {
+  if (sessionName) return sessionName;
+  if (session) return shortSession(session);
+  return '';
+}
+
+/** The ` · session …` comment suffix, or '' — keeps the no-identity comment byte-stable. */
+function sessionCommentSuffix(session, sessionName) {
+  if (sessionName && session) return ` · session [${sessionName}](${session})`; // both → markdown link
+  if (session) return ` · session ${session}`;                                  // url only → legacy form
+  if (sessionName) return ` · session ${sessionName}`;                          // name only
+  return '';
+}
+
+/**
+ * Decode the `· session <field>` tail of a claim comment into { sessionName, session }. Accepts:
+ *   `[name](url)`  → both;  bare `https://…`/`session_…` → url only;  any other bare token → name.
+ * The bare-URL branch is exactly the LEGACY format written before sessionName existed, so old
+ * comments keep parsing. Returns empty strings when there is no session tail.
+ */
+function parseSessionField(body) {
+  const m = String(body).match(SESSION_RE);
+  if (!m) return { sessionName: '', session: '' };
+  const v = m[1].trim();
+  const link = v.match(/^\[([^\]]*)\]\((.*)\)$/);
+  if (link) return { sessionName: link[1], session: link[2] };
+  if (/^https?:\/\//.test(v) || /session_[\w-]+/.test(v)) return { sessionName: '', session: v };
+  return { sessionName: v, session: '' };
 }
 
 /**
@@ -112,10 +158,10 @@ function shortSession(s) {
  */
 function wtStatus(wt) { return (wt && wt.status) || 'running'; }
 
-/** The exact claim-comment body. Keep in lockstep with CLAIM_RE and the README. */
-function claimCommentBody(wtName, branch, session) {
+/** The exact claim-comment body. Keep in lockstep with CLAIM_RE/parseSessionField and the README. */
+function claimCommentBody(wtName, branch, session, sessionName) {
   const base = `${CLAIM_MARK} — worktree \`${wtName || '-'}\` · branch \`${branch}\` · host \`${HOST}\` · ${nowISO()}`;
-  return session ? `${base} · session ${session}` : base; // session-less body stays EXACTLY as before
+  return base + sessionCommentSuffix(session, sessionName); // no-identity body stays EXACTLY as before
 }
 
 /** Issues whose EXISTING local claim sits on a different worktree than the one we're claiming onto. */
@@ -150,7 +196,8 @@ function printRefusal(localConf, ghConf) {
   process.stderr.write('✗ Refusing — one or more issues are already claimed:\n');
   for (const c of localConf) {
     const h = c.holder;
-    const sess = h.session ? ` · session ${shortSession(h.session)}` : '';
+    const id = displayIdentity(h.sessionName, h.session);
+    const sess = id ? ` · session ${id}` : '';
     process.stderr.write(
       `  #${c.num} local: worktree "${h.worktree || '-'}" · branch ${h.branch || '-'} · host ${h.host}${sess} · since ${String(h.created).slice(0, 10)}\n`);
   }
@@ -165,7 +212,8 @@ function printRefusal(localConf, ghConf) {
 function printTakeover(localConf, ghConf) {
   for (const c of localConf) {
     const h = c.holder;
-    const sess = h.session ? `, session ${shortSession(h.session)}` : '';
+    const id = displayIdentity(h.sessionName, h.session);
+    const sess = id ? `, session ${id}` : '';
     print(`  --force: taking over #${c.num} from worktree "${h.worktree || '-'}" (host ${h.host}${sess}, since ${String(h.created).slice(0, 10)})`);
   }
   for (const c of ghConf) {
@@ -196,11 +244,10 @@ function liveClaimComments(comments) {
     if (!m) continue;
     const login = (c.author && c.author.login) || '';
     const host = m[3];
-    const sm = body.match(SESSION_RE);
-    const session = sm ? sm[1].trim() : '';
+    const { session, sessionName } = parseSessionField(body); // handles [name](url) / url / name / legacy
     const at = c.createdAt;
     const cancelled = (releasesByLogin.get(login) || []).some((r) => r > at);
-    if (!cancelled) live.push({ login, host, session, at, identity: `${login}@${host}` });
+    if (!cancelled) live.push({ login, host, session, sessionName, at, identity: `${login}@${host}` });
   }
   return live;
 }
@@ -228,8 +275,8 @@ function tieBreakVerdict(comments, myLogin, myHost) {
 }
 
 /** Post the claim comment (best-effort: a failure warns but never fails the claim). */
-function postClaimComment(repoAbs, num, wtName, branch, session) {
-  const r = git.ghIssueComment(repoAbs, num, claimCommentBody(wtName, branch, session));
+function postClaimComment(repoAbs, num, wtName, branch, session, sessionName) {
+  const r = git.ghIssueComment(repoAbs, num, claimCommentBody(wtName, branch, session, sessionName));
   if (!r.ok) warn(`could not post claim comment on #${num} (${r.stderr.split('\n')[0] || r.code}) — claim stands`);
 }
 
@@ -262,19 +309,20 @@ function yieldIssue(repoAbs, num, winner, myLogin) {
 
 /**
  * Run the claim comment + tie-break for issues we just claimed on GitHub. Returns the list of
- * issue numbers we LOST (already yielded). `owner` is {wtName, branch, myLogin}.
+ * issue numbers we LOST (already yielded). `owner` is {wtName, branch, myLogin, session, sessionName}.
  */
 function commentAndTieBreak(repoAbs, nums, owner) {
   const lost = [];
   for (const num of nums) {
-    postClaimComment(repoAbs, num, owner.wtName, owner.branch, owner.session);
+    postClaimComment(repoAbs, num, owner.wtName, owner.branch, owner.session, owner.sessionName);
     const info = git.ghIssueView(repoAbs, num, ['comments']);
     if (!info || !Array.isArray(info.comments)) continue; // can't read comments → keep the claim
     const verdict = tieBreakVerdict(info.comments, owner.myLogin, HOST);
     if (verdict.lost) {
       yieldIssue(repoAbs, num, verdict.winner, owner.myLogin);
       const w = verdict.winner;
-      const wsess = w.session ? ` · session ${shortSession(w.session)}` : '';
+      const id = displayIdentity(w.sessionName, w.session);
+      const wsess = id ? ` · session ${id}` : '';
       warn(`Yielded #${num} — an earlier simultaneous claim by ${w.identity}${wsess} wins. Pick another issue.`);
       lost.push(num);
     }
@@ -309,14 +357,14 @@ Options:
   --repo <path>       repo root (default: git root of cwd)
   --worktree <name>   attach these claims to a worktree entity (ports live on the worktree)
   --branch <name>     branch these claims are worked on (informational; default: trunk)
-  --session <string>  Claude session identity (URL or name) recorded on the claim + comment;
-                      defaults to the COLAB_SESSION env var if set
+  --session <url>     Claude session URL recorded on the claim + comment (default: COLAB_SESSION env)
+  --session-name <s>  short human label shown in tables/messages (default: COLAB_SESSION_NAME env)
   --force             take over a claim held by another worktree / GitHub user (logged, never silent)
 `;
 
 function cmdClaim(argv) {
   const opts = parseArgs(argv, {
-    values: { '--repo': 'repo', '--worktree': 'worktree', '--branch': 'branch', '--session': 'session' },
+    values: { '--repo': 'repo', '--worktree': 'worktree', '--branch': 'branch', '--session': 'session', '--session-name': 'sessionName' },
     flags: { '--force': 'force', '-h': 'help', '--help': 'help' },
   });
   if (opts.help || opts._.length === 0) return print(HELP_CLAIM);
@@ -325,6 +373,7 @@ function cmdClaim(argv) {
   const branch = opts.branch || 'trunk';
   const wtName = opts.worktree || null;
   const session = resolveSession(opts);
+  const sessionName = resolveSessionName(opts);
   const gh = isGhUsable(repoAbs);
   const myLogin = gh ? git.ghCurrentLogin() : null;
 
@@ -341,14 +390,14 @@ function cmdClaim(argv) {
   const res = state.mutate((st) => {
     if (wtName && !st.worktrees[wtName]) {
       // allow claiming onto a worktree name that will be created later (informational link)
-      st.worktrees[wtName] = { name: wtName, repo: repoAbs, branch, path: null, ports: [], host: HOST, session, status: 'running', created: nowISO() };
+      st.worktrees[wtName] = { name: wtName, repo: repoAbs, branch, path: null, ports: [], host: HOST, session, sessionName, status: 'running', created: nowISO() };
     }
     const created = [], reclaimed = [];
     for (const num of nums) {
       const key = claimKey(repoAbs, num);
       const ex = st.claims[key];
       if (ex && (ex.worktree || null) === (wtName || null)) { reclaimed.push(num); continue; } // idempotent
-      st.claims[key] = { issue: issueTag(num), repo: repoAbs, worktree: wtName, branch, host: HOST, session, created: nowISO() };
+      st.claims[key] = { issue: issueTag(num), repo: repoAbs, worktree: wtName, branch, host: HOST, session, sessionName, created: nowISO() };
       created.push(num);
     }
     return { created, reclaimed };
@@ -364,7 +413,7 @@ function cmdClaim(argv) {
       if (r.ok) print(`  gh: #${num} assigned + labeled in-progress`);
       else warn(`gh edit #${num} failed (${r.stderr.split('\n')[0] || r.code}) — local claim stands`);
     }
-    lost = commentAndTieBreak(repoAbs, res.created, { wtName, branch, myLogin, session });
+    lost = commentAndTieBreak(repoAbs, res.created, { wtName, branch, myLogin, session, sessionName });
   } else {
     warn('gh not usable here — claims are LOCAL-ONLY (no comment, no tie-break)');
   }
@@ -465,7 +514,7 @@ function cmdClaims(argv) {
     const wt = st.worktrees[g];
     const portStr = wt && wt.ports.length ? ` ports:${wt.ports.join(',')}` : '';
     print(`\n▸ ${g}${portStr}`);
-    const rows = cs.map((c) => [c.issue, shortRepo(c.repo), c.branch || '-', c.host, shortSession(c.session) || '-', c.created.slice(0, 10)]);
+    const rows = cs.map((c) => [c.issue, shortRepo(c.repo), c.branch || '-', c.host, displayIdentity(c.sessionName, c.session) || '-', c.created.slice(0, 10)]);
     print(table(rows, ['ISSUE', 'REPO', 'BRANCH', 'HOST', 'SESSION', 'SINCE']).split('\n').map((l) => '  ' + l).join('\n'));
   }
   return 0;
@@ -735,8 +784,8 @@ dependency symlinking, dev-server restarts) live in OPTIONAL repo hooks, not her
         --name <name>      worktree dir name (default: branch after first '/')
         --trunk <name>     override trunk branch
         --repo <path>      repo root (default: git root of cwd)
-        --session <string> Claude session identity recorded on the worktree + its claims
-                           (defaults to the COLAB_SESSION env var)
+        --session <url>    Claude session URL recorded on the worktree + its claims (env COLAB_SESSION)
+        --session-name <s> short human label for tables/messages (env COLAB_SESSION_NAME)
         --force            take over issues already claimed by another worktree / GitHub user
       Claimed issues are ENFORCED: if --issues names an issue already held (locally on another
       worktree, or on GitHub by someone else) the command REFUSES before building anything,
@@ -784,7 +833,7 @@ function runHook(repoAbs, name, ctx) {
 
 function cmdWorktreeNew(argv) {
   const opts = parseArgs(argv, {
-    values: { '--issues': 'issues', '--ports': 'ports', '--range': 'range', '--at': 'at', '--name': 'name', '--trunk': 'trunk', '--repo': 'repo', '--session': 'session' },
+    values: { '--issues': 'issues', '--ports': 'ports', '--range': 'range', '--at': 'at', '--name': 'name', '--trunk': 'trunk', '--repo': 'repo', '--session': 'session', '--session-name': 'sessionName' },
     aliases: { '--issue': '--issues' },
     flags: { '--force': 'force', '-h': 'help', '--help': 'help' },
   });
@@ -801,6 +850,7 @@ function cmdWorktreeNew(argv) {
   const atPorts = parseAtPorts(opts);
   const range = resolveWorktreeRange(opts, config, repoAbs); // --range > repo worktreePorts > default
   const session = resolveSession(opts);
+  const sessionName = resolveSessionName(opts);
   const gh = isGhUsable(repoAbs);
   const myLogin = gh ? git.ghCurrentLogin() : null;
 
@@ -861,14 +911,14 @@ function cmdWorktreeNew(argv) {
       if (!found) throw new UserError(`Could not find ${portCount} consecutive free ports in ${range}`);
       chosenPorts = found;
     }
-    st.worktrees[name] = { name, repo: repoAbs, branch, path: wtPath, ports: chosenPorts, host: HOST, session, status: 'running', created: nowISO() };
+    st.worktrees[name] = { name, repo: repoAbs, branch, path: wtPath, ports: chosenPorts, host: HOST, session, sessionName, status: 'running', created: nowISO() };
     for (const p of chosenPorts) st.ports[String(p)] = { port: p, owner: { type: 'worktree', ref: name }, host: HOST, created: nowISO() };
     const claimedNums = [], dupes = [];
     for (const num of issues) {
       const key = claimKey(repoAbs, num);
       // claim inherits the worktree's session
-      if (st.claims[key]) { dupes.push(num); st.claims[key].worktree = name; st.claims[key].branch = branch; st.claims[key].session = session; continue; }
-      st.claims[key] = { issue: issueTag(num), repo: repoAbs, worktree: name, branch, host: HOST, session, created: nowISO() };
+      if (st.claims[key]) { dupes.push(num); st.claims[key].worktree = name; st.claims[key].branch = branch; st.claims[key].session = session; st.claims[key].sessionName = sessionName; continue; }
+      st.claims[key] = { issue: issueTag(num), repo: repoAbs, worktree: name, branch, host: HOST, session, sessionName, created: nowISO() };
       claimedNums.push(num);
     }
     return { chosenPorts, claimedNums, dupes };
@@ -882,7 +932,7 @@ function cmdWorktreeNew(argv) {
       const r = git.ghIssueEdit(repoAbs, num, ['--add-assignee', '@me', '--add-label', 'in-progress']);
       if (!r.ok) warn(`gh edit #${num} failed — local claim stands`);
     }
-    lostIssues = commentAndTieBreak(repoAbs, claimedHere, { wtName: name, branch, myLogin, session });
+    lostIssues = commentAndTieBreak(repoAbs, claimedHere, { wtName: name, branch, myLogin, session, sessionName });
     if (lostIssues.length) {
       warn(`Worktree "${name}" was created, but issue(s) ${lostIssues.map((n) => '#' + n).join(' ')} were lost to a`);
       warn(`simultaneous claim and yielded. The worktree remains — reuse it for another issue, or:`);
@@ -984,7 +1034,7 @@ function cmdWorktrees(argv) {
   const rows = wts.map((wt) => {
     const claims = Object.values(st.claims).filter((c) => c.worktree === wt.name).map((c) => c.issue).join(' ') || '-';
     const alive = wt.path ? (fs.existsSync(wt.path) ? 'yes' : 'MISSING') : 'n/a';
-    return [wt.name, shortRepo(wt.repo), wt.branch, wt.ports.join(',') || '-', claims, wtStatus(wt), shortSession(wt.session) || '-', alive];
+    return [wt.name, shortRepo(wt.repo), wt.branch, wt.ports.join(',') || '-', claims, wtStatus(wt), displayIdentity(wt.sessionName, wt.session) || '-', alive];
   });
   print(table(rows, ['NAME', 'REPO', 'BRANCH', 'PORTS', 'ISSUES', 'STATUS', 'SESSION', 'ON-DISK']));
   return 0;
@@ -1039,7 +1089,7 @@ function cmdDoctor(argv) {
       const dead = wt.path && !fs.existsSync(wt.path);
       if (!dead) continue;
       const claims = Object.entries(st.claims).filter(([, c]) => c.worktree === wt.name);
-      report.deadWorktrees.push({ name: wt.name, repo: shortRepo(wt.repo), path: wt.path, ports: wt.ports, claims: claims.map(([, c]) => c.issue), session: wt.session || '' });
+      report.deadWorktrees.push({ name: wt.name, repo: shortRepo(wt.repo), path: wt.path, ports: wt.ports, claims: claims.map(([, c]) => c.issue), session: wt.session || '', sessionName: wt.sessionName || '' });
       if (opts.prune) {
         for (const [k] of claims) delete st.claims[k];
         for (const p of wt.ports) { delete st.ports[String(p)]; report.prunedPorts.push(p); }
@@ -1058,7 +1108,7 @@ function cmdDoctor(argv) {
       if (!c.worktree) {
         const age = hoursSince(c.created);
         if (age > ttl) {
-          report.staleClaims.push({ issue: c.issue, repo: shortRepo(c.repo), ageHours: Math.round(age), host: c.host, session: c.session || '' });
+          report.staleClaims.push({ issue: c.issue, repo: shortRepo(c.repo), ageHours: Math.round(age), host: c.host, session: c.session || '', sessionName: c.sessionName || '' });
           if (opts.prune) {
             // free any ports owned by this claim
             for (const p of Object.keys(st.ports)) {
@@ -1130,7 +1180,7 @@ function cmdDoctor(argv) {
   if (report.deadWorktrees.length) {
     issues += report.deadWorktrees.length;
     print(`${verb} ${report.deadWorktrees.length} dead worktree(s) (directory gone):`);
-    for (const w of report.deadWorktrees) print(`  ${w.name} [${w.repo}] claims=${w.claims.join(' ') || '-'} ports=${w.ports.join(',') || '-'}${w.session ? ` session=${shortSession(w.session)}` : ''}`);
+    for (const w of report.deadWorktrees) print(`  ${w.name} [${w.repo}] claims=${w.claims.join(' ') || '-'} ports=${w.ports.join(',') || '-'}${displayIdentity(w.sessionName, w.session) ? ` session=${displayIdentity(w.sessionName, w.session)}` : ''}`);
   }
   if (report.orphanClaims.length) {
     issues += report.orphanClaims.length;
@@ -1139,7 +1189,7 @@ function cmdDoctor(argv) {
   }
   if (report.staleClaims.length) {
     print(`${opts.prune ? 'Pruned' : 'Flagged'} ${report.staleClaims.length} stale worktree-less claim(s) (> ${ttl}h):`);
-    for (const c of report.staleClaims) print(`  ${c.issue} [${c.repo}] age=${c.ageHours}h host=${c.host}${c.session ? ` session=${shortSession(c.session)}` : ''}`);
+    for (const c of report.staleClaims) print(`  ${c.issue} [${c.repo}] age=${c.ageHours}h host=${c.host}${displayIdentity(c.sessionName, c.session) ? ` session=${displayIdentity(c.sessionName, c.session)}` : ''}`);
     if (!opts.prune) print('  (worktree-less claims are not auto-removed — re-run with --prune to remove)');
   }
   if (report.orphanPorts.length) {
@@ -1757,15 +1807,15 @@ Options:
 /** Resolve the session (branch, worktree name/path, claimed issue numbers) from --worktree/--branch. */
 function resolveShipSession(st, repoAbs, opts) {
   let name = null, branch = null, wtPath = null;
-  let session = '';
+  let session = '', sessionName = '';
   if (opts.worktree) {
     const wt = st.worktrees[opts.worktree];
     if (!wt) throw new UserError(`No worktree "${opts.worktree}" in state`);
-    name = wt.name; branch = wt.branch; wtPath = wt.path; session = wt.session || '';
+    name = wt.name; branch = wt.branch; wtPath = wt.path; session = wt.session || ''; sessionName = wt.sessionName || '';
   } else if (opts.branch) {
     branch = opts.branch;
     const wt = Object.values(st.worktrees).find((w) => w.repo === repoAbs && w.branch === branch);
-    if (wt) { name = wt.name; wtPath = wt.path; session = wt.session || ''; }
+    if (wt) { name = wt.name; wtPath = wt.path; session = wt.session || ''; sessionName = wt.sessionName || ''; }
   } else {
     throw new UserError('ship needs --worktree <name> or --branch <br>');
   }
@@ -1773,8 +1823,11 @@ function resolveShipSession(st, repoAbs, opts) {
   const claims = Object.values(st.claims)
     .filter((c) => c.repo === repoAbs && (name ? c.worktree === name : c.branch === branch));
   const issues = claims.map((c) => normIssueNum(c.issue)).sort((a, b) => a - b);
-  if (!session) { const withSess = claims.find((c) => c.session); if (withSess) session = withSess.session; } // fall back to a claim's session
-  return { name, branch, wtPath, issues, session };
+  if (!session && !sessionName) { // fall back to a claim's identity
+    const withId = claims.find((c) => c.session || c.sessionName);
+    if (withId) { session = withId.session || ''; sessionName = withId.sessionName || ''; }
+  }
+  return { name, branch, wtPath, issues, session, sessionName };
 }
 
 function cmdShip(argv) {
@@ -1950,7 +2003,7 @@ function cmdShip(argv) {
     for (const num of sess.issues) {
       const info = git.ghIssueView(repoAbs, num, ['state']);
       if (info && info.state !== 'CLOSED') warn(`#${num} did not auto-close (state=${info.state}) — the Closes trailer needs a push to the DEFAULT branch; close it by hand if trunk isn't default`);
-      const shipSess = sess.session ? ` · session ${sess.session}` : '';
+      const shipSess = sessionCommentSuffix(sess.session, sess.sessionName); // markdown link when both present
       const r = git.ghIssueComment(repoAbs, num, `🚢 Shipped to ${trunk} by colab ship — ${sha}${shipSess}`);
       if (!r.ok) warn(`could not post ship comment on #${num}`);
     }

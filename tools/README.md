@@ -138,21 +138,33 @@ by the `claims --sync --prune` reconcile path (which acts on *your own* assigned
 
 ## Session identity (which conversation)
 
-Every claim and worktree can record a **Claude session identity** — a free-form string, typically a
-session URL (`https://claude.ai/code/session_…`) or a short human name. Resolution precedence:
-`--session <string>` flag **>** the `COLAB_SESSION` env var **>** absent (empty — never an error).
+Every claim and worktree can record a **two-part Claude session identity**:
 
-- Stored as `session` on both worktree and claim entries; a claim made via `worktree new --issues`
-  **inherits the worktree's session**. Standalone `colab claim` reads the same flag/env.
-- Surfaced in `colab claims` and `colab worktrees` (URLs shown as their `session_…` tail; full value
-  in `--json`); appended to the `🔒 Claimed` and `🚢 Shipped` comments as ` · session <value>`; and
-  included in refusal / takeover / doctor holder details.
-- The `🔒 Claimed` comment format stays **byte-identical when no session is set** (parsers depend on
-  it) — the ` · session …` field is only appended when present.
+| field | source (precedence) | typical value |
+|---|---|---|
+| `session` (URL) | `--session <url>` **>** `COLAB_SESSION` env **>** absent | `https://claude.ai/code/session_…` |
+| `sessionName` (label) | `--session-name <s>` **>** `COLAB_SESSION_NAME` env **>** absent | `colab-handbook`, `pilot-issue-30` |
 
-Why: `host` says which *machine* holds a claim; `session` says which *conversation*. When a claim
-looks stale, that's the difference between "which laptop is this?" and one click to the exact chat —
-staleness triage becomes trivial.
+Either, both, or neither may be set — never an error.
+
+- Both fields are stored on worktree **and** claim entries; a claim made via `worktree new --issues`
+  **inherits both** from the worktree. Standalone `colab claim` reads the same flags/envs.
+- **Display precedence** (tables, refusal / takeover / tie-break / doctor holder lines): the friendly
+  `sessionName` wins; else the URL compacted to its `session_…` tail; else `-`. `--json` always
+  carries **both** fields raw.
+- **GitHub comments** (`🔒 Claimed`, `🚢 Shipped`) render the session tail by shape:
+  - both → a markdown link ` · session [<name>](<url>)`
+  - URL only → ` · session <url>` (the original form)
+  - name only → ` · session <name>`
+  - neither → **nothing** — the comment stays **byte-identical** to the no-identity format (parsers
+    depend on this).
+- The comment **parser** (tie-break / `liveClaimComments`) decodes all three shapes **plus** the
+  legacy plain-URL form written before `sessionName` existed, so old comments keep parsing; the
+  tie-break yield message shows the friendly form.
+
+Why: `host` says which *machine* holds a claim; the session says which *conversation* — and a short
+`sessionName` makes a table row readable at a glance while the URL stays one click away. When a claim
+looks stale, that's the difference between "which laptop is this?" and jumping straight to the chat.
 
 ## Worktree lifecycle (`status`)
 
@@ -220,6 +232,7 @@ concurrent sessions don't lose writes.
       "name": "...", "repo": "/abs/repo", "branch": "fix/...",
       "path": "/abs/repo/.worktrees/...", "ports": [5230],
       "host": "machine", "session": "https://claude.ai/code/session_…",
+      "sessionName": "colab-handbook",  // short human label (either/both/neither)
       "status": "running",              // running → merged (killed = entry removed)
       "created": "<iso>"
     }
@@ -229,7 +242,8 @@ concurrent sessions don't lose writes.
       "issue": "#115", "repo": "/abs/repo",
       "worktree": "import-fixes-115-114-113",   // or null for a trunk claim
       "branch": "fix/...", "host": "machine",
-      "session": "https://claude.ai/code/session_…",   // inherited from the worktree
+      "session": "https://claude.ai/code/session_…",   // both inherited from the worktree
+      "sessionName": "colab-handbook",
       "created": "<iso>"
     }
   },
@@ -243,9 +257,9 @@ concurrent sessions don't lose writes.
 - **Global per machine**: ports are unique across *all* repos, so it's one file, not per-repo.
 - Port `owner.type` is `worktree` | `claim` | `manual`; `ref` is the worktree name, claim key, or
   a manual label.
-- `session` and `status` are **backward-compatible**: entries written before they existed render as
-  blank session / `running` status — no migration needed. See *Session identity* and *Worktree
-  lifecycle* below.
+- `session`, `sessionName`, and `status` are **backward-compatible**: entries written before they
+  existed render as blank identity / `running` status — no migration needed. See *Session identity*
+  and *Worktree lifecycle* below.
 
 ## Reserved ports — the design change
 
@@ -320,13 +334,13 @@ Run `colab <cmd> --help` for full detail.
 
 | command | purpose |
 |---|---|
-| `claim <issue>... [--worktree N] [--branch B] [--session S] [--force] [--repo P]` | claim one or many issues (atomic; onto one worktree). **Enforced** — see *Claim lifecycle* below |
+| `claim <issue>... [--worktree N] [--branch B] [--session S] [--session-name S] [--force] [--repo P]` | claim one or many issues (atomic; onto one worktree). **Enforced** — see *Claim lifecycle* below |
 | `release <issue> [--repo P]` | release a single issue; siblings + worktree survive |
 | `claims [--json] [--sync [--prune]]` | list (grouped by worktree); `--sync` **adds** claims found on GitHub (assigned + in-progress); `--prune` also **removes** local claims GitHub no longer shows |
 | `port alloc [--count N] [--range A-B \| --at p1,p2,...] [--worktree N \| --claim I \| --label S]` | allocate consecutive free ports, or pin exact ports with `--at` |
 | `port free <port> \| --worktree N \| --claim I` | free ports |
 | `ports [--json]` | list allocated ports + the reserved set |
-| `worktree new <branch> [--issues N,M] [--ports N \| --at p1,..] [--name X] [--trunk T] [--session S] [--repo P]` | create a worktree (optional) |
+| `worktree new <branch> [--issues N,M] [--ports N \| --at p1,..] [--name X] [--trunk T] [--session S] [--session-name S] [--repo P]` | create a worktree (optional) |
 | `worktree rm <name> [--force] [--repo P]` | remove a worktree; release its group; free its ports |
 | `worktrees [--json]` | list worktrees (status + on-disk liveness) |
 | `ship [--worktree N \| --branch B] [--message M] [--keep-worktree] [--dry]` | code-wrap **Phase B**: squash-merge a session branch → trunk. Gated by repo autonomy (see *Phase B autonomy ladder*) |
