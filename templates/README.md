@@ -71,7 +71,7 @@ Decided 2026-07-19, after a GitHub Actions billing lock stopped every
 | Repo class | `runs-on` | Why |
 |---|---|---|
 | **Public** repo | `ubuntu-latest` | Free minutes, unaffected by billing — and **never** self-hosted: a fork PR would execute arbitrary code on your runner. |
-| **Private** CI | `[self-hosted, ...]` org runner | Immune to billing, persistent tool caches, local network. |
+| **Private** CI | the org's `[self-hosted, ...]` runner **where one exists**; `ubuntu-latest` otherwise | Immune to billing, persistent tool caches, local network. Runners are registered per-org — one org's runner serves nothing in another org. Register a runner for an org when its billing or scale makes it worth it, not preemptively. |
 | **Private** deploy | its own runner label | Deploys must never queue behind CI jobs. |
 
 Self-hosted job hygiene: no `sudo`, install tools into `$RUNNER_TEMP`, never
