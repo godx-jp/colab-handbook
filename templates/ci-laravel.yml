@@ -1,0 +1,257 @@
+# CI (Laravel) — TEMPLATE. Copy me into your repo at .github/workflows/ci.yml.
+#
+# This is a starting point, not a dependency. Once you copy it, YOU OWN THIS FILE.
+# Edit it freely: rename jobs, add steps, drop the parts you do not need. Nothing
+# calls this file remotely and nothing will update it for you — divergence between
+# your copy and the handbook is expected and fine. If you find an improvement worth
+# sharing, change the handbook template too, but that is a manual, deliberate act.
+#
+# EDIT POINTS are marked `# EDIT:` — walk them once after copying.
+#
+# For: Laravel + Inertia + React + Vite fullstack apps with Omnify codegen.
+#
+# Two things here are NOT optional, and are the whole reason this is separate from
+# ci-node.yml:
+#
+#   1. THE SQLITE BOOTSTRAP. The Vite build runs the Laravel wayfinder plugin, which
+#      shells out to `php artisan wayfinder:generate`. That means the application must
+#      actually BOOT on the runner. Our .env.example files ship DB_CONNECTION=mysql,
+#      so without an override artisan tries to reach a MySQL server that does not
+#      exist on the runner and the build dies. We copy .env.example, rewrite the
+#      connection to sqlite, touch an empty database file, and generate a throwaway
+#      APP_KEY. This .env is disposable and never leaves the runner.
+#
+#   2. RUNNING WAYFINDER EXPLICITLY, before Vite. The Vite plugin swallows stderr and
+#      reports only "Command failed", which is unusable for debugging. Running the
+#      artisan command ourselves first means a codegen failure shows its real error.
+
+name: CI
+
+on:
+  push:
+    # EDIT: keep only the branches this repo actually has.
+    # Tier A repos have both dev (trunk) and main (release). Tier B has main only.
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+env:
+  # Light CI on the dev trunk (does it build at all, ~2 min); heavy CI on main, where
+  # the Pest suite gates a release. EDIT: set to a literal 'true' if this repo is
+  # Tier B (main is trunk) and you always want the suite.
+  RUN_TESTS: ${{ github.ref == 'refs/heads/main' || github.base_ref == 'main' }}
+  # EDIT: bump deliberately, not automatically.
+  GITLEAKS_VERSION: "8.30.1"
+  # EDIT: match the app's APP_NAME. Leave empty if the build does not read it.
+  VITE_APP_NAME: ""
+  # EDIT: arguments passed to `php artisan wayfinder:generate`.
+  WAYFINDER_ARGS: "--with-form"
+
+jobs:
+  gitleaks:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest # EDIT: self-hosted label if this repo needs one.
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # Full history: scan the commit log, not only the current tree.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks (pinned release binary)
+        run: |
+          # NOT gitleaks/gitleaks-action@v2 — it demands a paid GITLEAKS_LICENSE for
+          # organization-owned repositories. The plain release binary is MIT.
+          curl -sSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          rm -f gitleaks.tar.gz
+
+      - name: gitleaks detect
+        run: gitleaks detect --source . --no-banner
+
+  build:
+    name: Build (Laravel + Vite)
+    runs-on: ubuntu-latest # EDIT: self-hosted label if this repo needs one.
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      # ---------------------------------------------------------------------------
+      # Toolchain resolution. Precedence, highest first:
+      #   PHP :  1. .github/project.yml -> php:      2. composer.json -> require.php
+      #   Node:  1. .github/project.yml -> node:     2. .nvmrc, else package.json engines.node
+      #   ...and if neither declares it, FAIL.
+      #
+      # There is deliberately NO fallback default. A silent default is exactly how a
+      # repo here ended up building on Node 20 in CI while deploying on Node 22 —
+      # CI was green and proved nothing about what actually shipped. Keep these equal
+      # to what the deploy target runs, or CI proves nothing.
+      # ---------------------------------------------------------------------------
+      - name: Resolve toolchain versions
+        id: toolchain
+        run: |
+          set -euo pipefail
+
+          # "^8.3" / ">=22.1" / "v22" / "8.4.*" -> "8.3" / "22.1" / "22" / "8.4"
+          normalise() {
+            printf '%s' "$1" \
+              | tr -d '"' \
+              | sed -E 's/^[^0-9]*//' \
+              | sed -E 's/[[:space:]].*$//' \
+              | sed -E 's/\.(x|\*)$//' \
+              | sed -E 's/[^0-9.].*$//' \
+              | sed -E 's/\.$//'
+          }
+
+          # Read a flat `key: value` out of .github/project.yml. That file is a
+          # handful of top-level keys by design, so this is sufficient.
+          from_project_yml() {
+            [ -f .github/project.yml ] || return 0
+            sed -nE "s/^[[:space:]]*$1:[[:space:]]*\"?([^\"#[:space:]]+)\"?.*/\1/p" .github/project.yml | head -1
+          }
+
+          # --- PHP ---------------------------------------------------------------
+          PHP_VERSION=""; PHP_SOURCE=""
+          V="$(from_project_yml php || true)"
+          if [ -n "$V" ] && [ "$V" != "null" ]; then
+            PHP_VERSION="$(normalise "$V")"; PHP_SOURCE=".github/project.yml (php:)"
+          fi
+          if [ -z "$PHP_VERSION" ] && [ -f composer.json ]; then
+            V=""
+            if command -v php >/dev/null 2>&1; then
+              V="$(php -r '$c=json_decode(file_get_contents("composer.json"),true); echo $c["require"]["php"] ?? "";' || true)"
+            elif command -v python3 >/dev/null 2>&1; then
+              V="$(python3 -c "import json;print((json.load(open('composer.json')).get('require') or {}).get('php') or '')" || true)"
+            elif command -v node >/dev/null 2>&1; then
+              V="$(node -e "try{const r=require('./composer.json').require||{};process.stdout.write(String(r.php||''))}catch(_){}" || true)"
+            fi
+            if [ -n "$V" ]; then
+              PHP_VERSION="$(normalise "$V")"; PHP_SOURCE="composer.json (require.php)"
+            fi
+          fi
+          if [ -z "$PHP_VERSION" ]; then
+            echo "::error::No PHP version is declared in this repository, and this workflow refuses to guess one."
+            {
+              echo "Declare it in ONE of:"
+              echo "  1. .github/project.yml  ->  php: \"8.4\"   (preferred)"
+              echo "  2. composer.json        ->  \"require\": { \"php\": \"^8.4\" }"
+              echo "Use the version the DEPLOY target runs."
+            } >&2
+            exit 1
+          fi
+
+          # --- Node --------------------------------------------------------------
+          NODE_VERSION=""; NODE_SOURCE=""
+          V="$(from_project_yml node || true)"
+          if [ -n "$V" ] && [ "$V" != "null" ]; then
+            NODE_VERSION="$(normalise "$V")"; NODE_SOURCE=".github/project.yml (node:)"
+          fi
+          if [ -z "$NODE_VERSION" ] && [ -f .nvmrc ]; then
+            V="$(grep -vE '^[[:space:]]*(#|$)' .nvmrc | head -1 | tr -d '[:space:]' || true)"
+            if [ -n "$V" ]; then
+              NODE_VERSION="$(normalise "$V")"; NODE_SOURCE=".nvmrc"
+            fi
+          fi
+          if [ -z "$NODE_VERSION" ] && [ -f package.json ]; then
+            V=""
+            if command -v node >/dev/null 2>&1; then
+              V="$(node -e "try{const e=require('./package.json').engines||{};process.stdout.write(String(e.node||''))}catch(_){}" || true)"
+            elif command -v python3 >/dev/null 2>&1; then
+              V="$(python3 -c "import json;print((json.load(open('package.json')).get('engines') or {}).get('node') or '')" || true)"
+            fi
+            if [ -n "$V" ]; then
+              NODE_VERSION="$(normalise "$V")"; NODE_SOURCE="package.json (engines.node)"
+            fi
+          fi
+          if [ -z "$NODE_VERSION" ]; then
+            echo "::error::No Node version is declared in this repository, and this workflow refuses to guess one."
+            {
+              echo "Declare it in ONE of:"
+              echo "  1. .github/project.yml  ->  node: \"22\"   (preferred)"
+              echo "  2. .nvmrc  ->  22        or  package.json -> \"engines\": { \"node\": \">=22\" }"
+              echo "Use the version the DEPLOY target runs."
+            } >&2
+            exit 1
+          fi
+
+          echo "php-version=$PHP_VERSION"   >> "$GITHUB_OUTPUT"
+          echo "node-version=$NODE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "PHP $PHP_VERSION (from: $PHP_SOURCE) / Node $NODE_VERSION (from: $NODE_SOURCE)"
+          {
+            echo "PHP **$PHP_VERSION** — resolved from \`$PHP_SOURCE\`"
+            echo ""
+            echo "Node **$NODE_VERSION** — resolved from \`$NODE_SOURCE\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ steps.toolchain.outputs.php-version }}
+          # sqlite3 + pdo_sqlite are what the throwaway bootstrap below runs on.
+          extensions: mbstring, sqlite3, pdo_sqlite, bcmath, intl # EDIT: add what this app needs.
+          coverage: none
+
+      - name: Composer install
+        run: |
+          # --no-scripts: the post-autoload-dump hook runs `package:discover`, which
+          # boots the app — and the app cannot boot until the .env below exists.
+          # Dev dependencies are installed only when the Pest suite will run; a build-
+          # only job does not need them (wayfinder lives in require, not require-dev).
+          if [ "$RUN_TESTS" = "true" ]; then
+            composer install --no-interaction --prefer-dist --optimize-autoloader --no-scripts
+          else
+            composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader --no-scripts
+          fi
+
+      - name: Prepare throwaway env for build-time codegen (wayfinder)
+        run: |
+          # See the header: .env.example ships DB_CONNECTION=mysql, but there is no
+          # MySQL on the runner. Rewrite to sqlite against an empty file so artisan
+          # boots. This .env is disposable — deploy workflows rsync with --exclude
+          # '.env', so it can never reach a server.
+          cp .env.example .env
+          sed -i 's/^DB_CONNECTION=.*/DB_CONNECTION=sqlite/' .env
+          touch database/database.sqlite
+          php artisan key:generate --force
+          php artisan package:discover --ansi
+
+          echo "=== PHP version on runner ==="
+          php -v
+
+          echo "=== wayfinder:generate (stderr visible) ==="
+          # Run it here rather than letting the Vite plugin invoke it: the plugin hides
+          # stderr and reports only "Command failed".
+          php artisan wayfinder:generate $WAYFINDER_ARGS
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ steps.toolchain.outputs.node-version }}
+
+      - name: Build frontend assets (Vite)
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run migrations against sqlite
+        if: env.RUN_TESTS == 'true'
+        run: |
+          # Migrations must apply cleanly from zero. This is the cheapest way to catch
+          # a migration that only works against an already-populated database.
+          php artisan migrate --force
+
+      - name: Test (Pest)
+        if: env.RUN_TESTS == 'true'
+        run: |
+          if [ -f vendor/bin/pest ]; then
+            vendor/bin/pest --ci
+          elif [ -f vendor/bin/phpunit ]; then
+            echo "::notice::No Pest binary — falling back to PHPUnit."
+            vendor/bin/phpunit
+          else
+            echo "::error::RUN_TESTS is true but neither vendor/bin/pest nor vendor/bin/phpunit exists. Add a test runner, or set RUN_TESTS: false."
+            exit 1
+          fi

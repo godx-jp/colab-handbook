@@ -1,0 +1,209 @@
+# CI (Node) — TEMPLATE. Copy me into your repo at .github/workflows/ci.yml.
+#
+# This is a starting point, not a dependency. Once you copy it, YOU OWN THIS FILE.
+# Edit it freely: rename jobs, add steps, drop the parts you do not need. Nothing
+# calls this file remotely and nothing will update it for you — divergence between
+# your copy and the handbook is expected and fine. If you find an improvement worth
+# sharing, change the handbook template too, but that is a manual, deliberate act.
+#
+# EDIT POINTS are marked `# EDIT:` — walk them once after copying.
+#
+# For: pure Node projects (Vite SPA, node libs, Astro static sites, Capacitor apps).
+# NOT for: Laravel + Inertia fullstack apps — their Vite build shells out to
+# `php artisan wayfinder:generate` and needs PHP on the runner. Use ci-laravel.yml.
+#
+# What it does:
+#   1. Resolve the Node version from declared sources — never a hardcoded default.
+#   2. Secret scan with gitleaks (pinned release binary, see note at the step).
+#   3. Install dependencies with the package manager the lockfile implies.
+#   4. Run typecheck / lint / test only if package.json declares those scripts, so a
+#      repo without them is not forced to add placeholders to keep CI green.
+#   5. Build.
+
+name: CI
+
+on:
+  push:
+    # EDIT: keep only the branches this repo actually has.
+    # Tier A repos have both dev (trunk) and main (release). Tier B has main only.
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+env:
+  # EDIT: bump deliberately, not automatically.
+  GITLEAKS_VERSION: "8.30.1"
+  # EDIT: npm script to build. Change for monorepos or non-standard scripts.
+  BUILD_COMMAND: "build"
+
+jobs:
+  gitleaks:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest # EDIT: self-hosted label if this repo needs one.
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # Full history: gitleaks scans commits, not just the working tree, so a
+          # secret that was committed and later removed is still caught.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks (pinned release binary)
+        run: |
+          # Deliberately NOT gitleaks/gitleaks-action@v2: that action requires a paid
+          # GITLEAKS_LICENSE for repositories owned by an organization (free only for
+          # personal repos). The release binary itself is MIT and has no such gate.
+          # Repos also carry a local pre-commit gitleaks hook; this is the second layer.
+          curl -sSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          rm -f gitleaks.tar.gz
+
+      - name: gitleaks detect
+        run: gitleaks detect --source . --no-banner
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest # EDIT: self-hosted label if this repo needs one.
+    defaults:
+      run:
+        # EDIT: set to the directory holding package.json if the app is not at the root.
+        working-directory: .
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      # ---------------------------------------------------------------------------
+      # Toolchain resolution. Precedence, highest first:
+      #   1. .github/project.yml  ->  node: <version>
+      #   2. .nvmrc, else package.json -> engines.node
+      #   3. FAIL.
+      #
+      # There is deliberately NO fallback default. A silent default is exactly how a
+      # repo here ended up building on Node 20 in CI while deploying on Node 22 —
+      # CI was green and proved nothing about what actually shipped. If the version
+      # is not declared anywhere, that is a bug in the repo, and the build says so.
+      # ---------------------------------------------------------------------------
+      - name: Resolve Node version
+        id: toolchain
+        run: |
+          set -euo pipefail
+
+          # Normalise "^22", ">=22.1", "v22", "22.x" -> "22.1" / "22". setup-node
+          # accepts a partial version and picks the newest matching release.
+          normalise() {
+            printf '%s' "$1" \
+              | tr -d '"' \
+              | sed -E 's/^[^0-9]*//' \
+              | sed -E 's/[[:space:]].*$//' \
+              | sed -E 's/\.x$//' \
+              | sed -E 's/[^0-9.].*$//' \
+              | sed -E 's/\.$//'
+          }
+
+          NODE_VERSION=""
+          SOURCE=""
+
+          # 1. project.yml wins. Flat `node: 22` mapping; good enough, this file is
+          #    a handful of keys by design.
+          if [ -f .github/project.yml ]; then
+            V="$(sed -nE 's/^[[:space:]]*node:[[:space:]]*"?([^"#[:space:]]+)"?.*/\1/p' .github/project.yml | head -1 || true)"
+            if [ -n "$V" ] && [ "$V" != "null" ]; then
+              NODE_VERSION="$(normalise "$V")"; SOURCE=".github/project.yml (node:)"
+            fi
+          fi
+
+          # 2a. .nvmrc
+          if [ -z "$NODE_VERSION" ] && [ -f .nvmrc ]; then
+            V="$(grep -vE '^[[:space:]]*(#|$)' .nvmrc | head -1 | tr -d '[:space:]' || true)"
+            if [ -n "$V" ]; then
+              NODE_VERSION="$(normalise "$V")"; SOURCE=".nvmrc"
+            fi
+          fi
+
+          # 2b. package.json -> engines.node
+          if [ -z "$NODE_VERSION" ] && [ -f package.json ]; then
+            V=""
+            if command -v node >/dev/null 2>&1; then
+              V="$(node -e "try{const e=require('./package.json').engines||{};process.stdout.write(String(e.node||''))}catch(_){}" || true)"
+            elif command -v python3 >/dev/null 2>&1; then
+              V="$(python3 -c "import json;print((json.load(open('package.json')).get('engines') or {}).get('node') or '')" || true)"
+            fi
+            if [ -n "$V" ]; then
+              NODE_VERSION="$(normalise "$V")"; SOURCE="package.json (engines.node)"
+            fi
+          fi
+
+          # 3. No declared source -> stop. Do not guess.
+          if [ -z "$NODE_VERSION" ]; then
+            echo "::error::No Node version is declared in this repository, and this workflow refuses to guess one."
+            {
+              echo ""
+              echo "Declare it in ONE of these places (checked in this order):"
+              echo "  1. .github/project.yml  ->  node: \"22\"   (preferred: one descriptor for the whole repo)"
+              echo "  2. .nvmrc               ->  22            (also drives local dev via nvm/fnm)"
+              echo "     or package.json      ->  \"engines\": { \"node\": \">=22\" }"
+              echo ""
+              echo "Pick the version your DEPLOY target runs. CI on a different major than"
+              echo "production proves nothing."
+            } >&2
+            exit 1
+          fi
+
+          echo "node-version=$NODE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Node $NODE_VERSION (resolved from: $SOURCE)"
+          echo "Node **$NODE_VERSION** — resolved from \`$SOURCE\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ steps.toolchain.outputs.node-version }}
+
+      - name: Install dependencies
+        run: |
+          # Lockfile decides the package manager. `npm ci` / `--frozen-lockfile` are
+          # intentional: CI must fail on a stale lockfile rather than silently resolve
+          # a different dependency tree than the developer had.
+          if [ -f pnpm-lock.yaml ]; then
+            corepack enable
+            pnpm install --frozen-lockfile
+          elif [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "::warning::No lockfile found — falling back to 'npm install'. Commit a lockfile so CI is reproducible."
+            npm install
+          fi
+
+      - name: Detect optional scripts
+        id: scripts
+        run: |
+          # node -e over grep: package.json is JSON, and a "typecheck" substring can
+          # appear inside a dependency name or another script's body.
+          has() {
+            node -e "const s=(require('./package.json').scripts)||{};process.exit(s['$1']?0:1)" 2>/dev/null
+          }
+          for s in typecheck lint test; do
+            if has "$s"; then
+              echo "$s=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "$s=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::No '$s' script in package.json — skipping."
+            fi
+          done
+
+      - name: Typecheck
+        if: steps.scripts.outputs.typecheck == 'true'
+        run: npm run typecheck
+
+      - name: Lint
+        if: steps.scripts.outputs.lint == 'true'
+        run: npm run lint
+
+      - name: Test
+        if: steps.scripts.outputs.test == 'true'
+        run: npm test
+
+      - name: Build
+        run: npm run "$BUILD_COMMAND"

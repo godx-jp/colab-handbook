@@ -1,0 +1,866 @@
+#!/usr/bin/env node
+'use strict';
+/*
+ * colab — issue claims, port allocation and optional worktrees for parallel sessions/agents.
+ * Plain Node, zero npm dependencies. Shells out to git/gh. State is machine-local at ~/.colab/.
+ *
+ * See tools/README.md for the full picture. `colab --help` and `colab <cmd> --help` are authoritative.
+ */
+
+const fs = require('fs');
+const path = require('path');
+const { spawnSync } = require('child_process');
+
+const state = require('./lib/state');
+const git = require('./lib/git');
+const ports = require('./lib/ports');
+const {
+  HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
+  parseArgs, table, shortRepo,
+} = require('./lib/util');
+
+// ---------------------------------------------------------------------------
+// shared resolution helpers
+// ---------------------------------------------------------------------------
+
+/** Absolute repo root from --repo or cwd; throws UserError if none. */
+function resolveRepo(opts) {
+  let r = opts.repo;
+  if (r) {
+    r = path.resolve(r);
+    if (!fs.existsSync(r)) throw new UserError(`--repo path does not exist: ${opts.repo}`);
+    const root = git.repoRoot(r);
+    return root || r; // allow a non-git path (local-only claims still work)
+  }
+  const root = git.repoRoot(process.cwd());
+  if (!root) throw new UserError('Not inside a git repo — pass --repo <path>');
+  return root;
+}
+
+/** All repo roots colab should aggregate reserved ports from: config + current repo (if any). */
+function knownRepos(config) {
+  const cur = git.repoRoot(process.cwd());
+  const extra = cur ? [cur] : [];
+  // include repos referenced by state worktrees too
+  const st = state.loadState();
+  for (const wt of Object.values(st.worktrees)) if (wt.repo) extra.push(wt.repo);
+  return extra;
+}
+
+/** Find a single claim by issue number, optionally constrained to a repo. */
+function findClaim(st, num, repoAbs) {
+  const matches = Object.entries(st.claims).filter(([, c]) => normIssueNum(c.issue) === num);
+  const scoped = repoAbs ? matches.filter(([k]) => k.startsWith(`${repoAbs}#`)) : matches;
+  if (scoped.length === 0) return null;
+  if (scoped.length > 1) {
+    const repos = scoped.map(([k]) => shortRepo(k.split('#')[0])).join(', ');
+    throw new UserError(`Issue #${num} is claimed in multiple repos (${repos}) — disambiguate with --repo`);
+  }
+  return { key: scoped[0][0], claim: scoped[0][1] };
+}
+
+function isGhUsable(repoAbs) {
+  return git.ghAvailable() && !!git.originUrl(repoAbs);
+}
+
+// ---------------------------------------------------------------------------
+// claim / release / claims
+// ---------------------------------------------------------------------------
+
+const HELP_CLAIM = `colab claim <issue> [<issue> ...] [options]
+
+Claim one or more GitHub issues so parallel sessions/agents don't collide.
+Writes BOTH local state (fast path) and GitHub (source of truth across machines):
+  gh issue edit N --add-assignee @me --add-label in-progress
+If gh is unavailable or the repo has no remote, degrades to local-only (and says so).
+
+Multiple issues in one call are claimed atomically onto the SAME worktree/branch
+(a group of related issues on one branch is normal practice):
+  colab claim 115 114 113 --worktree import-fixes-115-114-113 --branch fix/import-fixes-115-114-113
+
+Options:
+  --repo <path>       repo root (default: git root of cwd)
+  --worktree <name>   attach these claims to a worktree entity (ports live on the worktree)
+  --branch <name>     branch these claims are worked on (informational; default: trunk)
+`;
+
+function cmdClaim(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--repo': 'repo', '--worktree': 'worktree', '--branch': 'branch' },
+    flags: { '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help || opts._.length === 0) return print(HELP_CLAIM);
+  const repoAbs = resolveRepo(opts);
+  const nums = opts._.map(normIssueNum);
+  const branch = opts.branch || 'trunk';
+  const wtName = opts.worktree || null;
+
+  const res = state.mutate((st) => {
+    if (wtName && !st.worktrees[wtName]) {
+      // allow claiming onto a worktree name that will be created later (informational link)
+      st.worktrees[wtName] = { name: wtName, repo: repoAbs, branch, path: null, ports: [], host: HOST, created: nowISO() };
+    }
+    const created = [], dupes = [];
+    for (const num of nums) {
+      const key = claimKey(repoAbs, num);
+      if (st.claims[key]) { dupes.push(num); continue; }
+      st.claims[key] = { issue: issueTag(num), repo: repoAbs, worktree: wtName, branch, host: HOST, created: nowISO() };
+      created.push(num);
+    }
+    return { created, dupes };
+  });
+
+  for (const num of res.dupes) warn(`#${num} was already claimed locally — left as is`);
+
+  // GitHub side (outside the lock — network).
+  const gh = isGhUsable(repoAbs);
+  if (gh) {
+    for (const num of res.created) {
+      const r = git.ghIssueEdit(repoAbs, num, ['--add-assignee', '@me', '--add-label', 'in-progress']);
+      if (r.ok) print(`  gh: #${num} assigned + labeled in-progress`);
+      else warn(`gh edit #${num} failed (${r.stderr.split('\n')[0] || r.code}) — local claim stands`);
+    }
+  } else {
+    warn(`gh not usable here (no gh auth or no origin remote) — claims are LOCAL-ONLY`);
+  }
+  if (res.created.length) {
+    print(`Claimed ${res.created.map((n) => '#' + n).join(' ')} in ${shortRepo(repoAbs)}` +
+      (wtName ? ` → worktree "${wtName}" (branch ${branch})` : ` (trunk)`));
+  }
+  return 0;
+}
+
+const HELP_RELEASE = `colab release <issue> [--repo <path>]
+
+Release a single issue: removes the local claim and, if gh is usable, runs
+  gh issue edit N --remove-assignee @me --remove-label in-progress
+Sibling claims on the same worktree stay alive (a group finishes issues one at a time).
+The worktree is NEVER auto-removed here (uncommitted work may exist); if this was the
+last claim, the output says the worktree now has zero claims.
+`;
+
+function cmdRelease(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--repo': 'repo' }, flags: { '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help || opts._.length === 0) return print(HELP_RELEASE);
+  const num = normIssueNum(opts._[0]);
+  const repoAbs = opts.repo ? resolveRepo(opts) : (git.repoRoot(process.cwd()) || null);
+
+  let found;
+  const out = state.mutate((st) => {
+    found = findClaim(st, num, repoAbs);
+    if (!found) return null;
+    delete st.claims[found.key];
+    const wtName = found.claim.worktree;
+    let remaining = null;
+    if (wtName) {
+      remaining = Object.values(st.claims).filter((c) => c.worktree === wtName).length;
+    }
+    return { repo: found.claim.repo, wtName, remaining };
+  });
+
+  if (!out) throw new UserError(`No local claim for #${num}` + (repoAbs ? ` in ${shortRepo(repoAbs)}` : ''));
+
+  if (isGhUsable(out.repo)) {
+    const r = git.ghIssueEdit(out.repo, num, ['--remove-assignee', '@me', '--remove-label', 'in-progress']);
+    if (r.ok) print(`  gh: #${num} unassigned + label removed`);
+    else warn(`gh edit #${num} failed (${r.stderr.split('\n')[0] || r.code}) — local claim already removed`);
+  } else {
+    warn('gh not usable here — released LOCAL-ONLY');
+  }
+  print(`Released #${num} from ${shortRepo(out.repo)}`);
+  if (out.wtName && out.remaining === 0) {
+    print(`  note: worktree "${out.wtName}" now has ZERO claims (not removed — run: colab worktree rm ${out.wtName})`);
+  } else if (out.wtName) {
+    print(`  worktree "${out.wtName}" still has ${out.remaining} claim(s)`);
+  }
+  return 0;
+}
+
+const HELP_CLAIMS = `colab claims [--json] [--sync]
+
+List all local claims, grouped by worktree.
+  --json    machine-readable output
+  --sync    reconcile local state against GitHub (per repo). ADD-ONLY by default: issues
+            assigned to you AND labeled in-progress on GitHub but missing locally are added.
+            Local claims are NEVER removed unless you also pass --prune.
+  --prune   (with --sync) also REMOVE local claims for issues GitHub no longer shows as
+            assigned+in-progress, printing exactly what is removed and why.
+
+Removal is opt-in because a successful-but-partial GitHub response (rate limit, paging)
+is indistinguishable from a complete one, so a destructive reconcile must be deliberate.
+Repos gh can't reach are skipped entirely (never treated as "no claims").
+`;
+
+function cmdClaims(argv) {
+  const opts = parseArgs(argv, { flags: { '--json': 'json', '--sync': 'sync', '--prune': 'prune', '-h': 'help', '--help': 'help' } });
+  if (opts.help) return print(HELP_CLAIMS);
+  if (opts.prune && !opts.sync) throw new UserError('--prune only applies together with --sync');
+  if (opts.sync) syncClaims({ prune: !!opts.prune });
+
+  const st = state.loadState();
+  if (opts.json) { print(JSON.stringify(st.claims, null, 2)); return 0; }
+
+  const claims = Object.values(st.claims);
+  if (claims.length === 0) { print('No active claims.'); return 0; }
+
+  // group by worktree (null → "(trunk / no worktree)")
+  const groups = new Map();
+  for (const c of claims) {
+    const g = c.worktree || '(trunk / no worktree)';
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(c);
+  }
+  for (const [g, cs] of groups) {
+    const wt = st.worktrees[g];
+    const portStr = wt && wt.ports.length ? ` ports:${wt.ports.join(',')}` : '';
+    print(`\n▸ ${g}${portStr}`);
+    const rows = cs.map((c) => [c.issue, shortRepo(c.repo), c.branch || '-', c.host, c.created.slice(0, 10)]);
+    print(table(rows, ['ISSUE', 'REPO', 'BRANCH', 'HOST', 'SINCE']).split('\n').map((l) => '  ' + l).join('\n'));
+  }
+  return 0;
+}
+
+function syncClaims({ prune = false } = {}) {
+  if (!git.ghAvailable()) { warn('gh not available — --sync skipped'); return; }
+  const st = state.loadState();
+  // repos represented locally + repos with an origin
+  const repos = new Set(Object.values(st.claims).map((c) => c.repo));
+  const cur = git.repoRoot(process.cwd());
+  if (cur) repos.add(cur);
+
+  const added = [], removed = [];
+  for (const repoAbs of repos) {
+    if (!git.originUrl(repoAbs)) continue;
+    const assigned = git.ghAssignedIssues(repoAbs);
+    // A repo gh can't reach is SKIPPED — never treated as "GitHub shows no claims"
+    // (that guard is exactly why removal must be opt-in: a partial/failed read must not delete).
+    if (assigned === null) { warn(`gh could not list issues for ${shortRepo(repoAbs)} — skipped`); continue; }
+    const assignedSet = new Set(assigned);
+    // GH → local: ADD missing (always)
+    for (const num of assignedSet) {
+      const key = claimKey(repoAbs, num);
+      state.mutate((s) => {
+        if (!s.claims[key]) {
+          s.claims[key] = { issue: issueTag(num), repo: repoAbs, worktree: null, branch: 'trunk', host: HOST, created: nowISO() };
+          added.push(`+#${num} ${shortRepo(repoAbs)} (assigned+in-progress on GitHub, missing locally)`);
+        }
+      });
+    }
+    // local → GH: REMOVE stale local claims ONLY when --prune is given
+    if (prune) {
+      const localForRepo = Object.entries(st.claims).filter(([k]) => k.startsWith(`${repoAbs}#`));
+      for (const [key, c] of localForRepo) {
+        const num = normIssueNum(c.issue);
+        if (!assignedSet.has(num)) {
+          state.mutate((s) => {
+            if (s.claims[key]) { delete s.claims[key]; removed.push(`-#${num} ${shortRepo(repoAbs)} (no longer assigned+in-progress on GitHub)`); }
+          });
+        }
+      }
+    }
+  }
+
+  if (added.length) { print('Sync — added from GitHub:'); added.forEach((c) => print('  ' + c)); }
+  if (prune) {
+    if (removed.length) { print('Sync — pruned local claims:'); removed.forEach((c) => print('  ' + c)); }
+    else if (!added.length) print('Sync: nothing to add or prune — already in agreement with GitHub.');
+  } else {
+    if (!added.length) print('Sync: nothing to add (add-only; pass --prune to also remove stale local claims).');
+    else print('  (add-only — pass --prune to also remove local claims GitHub no longer shows)');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ports
+// ---------------------------------------------------------------------------
+
+const HELP_PORT = `colab port <alloc|free> ...   ·   colab ports [--json]
+
+Every dev server on this machine gets a unique port. Reserved ports (a project's trunk
+dev server, declared in each repo's .github/project.yml as \`ports: [5220]\`, aggregated
+across all repos colab knows) are NEVER allocated to a worktree — even when that trunk
+server is currently down.
+
+  colab port alloc [--count N] [--range A-B] [--worktree <name>] [--claim <issue>] [--label <s>]
+      Allocate N (default 1) consecutive free ports. Owner is one of:
+        --worktree <name>  ports attach to that worktree entity (the normal path)
+        --claim <issue>    ports attach to a standalone claim
+        --label <s>        a manual label for a non-repo service
+      Default range comes from config.portRange (${state.DEFAULT_CONFIG.portRange}).
+
+  colab port free <port>            free one port by number
+  colab port free --worktree <name> free all ports owned by a worktree
+  colab port free --claim <issue>   free all ports owned by a claim (or its worktree)
+
+  colab ports [--json]              list allocated ports and the reserved set
+`;
+
+function loadOwnerRefForPortAlloc(st, opts, repoAbs) {
+  if (opts.worktree) {
+    if (!st.worktrees[opts.worktree]) throw new UserError(`No worktree "${opts.worktree}" in state (create it first, or use --label)`);
+    return { type: 'worktree', ref: opts.worktree };
+  }
+  if (opts.claim) {
+    const num = normIssueNum(opts.claim);
+    const found = findClaim(st, num, repoAbs);
+    if (!found) throw new UserError(`No claim for #${num} — claim it first`);
+    return { type: 'claim', ref: found.key };
+  }
+  return { type: 'manual', ref: opts.label || 'manual' };
+}
+
+function cmdPort(argv) {
+  const sub = argv[0];
+  const rest = argv.slice(1);
+  if (sub === 'alloc') return cmdPortAlloc(rest);
+  if (sub === 'free') return cmdPortFree(rest);
+  return print(HELP_PORT);
+}
+
+function cmdPortAlloc(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--count': 'count', '--range': 'range', '--worktree': 'worktree', '--claim': 'claim', '--label': 'label', '--repo': 'repo' },
+    flags: { '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help) return print(HELP_PORT);
+  const config = state.loadConfig();
+  const count = opts.count ? parseInt(opts.count, 10) : 1;
+  if (!Number.isInteger(count) || count < 1) throw new UserError('--count must be a positive integer');
+  const range = opts.range || config.portRange;
+  const repoAbs = opts.repo ? resolveRepo(opts) : (git.repoRoot(process.cwd()) || null);
+
+  const chosen = state.mutate((st) => {
+    const reserved = ports.reservedSet(config, knownRepos(config));
+    const found = ports.findConsecutive(count, range, st, reserved);
+    if (!found) throw new UserError(`Could not find ${count} consecutive free port(s) in ${range}`);
+    const owner = loadOwnerRefForPortAlloc(st, opts, repoAbs);
+    for (const p of found) {
+      st.ports[String(p)] = { port: p, owner, host: HOST, created: nowISO() };
+    }
+    if (owner.type === 'worktree') {
+      const wt = st.worktrees[owner.ref];
+      wt.ports = Array.from(new Set([...wt.ports, ...found])).sort((a, b) => a - b);
+    }
+    return { found, owner };
+  });
+
+  print(`Allocated ${chosen.found.join(', ')} → ${chosen.owner.type}:${chosen.owner.ref}`);
+  return 0;
+}
+
+function cmdPortFree(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--worktree': 'worktree', '--claim': 'claim', '--repo': 'repo' },
+    flags: { '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help) return print(HELP_PORT);
+  const repoAbs = opts.repo ? resolveRepo(opts) : (git.repoRoot(process.cwd()) || null);
+
+  const freed = state.mutate((st) => {
+    let targets = [];
+    if (opts.worktree) {
+      targets = Object.keys(st.ports).filter((p) => st.ports[p].owner.type === 'worktree' && st.ports[p].owner.ref === opts.worktree);
+    } else if (opts.claim) {
+      const num = normIssueNum(opts.claim);
+      const found = findClaim(st, num, repoAbs);
+      if (!found) throw new UserError(`No claim for #${num}`);
+      const wt = found.claim.worktree;
+      targets = Object.keys(st.ports).filter((p) => {
+        const o = st.ports[p].owner;
+        return (o.type === 'claim' && o.ref === found.key) || (wt && o.type === 'worktree' && o.ref === wt);
+      });
+    } else if (opts._[0]) {
+      const p = String(parseInt(opts._[0], 10));
+      if (!st.ports[p]) throw new UserError(`Port ${p} is not allocated in state`);
+      targets = [p];
+    } else {
+      throw new UserError('port free needs a <port>, --worktree <name>, or --claim <issue>');
+    }
+    for (const p of targets) {
+      const o = st.ports[p].owner;
+      if (o.type === 'worktree' && st.worktrees[o.ref]) {
+        st.worktrees[o.ref].ports = st.worktrees[o.ref].ports.filter((x) => x !== Number(p));
+      }
+      delete st.ports[p];
+    }
+    return targets;
+  });
+
+  if (freed.length === 0) print('No matching allocated ports.');
+  else print(`Freed ${freed.join(', ')}`);
+  return 0;
+}
+
+function cmdPorts(argv) {
+  const opts = parseArgs(argv, { flags: { '--json': 'json', '-h': 'help', '--help': 'help' } });
+  if (opts.help) return print(HELP_PORT);
+  const config = state.loadConfig();
+  const st = state.loadState();
+  const reserved = ports.reservedSet(config, knownRepos(config));
+  if (opts.json) {
+    print(JSON.stringify({ allocated: st.ports, reserved: Object.fromEntries(reserved) }, null, 2));
+    return 0;
+  }
+  const allocRows = Object.values(st.ports).sort((a, b) => a.port - b.port)
+    .map((p) => [p.port, `${p.owner.type}:${p.owner.ref}`, p.host, p.created.slice(0, 10)]);
+  print('Allocated ports:');
+  print(allocRows.length ? table(allocRows, ['PORT', 'OWNER', 'HOST', 'SINCE']) : '  (none)');
+  print('\nReserved (trunk dev servers — never allocated):');
+  const resRows = [...reserved.entries()].sort((a, b) => a[0] - b[0]).map(([p, src]) => [p, src]);
+  print(resRows.length ? table(resRows, ['PORT', 'SOURCE']) : '  (none — no repos configured / no project.yml ports)');
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// worktree
+// ---------------------------------------------------------------------------
+
+const HELP_WORKTREE = `colab worktree <new|rm> ...   ·   colab worktrees [--json]
+
+Worktrees are OPTIONAL — claiming and port allocation work standalone without one.
+The portable core does only universal steps. Machine-specific steps (DB cloning,
+dependency symlinking, dev-server restarts) live in OPTIONAL repo hooks, not here.
+
+  colab worktree new <branch> [options]
+      fetch origin → create worktree from origin/<trunk> (trunk read from .github/project.yml,
+      else origin/HEAD) → copy .env* if present → allocate ports → record state → run hook.
+      Options:
+        --issues N,M,K     claim these issues onto the new worktree (alias: --issue <n>)
+        --ports N          allocate N consecutive ports for the worktree
+        --range A-B        port search window (default config.portRange)
+        --name <name>      worktree dir name (default: branch after first '/')
+        --trunk <name>     override trunk branch
+        --repo <path>      repo root (default: git root of cwd)
+      Branch naming is YOUR choice; the group convention is <type>/<slug>-N-M-K, e.g.
+        colab worktree new fix/import-fixes-115-114-113 --issues 115,114,113 --ports 1
+
+  colab worktree rm <name> [--force] [--repo <path>]
+      Releases ALL claims on the worktree, frees its ports, runs the pre-remove hook,
+      then removes the worktree. Refuses if there are uncommitted TRACKED changes
+      unless --force.
+
+  colab worktrees [--json]     list worktrees with their claims and ports
+
+HOOKS (optional, provided by the adopting repo):
+  <repo>/.colab/hooks/post-create   run after worktree creation (if present & executable)
+  <repo>/.colab/hooks/pre-remove    run before worktree removal
+  Both receive:  argv = <worktree-path> <port> <port> ...
+  and env: COLAB_WORKTREE_PATH, COLAB_WORKTREE_NAME, COLAB_BRANCH, COLAB_PORTS (csv),
+           COLAB_REPO, COLAB_TRUNK, COLAB_ISSUES (csv)
+  A non-zero post-create hook is a WARNING (worktree already exists); pre-remove non-zero ABORTS.
+`;
+
+function worktreeSubdir(config) { return config.worktreeSubdir || '.worktrees'; }
+
+function runHook(repoAbs, name, ctx) {
+  const hook = path.join(repoAbs, '.colab', 'hooks', name);
+  try {
+    const st = fs.statSync(hook);
+    if (!st.isFile()) return { ran: false };
+    // executable?
+    if (!(st.mode & 0o111)) { warn(`hook ${name} exists but is not executable — skipped`); return { ran: false }; }
+  } catch (_) { return { ran: false }; }
+  const env = {
+    ...process.env,
+    COLAB_WORKTREE_PATH: ctx.wtPath, COLAB_WORKTREE_NAME: ctx.name, COLAB_BRANCH: ctx.branch,
+    COLAB_PORTS: (ctx.ports || []).join(','), COLAB_REPO: repoAbs, COLAB_TRUNK: ctx.trunk || '',
+    COLAB_ISSUES: (ctx.issues || []).join(','),
+  };
+  print(`  running hook ${name} …`);
+  const r = spawnSync(hook, [ctx.wtPath, ...(ctx.ports || []).map(String)], { stdio: 'inherit', env });
+  return { ran: true, ok: r.status === 0, code: r.status };
+}
+
+function cmdWorktreeNew(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--issues': 'issues', '--ports': 'ports', '--range': 'range', '--name': 'name', '--trunk': 'trunk', '--repo': 'repo' },
+    aliases: { '--issue': '--issues' },
+    flags: { '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help || opts._.length === 0) return print(HELP_WORKTREE);
+  const config = state.loadConfig();
+  const repoAbs = resolveRepo(opts);
+  if (!git.repoRoot(repoAbs)) throw new UserError(`${repoAbs} is not a git repo`);
+
+  const branch = opts._[0];
+  const name = opts.name || (branch.includes('/') ? branch.slice(branch.indexOf('/') + 1) : branch);
+  const issues = opts.issues ? String(opts.issues).split(',').map(normIssueNum) : [];
+  const portCount = opts.ports ? parseInt(opts.ports, 10) : 0;
+  const range = opts.range || config.portRange;
+
+  // trunk: project.yml → origin/HEAD
+  let trunk = opts.trunk;
+  if (!trunk) {
+    const pj = path.join(repoAbs, '.github', 'project.yml');
+    try {
+      const doc = require('./lib/yaml').parse(fs.readFileSync(pj, 'utf8'));
+      if (doc && doc.trunk) trunk = String(doc.trunk);
+    } catch (_) { /* fall through */ }
+  }
+  if (!trunk) trunk = git.detectTrunk(repoAbs);
+  if (!trunk) throw new UserError('Could not determine trunk branch — pass --trunk <name>');
+
+  const wtPath = path.join(repoAbs, worktreeSubdir(config), name);
+  if (fs.existsSync(wtPath)) throw new UserError(`Worktree path already exists: ${wtPath}`);
+
+  // 1. fetch + create worktree
+  print(`fetch origin/${trunk} + create worktree "${name}" (branch ${branch})`);
+  const fetch = git.git(['fetch', 'origin', trunk], repoAbs);
+  if (!fetch.ok) warn(`git fetch failed (${fetch.stderr.split('\n')[0]}) — creating from local origin/${trunk}`);
+  const add = git.git(['worktree', 'add', wtPath, '-b', branch, `origin/${trunk}`], repoAbs);
+  if (!add.ok) throw new UserError(`git worktree add failed: ${add.stderr}`);
+  const baseSha = git.git(['rev-parse', '--short', `origin/${trunk}`], repoAbs).stdout;
+
+  // 2. copy env files (never committed)
+  const envCopied = [];
+  for (const f of ['.env', '.env.local']) {
+    const src = path.join(repoAbs, f);
+    if (fs.existsSync(src)) { fs.copyFileSync(src, path.join(wtPath, f)); envCopied.push(f); }
+  }
+
+  // 3. allocate ports + record worktree + claims (atomic)
+  const alloc = state.mutate((st) => {
+    let chosenPorts = [];
+    if (portCount > 0) {
+      const reserved = ports.reservedSet(config, [repoAbs, ...knownRepos(config)]);
+      const found = ports.findConsecutive(portCount, range, st, reserved);
+      if (!found) throw new UserError(`Could not find ${portCount} consecutive free ports in ${range}`);
+      chosenPorts = found;
+    }
+    st.worktrees[name] = { name, repo: repoAbs, branch, path: wtPath, ports: chosenPorts, host: HOST, created: nowISO() };
+    for (const p of chosenPorts) st.ports[String(p)] = { port: p, owner: { type: 'worktree', ref: name }, host: HOST, created: nowISO() };
+    const claimedNums = [], dupes = [];
+    for (const num of issues) {
+      const key = claimKey(repoAbs, num);
+      if (st.claims[key]) { dupes.push(num); st.claims[key].worktree = name; st.claims[key].branch = branch; continue; }
+      st.claims[key] = { issue: issueTag(num), repo: repoAbs, worktree: name, branch, host: HOST, created: nowISO() };
+      claimedNums.push(num);
+    }
+    return { chosenPorts, claimedNums, dupes };
+  });
+
+  // 4. GitHub claim (network, outside lock)
+  const gh = isGhUsable(repoAbs);
+  for (const num of [...alloc.claimedNums, ...alloc.dupes]) {
+    if (gh) {
+      const r = git.ghIssueEdit(repoAbs, num, ['--add-assignee', '@me', '--add-label', 'in-progress']);
+      if (!r.ok) warn(`gh edit #${num} failed — local claim stands`);
+    }
+  }
+  if (issues.length && !gh) warn('gh not usable — issue claims are LOCAL-ONLY');
+
+  // 5. optional repo hook (machine-specific steps plug in here)
+  const hook = runHook(repoAbs, 'post-create', { wtPath, name, branch, ports: alloc.chosenPorts, trunk, issues });
+  if (hook.ran && !hook.ok) warn(`post-create hook exited ${hook.code} — worktree was still created; finish setup manually`);
+
+  print('');
+  print(`✓ Worktree ready`);
+  print(`  path:     ${wtPath}`);
+  print(`  branch:   ${branch}  (base origin/${trunk} @ ${baseSha})`);
+  print(`  env:      ${envCopied.join(' ') || '—'}`);
+  print(`  ports:    ${alloc.chosenPorts.join(', ') || '—'}`);
+  print(`  issues:   ${issues.map((n) => '#' + n).join(' ') || '—'}${gh ? '' : ' (local-only)'}`);
+  return 0;
+}
+
+function cmdWorktreeRm(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--repo': 'repo' }, flags: { '--force': 'force', '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help || opts._.length === 0) return print(HELP_WORKTREE);
+  const name = opts._[0];
+  const st0 = state.loadState();
+  const wt = st0.worktrees[name];
+  if (!wt) throw new UserError(`No worktree "${name}" in state`);
+  const repoAbs = wt.repo;
+
+  // safety: refuse if tracked changes uncommitted
+  if (wt.path && fs.existsSync(wt.path)) {
+    const dirty = git.dirtyTracked(wt.path);
+    if (dirty && !opts.force) {
+      warn(dirty);
+      throw new UserError(`Worktree "${name}" has uncommitted TRACKED changes — commit/stash, or pass --force`);
+    }
+  }
+
+  const attachedIssues = Object.values(st0.claims).filter((c) => c.worktree === name).map((c) => normIssueNum(c.issue));
+
+  // pre-remove hook (abort on failure unless --force)
+  const hook = runHook(repoAbs, 'pre-remove', { wtPath: wt.path, name, branch: wt.branch, ports: wt.ports, issues: attachedIssues });
+  if (hook.ran && !hook.ok && !opts.force) throw new UserError(`pre-remove hook exited ${hook.code} — aborting (use --force to override)`);
+
+  // git worktree remove
+  if (wt.path && fs.existsSync(wt.path)) {
+    // always --force at the git level: copied .env / hook artifacts are untracked-but-expected;
+    // the tracked-changes safety gate above is what actually protects unsaved work.
+    const r = git.git(['worktree', 'remove', '--force', wt.path], repoAbs);
+    if (!r.ok) warn(`git worktree remove reported: ${r.stderr.split('\n')[0]}`);
+  }
+
+  // GitHub: release each attached issue
+  const gh = isGhUsable(repoAbs);
+  for (const num of attachedIssues) {
+    if (gh) git.ghIssueEdit(repoAbs, num, ['--remove-assignee', '@me', '--remove-label', 'in-progress']);
+  }
+
+  // state: drop claims, ports, worktree
+  const removed = state.mutate((st) => {
+    const claims = Object.keys(st.claims).filter((k) => st.claims[k].worktree === name);
+    for (const k of claims) delete st.claims[k];
+    const freedPorts = Object.keys(st.ports).filter((p) => st.ports[p].owner.type === 'worktree' && st.ports[p].owner.ref === name);
+    for (const p of freedPorts) delete st.ports[p];
+    delete st.worktrees[name];
+    return { claims: claims.length, freedPorts };
+  });
+
+  print(`✓ Removed worktree "${name}"`);
+  print(`  released ${removed.claims} claim(s)${attachedIssues.length ? ' (' + attachedIssues.map((n) => '#' + n).join(' ') + ')' : ''}${gh ? '' : ' (local-only)'}`);
+  print(`  freed ports: ${removed.freedPorts.join(', ') || '—'}`);
+  return 0;
+}
+
+function cmdWorktree(argv) {
+  const sub = argv[0];
+  if (sub === 'new') return cmdWorktreeNew(argv.slice(1));
+  if (sub === 'rm') return cmdWorktreeRm(argv.slice(1));
+  return print(HELP_WORKTREE);
+}
+
+function cmdWorktrees(argv) {
+  const opts = parseArgs(argv, { flags: { '--json': 'json', '-h': 'help', '--help': 'help' } });
+  if (opts.help) return print(HELP_WORKTREE);
+  const st = state.loadState();
+  if (opts.json) { print(JSON.stringify(st.worktrees, null, 2)); return 0; }
+  const wts = Object.values(st.worktrees);
+  if (wts.length === 0) { print('No worktrees.'); return 0; }
+  const rows = wts.map((wt) => {
+    const claims = Object.values(st.claims).filter((c) => c.worktree === wt.name).map((c) => c.issue).join(' ') || '-';
+    const alive = wt.path ? (fs.existsSync(wt.path) ? 'yes' : 'MISSING') : 'n/a';
+    return [wt.name, shortRepo(wt.repo), wt.branch, wt.ports.join(',') || '-', claims, alive];
+  });
+  print(table(rows, ['NAME', 'REPO', 'BRANCH', 'PORTS', 'ISSUES', 'ON-DISK']));
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// doctor
+// ---------------------------------------------------------------------------
+
+const HELP_DOCTOR = `colab doctor [--prune] [--ttl <hours>] [--json]
+
+Health-check the machine-local state and heal drift.
+  - A worktree whose directory no longer exists on disk is DEAD: its claims are pruned
+    and its ports freed (--prune actually removes; default only reports).
+  - Claims referencing a worktree that isn't in state are orphans (same treatment).
+  - Worktree-less claims older than TTL (default 24h, --ttl to change) are REPORTED, not
+    auto-removed (they may be deliberate trunk claims). --prune removes them too and frees
+    any ports they own.
+  - Ports owned by a vanished worktree/claim are freed on --prune.
+
+This exists because claims made without a worktree were never auto-healed before, and a
+real repo accumulated 17 stale same-day claims. Run \`colab doctor\` regularly; \`--prune\`
+in a cleanup cron.
+
+  --prune   apply the fixes (default: report only)
+  --ttl N   hours before a worktree-less claim is flagged stale (default 24)
+  --json    machine-readable report
+`;
+
+function cmdDoctor(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--ttl': 'ttl' }, flags: { '--prune': 'prune', '--json': 'json', '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help) return print(HELP_DOCTOR);
+  const config = state.loadConfig();
+  const ttl = opts.ttl ? parseFloat(opts.ttl) : config.claimTTLHours;
+
+  const report = { deadWorktrees: [], orphanClaims: [], staleClaims: [], orphanPorts: [], prunedPorts: [], pruned: !!opts.prune };
+
+  const apply = (fn) => opts.prune ? state.mutate(fn) : fn(state.loadState());
+
+  apply((st) => {
+    // 1. dead worktrees (path gone)
+    for (const wt of Object.values(st.worktrees)) {
+      const dead = wt.path && !fs.existsSync(wt.path);
+      if (!dead) continue;
+      const claims = Object.entries(st.claims).filter(([, c]) => c.worktree === wt.name);
+      report.deadWorktrees.push({ name: wt.name, repo: shortRepo(wt.repo), path: wt.path, ports: wt.ports, claims: claims.map(([, c]) => c.issue) });
+      if (opts.prune) {
+        for (const [k] of claims) delete st.claims[k];
+        for (const p of wt.ports) { delete st.ports[String(p)]; report.prunedPorts.push(p); }
+        delete st.worktrees[wt.name];
+      }
+    }
+    // 2. orphan claims (worktree ref not in state)
+    for (const [k, c] of Object.entries(st.claims)) {
+      if (c.worktree && !st.worktrees[c.worktree]) {
+        report.orphanClaims.push({ issue: c.issue, repo: shortRepo(c.repo), worktree: c.worktree });
+        if (opts.prune) delete st.claims[k];
+      }
+    }
+    // 3. stale worktree-less claims (report only; prune if asked)
+    for (const [k, c] of Object.entries(st.claims)) {
+      if (!c.worktree) {
+        const age = hoursSince(c.created);
+        if (age > ttl) {
+          report.staleClaims.push({ issue: c.issue, repo: shortRepo(c.repo), ageHours: Math.round(age), host: c.host });
+          if (opts.prune) {
+            // free any ports owned by this claim
+            for (const p of Object.keys(st.ports)) {
+              if (st.ports[p].owner.type === 'claim' && st.ports[p].owner.ref === k) { delete st.ports[p]; report.prunedPorts.push(Number(p)); }
+            }
+            delete st.claims[k];
+          }
+        }
+      }
+    }
+    // 4. orphan ports (owner vanished)
+    for (const [p, rec] of Object.entries(st.ports)) {
+      const o = rec.owner;
+      const orphan = (o.type === 'worktree' && !st.worktrees[o.ref]) || (o.type === 'claim' && !st.claims[o.ref]);
+      if (orphan) {
+        report.orphanPorts.push({ port: Number(p), owner: `${o.type}:${o.ref}` });
+        if (opts.prune) { delete st.ports[p]; report.prunedPorts.push(Number(p)); }
+      }
+    }
+  });
+
+  if (opts.json) { print(JSON.stringify(report, null, 2)); return 0; }
+
+  const verb = opts.prune ? 'Pruned' : 'Found';
+  let issues = 0;
+  if (report.deadWorktrees.length) {
+    issues += report.deadWorktrees.length;
+    print(`${verb} ${report.deadWorktrees.length} dead worktree(s) (directory gone):`);
+    for (const w of report.deadWorktrees) print(`  ${w.name} [${w.repo}] claims=${w.claims.join(' ') || '-'} ports=${w.ports.join(',') || '-'}`);
+  }
+  if (report.orphanClaims.length) {
+    issues += report.orphanClaims.length;
+    print(`${verb} ${report.orphanClaims.length} orphan claim(s) (worktree not in state):`);
+    for (const c of report.orphanClaims) print(`  ${c.issue} [${c.repo}] → missing worktree "${c.worktree}"`);
+  }
+  if (report.staleClaims.length) {
+    print(`${opts.prune ? 'Pruned' : 'Flagged'} ${report.staleClaims.length} stale worktree-less claim(s) (> ${ttl}h):`);
+    for (const c of report.staleClaims) print(`  ${c.issue} [${c.repo}] age=${c.ageHours}h host=${c.host}`);
+    if (!opts.prune) print('  (worktree-less claims are not auto-removed — re-run with --prune to remove)');
+  }
+  if (report.orphanPorts.length) {
+    print(`${verb} ${report.orphanPorts.length} orphan port(s):`);
+    for (const p of report.orphanPorts) print(`  ${p.port} owner=${p.owner}`);
+  }
+  if (opts.prune && report.prunedPorts.length) print(`Freed ports: ${[...new Set(report.prunedPorts)].sort((a, b) => a - b).join(', ')}`);
+  if (issues === 0 && report.staleClaims.length === 0 && report.orphanPorts.length === 0) print('All healthy — nothing to prune.');
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// config (show / manage the aggregation inputs)
+// ---------------------------------------------------------------------------
+
+const HELP_CONFIG = `colab config [show|add-repo <path>|rm-repo <path>|set <key> <value>]
+
+  show                 print resolved config, file paths, and the aggregated reserved set
+  add-repo <path>      add a repo root to scan for .github/project.yml reserved ports
+  rm-repo <path>       remove a repo root
+  set <key> <value>    set claimTTLHours | portRange | worktreeSubdir
+`;
+
+function cmdConfig(argv) {
+  const sub = argv[0];
+  const cfg = state.loadConfig();
+  if (!sub || sub === 'show') {
+    print(`state:  ${state.STATE_FILE}`);
+    print(`config: ${state.CONFIG_FILE}`);
+    print(JSON.stringify(cfg, null, 2));
+    const reserved = ports.reservedSet(cfg, knownRepos(cfg));
+    print(`reserved ports (${reserved.size}): ${[...reserved.keys()].sort((a, b) => a - b).join(', ') || '—'}`);
+    return 0;
+  }
+  if (sub === 'add-repo') {
+    const p = path.resolve(argv[1] || '');
+    if (!argv[1]) throw new UserError('add-repo needs a path');
+    if (!cfg.repos.includes(p)) cfg.repos.push(p);
+    state.saveConfig(cfg); print(`repos: ${cfg.repos.join(', ')}`); return 0;
+  }
+  if (sub === 'rm-repo') {
+    const p = path.resolve(argv[1] || '');
+    cfg.repos = cfg.repos.filter((r) => r !== p);
+    state.saveConfig(cfg); print(`repos: ${cfg.repos.join(', ') || '(none)'}`); return 0;
+  }
+  if (sub === 'set') {
+    const [k, v] = [argv[1], argv[2]];
+    if (!k || v === undefined) throw new UserError('set needs <key> <value>');
+    if (k === 'claimTTLHours') cfg[k] = parseFloat(v);
+    else if (k === 'portRange' || k === 'worktreeSubdir') cfg[k] = v;
+    else throw new UserError(`Unknown config key "${k}"`);
+    state.saveConfig(cfg); print(`${k} = ${cfg[k]}`); return 0;
+  }
+  return print(HELP_CONFIG);
+}
+
+// ---------------------------------------------------------------------------
+// dispatch
+// ---------------------------------------------------------------------------
+
+const HELP_ROOT = `colab — coordinate parallel coding sessions/agents on one machine.
+
+Three independent capabilities (each works standalone):
+  ISSUE CLAIMS   so parallel sessions don't grab the same issue (local + GitHub)
+  PORTS          a unique dev-server port per session, never colliding with a trunk port
+  WORKTREES      OPTIONAL git worktrees; machine-specific setup via repo hooks
+
+Commands:
+  claim <issue> [<issue>...] [--worktree N] [--branch B] [--repo P]   claim issue(s)
+  release <issue> [--repo P]                                          release one issue
+  claims [--json] [--sync]                                            list / reconcile with GitHub
+
+  port alloc [--count N] [--range A-B] [--worktree N|--claim I|--label S]
+  port free <port> | --worktree N | --claim I
+  ports [--json]                                                      list ports + reserved set
+
+  worktree new <branch> [--issues N,M,K] [--ports N] [--name X] [--trunk T] [--repo P]
+  worktree rm <name> [--force] [--repo P]
+  worktrees [--json]
+
+  doctor [--prune] [--ttl H] [--json]   heal dead worktrees / orphan + stale claims / orphan ports
+  config [show|add-repo P|rm-repo P|set K V]
+
+State is machine-local at ~/.colab/ (override with COLAB_HOME). Run any command with
+--help for details. Exit code is 0 on success, non-zero on failure.
+`;
+
+function print(s) { process.stdout.write(s.endsWith('\n') ? s : s + '\n'); return 0; }
+function warn(s) { process.stderr.write(`! ${s}\n`); }
+
+function main(argv) {
+  const cmd = argv[0];
+  const rest = argv.slice(1);
+  switch (cmd) {
+    case 'claim': return cmdClaim(rest);
+    case 'release': return cmdRelease(rest);
+    case 'claims': return cmdClaims(rest);
+    case 'port': return cmdPort(rest);
+    case 'ports': return cmdPorts(rest);
+    case 'worktree': return cmdWorktree(rest);
+    case 'worktrees': return cmdWorktrees(rest);
+    case 'doctor': return cmdDoctor(rest);
+    case 'config': return cmdConfig(rest);
+    case undefined:
+    case '-h': case '--help': case 'help': return print(HELP_ROOT);
+    case '--version': case 'version': return print('colab 1.0.0');
+    default:
+      warn(`Unknown command: ${cmd}`);
+      print(HELP_ROOT);
+      return 2;
+  }
+}
+
+try {
+  process.exit(main(process.argv.slice(2)) || 0);
+} catch (e) {
+  if (e instanceof UserError) { process.stderr.write(`✗ ${e.message}\n`); process.exit(1); }
+  process.stderr.write(`✗ ${e.stack || e.message}\n`);
+  process.exit(1);
+}

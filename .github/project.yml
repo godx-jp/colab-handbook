@@ -1,0 +1,25 @@
+# This repo's own project descriptor — and the reference example of the format.
+#
+# Every repo following the handbook carries one of these at .github/project.yml. It
+# is the single machine-readable answer to "what is this repo?", read by the copied
+# CI templates (for toolchain resolution) and by audit/audit.mjs (for conventions).
+#
+#   tier        A = has a production deploy target. B = does not.
+#   trunk       Branch feature work merges into. Tier A -> dev, tier B -> main.
+#   production  Live URL, or null. Tier A must set it; tier B must leave it null.
+#   deploy      tag | push-main | none. Tier B must be none.
+#   stack       FREE-FORM string. Describe the stack however reads best.
+#               Deliberately NOT an enum: the old closed list had no value for a
+#               Capacitor mobile app and forced a repo to be mislabelled, so the
+#               enum was actively doing harm. Nothing validates this value; it is
+#               documentation for humans and for grep.
+#   node / php  OPTIONAL toolchain pins. When present these WIN over .nvmrc /
+#               package.json engines / composer.json require.php. Set them when a
+#               repo's manifest is vague (">=22") but CI must be exact, or when
+#               there is no manifest to read. Omit them and the manifest decides.
+#
+tier: B
+trunk: main
+production: null
+deploy: none
+stack: docs + copy-and-own CI templates + audit CLI (no build)

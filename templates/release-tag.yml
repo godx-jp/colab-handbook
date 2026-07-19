@@ -1,0 +1,188 @@
+# Release (tag) — TEMPLATE. Copy me into your repo at .github/workflows/release.yml.
+#
+# This is a starting point, not a dependency. Once you copy it, YOU OWN THIS FILE.
+# Edit it freely: rename jobs, add steps, drop the parts you do not need. Nothing
+# calls this file remotely and nothing will update it for you — divergence between
+# your copy and the handbook is expected and fine. If you find an improvement worth
+# sharing, change the handbook template too, but that is a manual, deliberate act.
+#
+# EDIT POINTS are marked `# EDIT:` — walk them once after copying.
+#
+# Under the tiered branch model, a Tier A release is: merge dev -> main, heavy CI on
+# main goes green, tag v*.*.*. The tag is what triggers deployment. This workflow runs
+# alongside that deploy and produces the human-facing record of the release.
+#
+# It publishes a GitHub Release whose body is:
+#   1. A hand-readable summary WE build — commits since the previous tag, grouped by
+#      Conventional Commit type (feat / fix / perf / docs / chore / other).
+#   2. GitHub's own generated notes, appended below by generate_release_notes: true.
+#
+# Why both: the generated notes are PR-centric and list every merge flatly, which is
+# noise when a release contains thirty commits. The grouped summary answers "what
+# actually changed" at a glance; the generated notes stay for full traceability.
+#
+# NO TOOLCHAIN RESOLUTION HERE. This workflow installs neither Node nor PHP — it is
+# git plus shell. There is no version to resolve, so there is nothing to declare.
+#
+# DEPLOYMENT DOES NOT BELONG HERE. Deploy workflows are repo-specific (SSH host, app
+# dir, docroot symlink, migration reconcile) and ours must run on the JP self-hosted
+# runner because XServer blocks non-JP IPs on SSH (海外アクセス制限). Keep deploy-*.yml
+# as its own file.
+
+name: Release
+
+on:
+  push:
+    tags:
+      # EDIT: only if this repo uses a different tag shape. Keep it strict —
+      # the audit tool and the deploy workflow both key off v*.*.*
+      - "v*.*.*"
+
+env:
+  # Attach build artifacts to the release.
+  #
+  # NOTE, and this differs from a reusable workflow: a tag push is its OWN run. There
+  # is no artifact lying around from the CI run on main. To use this you must add a
+  # build job to THIS file that uploads an artifact, and make the release job
+  # `needs:` it. Left false because most of our repos build on the deploy target.
+  ATTACH_ARTIFACTS: "false"
+  # Empty means every artifact from this run.
+  ARTIFACT_NAME: ""
+  # EDIT: "true" to publish as a draft so a human edits before it goes out.
+  RELEASE_DRAFT: "false"
+  RELEASE_PRERELEASE: "false"
+
+jobs:
+  release:
+    name: Publish release
+    runs-on: ubuntu-latest # EDIT: self-hosted label if this repo needs one.
+    permissions:
+      # Required to create the release. Nothing else is needed — keep it minimal.
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # Full history plus tags: the summary is a diff between this tag and the
+          # previous one, which is impossible on a shallow clone.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve tag and previous tag
+        id: tags
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          # Previous tag = nearest annotated/lightweight v* tag reachable from this
+          # one, excluding itself. Empty on the very first release.
+          PREV="$(git describe --tags --abbrev=0 --match 'v*.*.*' "${TAG}^" 2>/dev/null || true)"
+          echo "prev=$PREV" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$PREV" ]; then
+            echo "range=${PREV}..${TAG}" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG — comparing against $PREV"
+          else
+            echo "range=$TAG" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG — first release, summarising all history"
+          fi
+
+      - name: Build grouped release summary
+        id: notes
+        env:
+          TAG: ${{ steps.tags.outputs.tag }}
+          PREV: ${{ steps.tags.outputs.prev }}
+          RANGE: ${{ steps.tags.outputs.range }}
+        run: |
+          set -euo pipefail
+
+          # Subject lines only, merge commits dropped — a merge subject carries no
+          # Conventional Commit meaning and would double-count its own commits.
+          git log --no-merges --pretty=format:'%s' "$RANGE" > /tmp/subjects.txt || true
+          # grep -c '' rather than wc -l: git log emits no trailing newline, so wc
+          # would undercount by one.
+          COUNT="$(grep -c '' /tmp/subjects.txt || true)"
+          COUNT="${COUNT:-0}"
+
+          emit_group() {
+            local type="$1" heading="$2"
+            # Matches 'feat: x', 'feat(scope): x', and the breaking-change 'feat!: x'.
+            local matched
+            matched="$(grep -E "^${type}(\([^)]*\))?!?:" /tmp/subjects.txt || true)"
+            [ -z "$matched" ] && return 0
+            printf '### %s\n\n' "$heading" >> /tmp/body.md
+            # Strip the type prefix; keep any scope as a bold lead-in.
+            printf '%s\n' "$matched" \
+              | sed -E "s/^${type}\(([^)]*)\)!?: */- **\1**: /; s/^${type}!?: */- /" \
+              >> /tmp/body.md
+            printf '\n' >> /tmp/body.md
+          }
+
+          : > /tmp/body.md
+          printf '## %s\n\n' "$TAG" >> /tmp/body.md
+          if [ -n "$PREV" ]; then
+            printf '%s commits since %s.\n\n' "$COUNT" "$PREV" >> /tmp/body.md
+          else
+            printf 'First release. %s commits.\n\n' "$COUNT" >> /tmp/body.md
+          fi
+
+          emit_group feat  "Features"
+          emit_group fix   "Fixes"
+          emit_group perf  "Performance"
+          emit_group docs  "Documentation"
+          emit_group chore "Chores"
+
+          # Anything that ignored the commit convention still has to appear, or the
+          # summary silently loses changes.
+          OTHER="$(grep -Ev '^(feat|fix|perf|docs|chore|refactor|test|build|ci|style)(\([^)]*\))?!?:' /tmp/subjects.txt || true)"
+          if [ -n "$OTHER" ]; then
+            printf '### Other\n\n' >> /tmp/body.md
+            printf '%s\n' "$OTHER" | sed -E 's/^/- /' >> /tmp/body.md
+            printf '\n' >> /tmp/body.md
+          fi
+
+          # Breaking changes deserve their own callout at the top of a reader's mind.
+          BREAKING="$(grep -E '^[a-z]+(\([^)]*\))?!:' /tmp/subjects.txt || true)"
+          if [ -n "$BREAKING" ]; then
+            printf '### Breaking changes\n\n' >> /tmp/body.md
+            printf '%s\n' "$BREAKING" | sed -E 's/^/- /' >> /tmp/body.md
+            printf '\n' >> /tmp/body.md
+          fi
+
+          printf -- '---\n\n' >> /tmp/body.md
+
+          echo "body-file=/tmp/body.md" >> "$GITHUB_OUTPUT"
+
+          # Same summary into the run page, so it is readable without opening Releases.
+          cat /tmp/body.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download build artifacts
+        if: env.ATTACH_ARTIFACTS == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          # Empty name = every artifact produced by this run.
+          name: ${{ env.ARTIFACT_NAME }}
+          path: release-artifacts
+        continue-on-error: true
+
+      - name: List artifacts to attach
+        if: env.ATTACH_ARTIFACTS == 'true'
+        run: |
+          if [ -d release-artifacts ] && [ -n "$(ls -A release-artifacts 2>/dev/null)" ]; then
+            find release-artifacts -type f | head -50
+          else
+            echo "::warning::ATTACH_ARTIFACTS is true but no artifacts were found. Publishing the release without files. Remember a tag push is its own run — add a build job to this file that uploads one."
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tags.outputs.tag }}
+          name: ${{ steps.tags.outputs.tag }}
+          body_path: ${{ steps.notes.outputs.body-file }}
+          # Appends GitHub's own PR/contributor notes underneath our grouped summary.
+          generate_release_notes: true
+          draft: ${{ env.RELEASE_DRAFT == 'true' }}
+          prerelease: ${{ env.RELEASE_PRERELEASE == 'true' }}
+          files: ${{ env.ATTACH_ARTIFACTS == 'true' && 'release-artifacts/**/*' || '' }}
+          fail_on_unmatched_files: false

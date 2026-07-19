@@ -1,0 +1,49 @@
+# CI for the handbook itself. Two outcomes, per CONVENTIONS.md §7:
+# a secret scan and a build/verify. "Build" here means: the CLI parses,
+# the installer parses, and the handbook passes its own audit tool —
+# a handbook that fails its own conventions is anti-pattern #4.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gitleaks:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Pinned binary instead of gitleaks-action v2: the action requires a
+      # GITLEAKS_LICENSE for org-owned repos; the binary is MIT and free.
+      - name: Install gitleaks (pinned binary)
+        run: |
+          curl -sSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          rm -f gitleaks.tar.gz
+      - name: gitleaks detect
+        run: gitleaks detect --source . --no-banner
+
+  self-check:
+    name: Self-audit + syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Syntax-check the CLI and audit tool
+        run: |
+          node --check tools/colab
+          for f in tools/lib/*.js audit/audit.mjs; do node --check "$f"; done
+          sh -n install.sh
+      - name: Audit the handbook against its own conventions
+        run: node audit/audit.mjs --local .

@@ -1,0 +1,9 @@
+{
+  "name": "colab-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "colab CLI — issue claims, port allocation and optional worktrees for parallel agent/human sessions. Zero dependencies.",
+  "type": "commonjs",
+  "bin": { "colab": "./colab" },
+  "engines": { "node": ">=18" }
+}

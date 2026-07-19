@@ -1,0 +1,29 @@
+# ─── OS junk ───
+.DS_Store
+Thumbs.db
+
+# ─── Dependencies / build output ───
+node_modules/
+dist/
+build/
+.next/
+.astro/
+.turbo/
+.vite/
+vendor/
+
+# ─── Secrets / credentials (KHÔNG commit) ───
+.env
+.env.*
+!.env.example
+secrets.json
+*.pem
+*.key
+*.p12
+id_rsa*
+
+# ─── Logs ───
+*.log
+
+# ─── Editor ───
+.idea/
