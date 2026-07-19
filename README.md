@@ -1,70 +1,78 @@
 # colab-handbook
 
-Conventions and small tools for running many repos — and many parallel coding
-sessions, human or AI — without stepping on each other.
+Bộ quy ước và công cụ nhỏ để vận hành nhiều repo — nhiều phiên code song song,
+người thật lẫn AI agent — mà không giẫm chân nhau.
 
-**If you are an AI agent, stop here and read [`CLAUDE.md`](CLAUDE.md) instead.**
-This file is for people.
+**Nếu bạn là AI agent, dừng ở đây và đọc [`CLAUDE.md`](CLAUDE.md).**
+File này dành cho con người.
 
-## What this is
+*(Tài liệu chuẩn tắc — [`CONVENTIONS.md`](CONVENTIONS.md) — viết bằng tiếng Anh
+để agent và tool đọc được; README này là cửa vào tiếng Việt cho anh em dev.)*
 
-A handbook, not a framework. It decides **outcomes** — where work lands, what a
-release is, how you signal "I'm working on this" — and deliberately leaves
-**implementations** (Node versions, test runners, your CI file) to each repo.
+## Đây là cái gì
 
-Everything in it was extracted from running ~25 real repos, including several
-production apps maintained almost entirely by AI coding agents working in
-parallel worktrees. The anti-patterns section is not theoretical: every entry is
-something that actually happened, with the scar tissue to show for it.
+Một cuốn **handbook, không phải framework**. Nó quyết định **kết quả** — code
+merge vào đâu, release là gì, báo "tôi đang làm việc này" bằng cách nào — và cố
+tình để **cách hiện thực** (phiên bản Node, test runner, file CI của bạn) cho
+từng repo tự quyết.
 
-## The model in 30 seconds
+Mọi thứ trong đây được chưng cất từ việc vận hành ~25 repo thật, trong đó có
+nhiều app production được bảo trì gần như hoàn toàn bởi AI agent chạy song song
+trên nhiều worktree. Mục anti-pattern không phải lý thuyết: từng mục là chuyện
+đã xảy ra thật, kèm sẹo để chứng minh.
 
-One question decides everything: **does the repo deploy to production?**
+## Mô hình trong 30 giây
 
-- **No → Tier B.** One branch, `main`. Ship nothing, tag optionally. Most repos.
-- **Yes → Tier A.** Work merges to `dev` (fast CI), promotes to `main` (full test
-  suite), and a `v*.*.*` tag — only a tag — deploys.
+Một câu hỏi quyết định tất cả: **repo này có deploy production không?**
 
-Every repo declares which it is in `.github/project.yml`, so nobody guesses.
-Issues are claimed with an assignee + `in-progress` label before work starts, so
-parallel sessions never collide on the same task.
+- **Không → Tier B.** Một nhánh duy nhất: `main`. Không ship gì, tag tùy chọn.
+  Đa số repo nằm đây.
+- **Có → Tier A.** Code merge vào `dev` (CI nhanh), thăng cấp lên `main` (chạy
+  full test suite), và một tag `v*.*.*` — chỉ tag — mới deploy.
 
-Full rules: [`CONVENTIONS.md`](CONVENTIONS.md). It's a 15-minute read and the
-only file that is normative — everything else here supports it.
+Mỗi repo khai báo mình thuộc tier nào trong `.github/project.yml`, nên không ai
+phải đoán. Issue được **claim** bằng assignee + label `in-progress` trước khi
+bắt tay vào làm, nên các phiên song song không bao giờ đụng nhau trên cùng một
+việc.
 
-## Layout
+Toàn bộ luật: [`CONVENTIONS.md`](CONVENTIONS.md). Đọc mất ~15 phút và là file
+**chuẩn tắc duy nhất** — mọi thứ còn lại trong repo chỉ phục vụ nó.
 
-| Path | What it is |
+## Cấu trúc repo
+
+| Đường dẫn | Là gì |
 |---|---|
-| [`CONVENTIONS.md`](CONVENTIONS.md) | The rules. Normative, single source of truth. |
-| [`CLAUDE.md`](CLAUDE.md) | Entry point for AI agents — operational distillation. |
-| [`project.schema.md`](project.schema.md) | Field reference for `.github/project.yml`. |
-| [`templates/`](templates/) | Copy-and-own starting points: CI, release, the `CLAUDE.md` block for adopting repos. **Nothing is called remotely** — copy, edit, own. |
-| [`tools/`](tools/) | `colab` — one small CLI for issue claims, port allocation, and (optional) worktree management. JSON state, no dependencies. |
-| [`audit/`](audit/) | External conformance checker. Reads all your repos — across owners, including local-only — and reports drift in one run. Advisory, never blocking. |
-| [`skills/`](skills/) | Portable session flows (`code-start`, `code-wrap`) installable as Claude Code skills via `install.sh`. |
+| [`CONVENTIONS.md`](CONVENTIONS.md) | Luật. Chuẩn tắc, nguồn sự thật duy nhất (EN). |
+| [`CLAUDE.md`](CLAUDE.md) | Cửa vào cho AI agent — bản chưng cất vận hành (EN). |
+| [`project.schema.md`](project.schema.md) | Tham chiếu field của `.github/project.yml`. |
+| [`templates/`](templates/) | Điểm khởi đầu **copy-về-là-của-bạn**: CI, release, block `CLAUDE.md` cho repo adopt. **Không có gì được gọi từ xa** — copy, sửa, sở hữu. |
+| [`tools/`](tools/) | `colab` — một CLI nhỏ cho claim issue, cấp port, và quản lý worktree (tùy chọn). State JSON, không dependency. |
+| [`audit/`](audit/) | Trình kiểm tra conformance từ bên ngoài. Đọc mọi repo của bạn — mọi owner, kể cả repo local-only — và báo drift trong một lần chạy. Chỉ cảnh báo, không bao giờ chặn. |
+| [`skills/`](skills/) | Flow phiên làm việc portable (`code-start`, `code-wrap`) cài thành skill Claude Code qua `install.sh`. |
 
-## Adopting it in a repo
+## Adopt vào một repo
 
-The short version — the full checklist is
+Bản rút gọn — checklist đầy đủ ở
 [`CONVENTIONS.md` §9](CONVENTIONS.md#9-adopting-this):
 
-1. Decide the tier honestly (production **today**, not "soon").
-2. Add `.github/project.yml`.
-3. `gh label create in-progress` — the claim label won't exist yet.
-4. Paste [`templates/repo-CLAUDE-block.md`](templates/repo-CLAUDE-block.md) into
-   the repo's `CLAUDE.md` — this is how agents discover the conventions at all.
-5. Make sure CI covers the two required outcomes: a secret scan and a build,
-   with the toolchain version resolved from the repo's own manifest — never
-   hardcoded. Copy a template if it helps.
+1. Xác định tier một cách trung thực (có production **hôm nay** không, chứ
+   không phải "sắp có").
+2. Thêm `.github/project.yml`.
+3. `gh label create in-progress` — label claim chưa tồn tại sẵn đâu.
+4. Dán [`templates/repo-CLAUDE-block.md`](templates/repo-CLAUDE-block.md) vào
+   `CLAUDE.md` của repo — đây là cách duy nhất để agent phát hiện ra bộ quy ước
+   này.
+5. Đảm bảo CI đạt hai kết quả bắt buộc: quét secret và build, với phiên bản
+   toolchain **resolve từ manifest của chính repo** — không bao giờ hardcode.
+   Copy template nếu thấy tiện.
 
-Existing branches are grandfathered. Don't rename anything.
+Nhánh có sẵn từ trước được **giữ nguyên** (grandfathered). Đừng đổi tên gì cả.
 
-## Why so little is enforced
+## Vì sao ép buộc ít vậy
 
-Our private repos sit on a GitHub plan without branch protection — `main` cannot
-be made unpushable. So this handbook doesn't pretend to enforce; it makes
-conformance **cheap to follow and cheap to check**. The audit tool reports
-drift; the conventions explain *why* each rule exists so you can judge when to
-break one. When you do, update the doc in the same PR — a doc that describes a
-repo that doesn't exist is the worst artifact in this business.
+Các repo private của chúng ta nằm trên gói GitHub không có branch protection —
+không thể cấm push vào `main`. Nên handbook này không giả vờ ép buộc; nó làm
+cho việc **tuân thủ rẻ và việc kiểm tra rẻ**. Audit tool báo drift; quy ước
+giải thích *vì sao* từng luật tồn tại để bạn tự phán đoán khi nào đáng phá luật.
+Khi phá, hãy sửa tài liệu trong cùng PR — một tài liệu mô tả một repo không tồn
+tại là thứ tệ nhất trong nghề này.
