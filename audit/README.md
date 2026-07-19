@@ -23,7 +23,7 @@ LaunchAgent).
 ## Usage
 
 ```sh
-node audit.mjs                          # audit every entry in repos.txt
+node audit.mjs                          # audit the resolved repo list (see below)
 node audit.mjs --quiet                  # only repos with findings
 node audit.mjs --json                   # machine-readable, for a dashboard/cron
 node audit.mjs --local ~/Future/foo     # one local path, ad hoc (repeatable)
@@ -33,7 +33,8 @@ node audit.mjs --config other-list.txt  # a different repo list
 
 Exit code: `0` when every repo passes, `1` when any repo has a finding, `2` on a
 usage error. A repo that is missing, broken, or has no `project.yml` produces a
-finding — it never crashes the sweep.
+finding — it never crashes the sweep. The header prints which repo list was used and
+the handbook's current version, so a scheduled run is self-documenting.
 
 ## What it checks, per repo
 
@@ -51,12 +52,40 @@ finding — it never crashes the sweep.
   (`.nvmrc` / `engines.node` / `composer.json require.php`), and the versions the
   workflows actually pin disagree. It **reports**, it does not auto-resolve. Two
   workflows pinning different majors (the ci.yml=20 / deploy=22 bug) is a hard finding.
+- **Handbook reconciliation (stamps)** — copied templates carry a stamp naming the
+  template and the handbook version they were copied at (`colab template` writes it;
+  see `templates/`). The audit compares each stamp against the handbook's own git
+  history:
+  - Template **changed** since the stamped version → **⚠ finding** ("copied @ vX —
+    template changed since (vY): review, re-copy via colab template").
+  - A workflow that **looks** like a handbook copy (matching filename or a content
+    fingerprint) but carries **no stamp** → advisory (can't track drift).
+  - Stamp naming an **unknown** template, or a version **newer** than the handbook, or
+    a version **not in this checkout** → advisory.
+  - The same comparison runs for a `CLAUDE.md` conventions block against
+    `templates/repo-CLAUDE-block.md`.
+
+  Reconciliation needs the handbook's version = `git describe --tags --abbrev=0` in
+  this checkout (override the handbook location with `COLAB_HANDBOOK`). **Before any
+  tag exists** the version is treated as `v0` and stamp comparisons are **inactive**
+  (the header says so) rather than failing.
 
 `stack` is intentionally **not** validated — it is a free-form string now.
 
-## Config: `repos.txt`
+## The repo list — resolution order
 
-One entry per line, `#` for comments. Each entry is either an absolute path (audited
-from the working tree, faster, sees local branches) or an `owner/name` slug (audited
-through the GitHub API, nothing cloned). Local-only repos with no remote are valid —
-just give the path.
+The list of repos to audit is resolved highest-precedence first:
+
+1. `--config <path>` — explicit; errors if the path is missing.
+2. `~/.colab/repos.txt` — the **machine-local, private** fleet registry (override the
+   directory with `COLAB_HOME`, matching the `colab` CLI). Used automatically when it
+   exists. **This is where your real repo list lives** — it is not committed anywhere.
+3. `audit/repos.txt` — the committed **neutral example** in this repo. Fallback only;
+   it contains format docs and placeholder entries, no real repo names (this handbook
+   repo may be public, so a list of private paths/slugs must not live in it).
+
+To build your real list: `mkdir -p ~/.colab && cp audit/repos.txt ~/.colab/repos.txt`,
+then replace the examples. Format: one entry per line, `#` for comments; each entry is
+an absolute path (audited from the working tree, faster, sees local branches) or an
+`owner/name` slug (audited through the GitHub API, nothing cloned). Local-only repos
+with no remote are valid — just give the path.

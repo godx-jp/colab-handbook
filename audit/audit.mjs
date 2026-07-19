@@ -15,8 +15,21 @@
 // Dependencies: none. Plain Node, plus `gh` shelled out for GitHub API reads (only
 // when a repo is given as an owner/name slug rather than a local path).
 //
+// It also runs RECONCILIATION checks: copied handbook artifacts carry a stamp naming
+// the template and the handbook version they were copied at (see `colab template`).
+// This audit compares each stamp against the handbook's own git history and flags a
+// repo whose copy is now behind a changed template — so an adopted repo finds out via
+// the audit, not by luck. The handbook is this checkout (the audit knows its own
+// location); its current version is `git describe --tags --abbrev=0`.
+//
+// Repo list resolution (highest precedence first):
+//   1. --config <path>            explicit; errors if missing
+//   2. ~/.colab/repos.txt         machine-local fleet registry (PRIVATE, not committed)
+//   3. <this dir>/repos.txt       the committed neutral example (fallback only)
+// (COLAB_HOME overrides ~/.colab, matching the colab CLI.)
+//
 // Usage:
-//   node audit.mjs                       # audit everything in repos.txt
+//   node audit.mjs                       # audit everything in the resolved repo list
 //   node audit.mjs --local ~/Future/foo  # audit one local path, ad hoc
 //   node audit.mjs --config other.txt    # a different repo list
 //   node audit.mjs --json                # machine-readable
@@ -29,14 +42,20 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename, dirname } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+// audit/ lives inside the handbook checkout; COLAB_HANDBOOK overrides for running the
+// audit from elsewhere (or for tests that point at a scratch handbook).
+const HANDBOOK_ROOT = process.env.COLAB_HANDBOOK ? resolve(process.env.COLAB_HANDBOOK) : resolve(HERE, "..");
+const COLAB_HOME = process.env.COLAB_HOME || join(homedir(), ".colab");
 
 // ---------------------------------------------------------------------------- args
 
 function parseArgs(argv) {
-  const opts = { config: join(HERE, "repos.txt"), locals: [], slugs: [], json: false, quiet: false };
+  // config === null means "resolve from the precedence chain"; a string means explicit.
+  const opts = { config: null, locals: [], slugs: [], json: false, quiet: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--json") opts.json = true;
@@ -56,6 +75,19 @@ function parseArgs(argv) {
     else opts.slugs.push(a); // bare argument = slug or path
   }
   return opts;
+}
+
+// Resolve the repo-list file per the documented precedence. Returns { path, source }
+// or null when auditing only --local / positional targets (no list needed).
+function resolveConfig(opts) {
+  if (opts.config) {
+    if (!existsSync(opts.config)) die(`config not found: ${opts.config}`);
+    return { path: opts.config, source: "--config" };
+  }
+  const local = join(COLAB_HOME, "repos.txt");
+  if (existsSync(local)) return { path: local, source: COLAB_HOME + "/repos.txt" };
+  const bundled = join(HERE, "repos.txt");
+  return { path: bundled, source: "bundled example (audit/repos.txt)" };
 }
 
 function die(msg) {
@@ -169,6 +201,151 @@ function satisfiesConstraint(version, constraint) {
 }
 
 
+// ------------------------------------------------------- handbook version + stamps
+//
+// Reconciliation rests on two facts the audit can establish locally:
+//   1. The handbook's CURRENT version — `git describe --tags --abbrev=0` in this
+//      checkout. Before any tag exists that command fails; we then treat the version
+//      as `v0` and mark the handbook "untagged", which DEACTIVATES stamp comparisons
+//      (there is no real version line to compare against) rather than failing.
+//   2. Whether a template CHANGED since a given stamp — `git log <stamp>..HEAD` scoped
+//      to that template's file. Non-empty history = the adopter's copy is behind.
+
+function gitIn(root, args) {
+  try {
+    return {
+      ok: true,
+      out: execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(),
+    };
+  } catch {
+    return { ok: false, out: "" };
+  }
+}
+
+function handbookInfo() {
+  const isGit = gitIn(HANDBOOK_ROOT, ["rev-parse", "--show-toplevel"]).ok;
+  if (!isGit) return { root: HANDBOOK_ROOT, hasGit: false, untagged: true, version: "v0" };
+  const d = gitIn(HANDBOOK_ROOT, ["describe", "--tags", "--abbrev=0"]);
+  if (!d.ok || !d.out) return { root: HANDBOOK_ROOT, hasGit: true, untagged: true, version: "v0" };
+  return { root: HANDBOOK_ROOT, hasGit: true, untagged: false, version: d.out };
+}
+
+// Template stems present in the handbook (e.g. "ci-node", "ci-laravel", "release-tag").
+function templateNames() {
+  try {
+    return new Set(
+      readdirSync(join(HANDBOOK_ROOT, "templates"))
+        .filter((f) => /\.ya?ml$/.test(f))
+        .map((f) => f.replace(/\.ya?ml$/, "")),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+// vX.Y.Z comparison; missing components count as 0. Non-numeric junk sorts as 0 so a
+// malformed stamp never throws.
+function cmpSemver(a, b) {
+  const norm = (s) => String(s).replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
+  return cmpParts(norm(a), norm(b));
+}
+
+// Did any of the given template files change between the stamped version and HEAD?
+// Returns { verifiable, changed }. verifiable=false when the stamped ref does not
+// resolve in this checkout (a tag we don't have) — reported, never guessed.
+function templateChangedSince(files, sinceRef) {
+  const resolvable = gitIn(HANDBOOK_ROOT, ["rev-parse", "--verify", "--quiet", sinceRef + "^{commit}"]).ok;
+  if (!resolvable) return { verifiable: false, changed: false };
+  const log = gitIn(HANDBOOK_ROOT, ["log", "--oneline", `${sinceRef}..HEAD`, "--", ...files]);
+  return { verifiable: true, changed: log.ok && log.out.length > 0 };
+}
+
+// First-line-ish workflow stamp: `# colab-handbook: <name> @ <version>`.
+function parseWorkflowStamp(text) {
+  if (!text) return null;
+  const m = text.match(/#\s*colab-handbook:\s*([A-Za-z0-9._-]+)\s*@\s*(v?[0-9][0-9A-Za-z.\-+]*)/);
+  return m ? { name: m[1], version: m[2] } : null;
+}
+
+// CLAUDE-block stamp: `<!-- colab-handbook @ <version> -->`.
+function parseClaudeStamp(text) {
+  if (!text) return null;
+  const m = text.match(/<!--\s*colab-handbook\s*@\s*(v?[0-9][0-9A-Za-z.\-+]*)\s*-->/);
+  return m ? { version: m[1] } : null;
+}
+
+// Content fingerprints that mark a workflow/CLAUDE file as a handbook derivative even
+// when someone renamed the file or pasted the block without the stamp. Precise on
+// purpose: better to miss an unstamped copy than to nag an unrelated ci.yml.
+const WORKFLOW_FINGERPRINTS = [
+  "gitleaks/gitleaks/releases/download", // our exact pinned-binary install
+  "wayfinder:generate",                  // ci-laravel bootstrap
+  "Build grouped release summary",       // release-tag
+  "Resolve Node version",                // ci-node toolchain step
+  "Resolve toolchain versions",          // ci-laravel toolchain step
+];
+function looksLikeHandbookWorkflow(text, stem, tmplNames) {
+  if (tmplNames.has(stem)) return true;
+  if (!text) return false;
+  return WORKFLOW_FINGERPRINTS.some((s) => text.includes(s));
+}
+
+// A CLAUDE.md that pasted the conventions block (the "follows the colab-handbook
+// conventions" line is unique to templates/repo-CLAUDE-block.md).
+function looksLikeHandbookClaude(text) {
+  return !!text && /follows the \[?colab-handbook/i.test(text);
+}
+
+// Run all stamp/reconciliation checks for one repo, pushing findings via fail/warn.
+// Silent when there is nothing to say (the common, healthy case).
+function checkStamps(src, hb, tmplNames, fail, warn) {
+  const cur = hb.version;
+
+  const compareStamp = (kind, name, stampVersion, files) => {
+    // Deactivated while the handbook is untagged — a global note already says so.
+    if (hb.untagged || !hb.hasGit) return;
+    if (name !== null && !tmplNames.has(name)) {
+      warn(`${kind} stamped @ ${stampVersion} names unknown template "${name}" — not in handbook templates/`);
+      return;
+    }
+    if (cmpSemver(stampVersion, cur) > 0) {
+      warn(`${kind} stamped @ ${stampVersion} is NEWER than handbook current ${cur} — clock skew or a hand-edited stamp`);
+      return;
+    }
+    const { verifiable, changed } = templateChangedSince(files, stampVersion);
+    if (!verifiable) {
+      warn(`${kind} stamped @ ${stampVersion}, a version not in this handbook checkout — cannot verify drift (fetch tags, or re-copy)`);
+      return;
+    }
+    if (changed) {
+      fail(`${kind} copied @ ${stampVersion} — template changed since (${cur}): review, re-copy via colab template`);
+    }
+  };
+
+  // --- workflow copies ---
+  for (const wf of src.listDir(".github/workflows").filter((f) => /\.ya?ml$/.test(f))) {
+    const text = src.readFile(`.github/workflows/${wf}`);
+    const stem = wf.replace(/\.ya?ml$/, "");
+    const stamp = parseWorkflowStamp(text);
+    if (stamp) {
+      compareStamp(`${wf}`, stamp.name, stamp.version, [`templates/${stamp.name}.yml`, `templates/${stamp.name}.yaml`]);
+    } else if (looksLikeHandbookWorkflow(text, stem, tmplNames)) {
+      warn(`${wf} unstamped — looks copied from the handbook but cannot track template drift; re-copy via colab template`);
+    }
+  }
+
+  // --- CLAUDE.md conventions block ---
+  const claude = src.readFile("CLAUDE.md");
+  if (claude) {
+    const stamp = parseClaudeStamp(claude);
+    if (stamp) {
+      compareStamp("CLAUDE block", null, stamp.version, ["templates/repo-CLAUDE-block.md"]);
+    } else if (looksLikeHandbookClaude(claude)) {
+      warn("CLAUDE.md has the conventions block but no colab-handbook stamp — cannot track handbook drift; re-paste the current block");
+    }
+  }
+}
+
 // ------------------------------------------------------------------- repo acquisition
 
 function runGh(args) {
@@ -262,7 +439,7 @@ const VALID_DEPLOY = new Set(["tag", "push-main", "none"]);
 // no value for a Capacitor mobile app and forced everyday to be mislabelled, so the
 // enum was doing harm. It is now free-form documentation.
 
-function auditRepo(target) {
+function auditRepo(target, ctx) {
   const src = makeSource(target);
   const findings = []; // { level: 'fail'|'warn', text }
   const info = { repo: src.label, kind: src.kind, tier: null, findings: [] };
@@ -346,6 +523,9 @@ function auditRepo(target) {
   // descriptor, the ecosystem manifest, and what the workflows actually pin.
   const tool = collectToolchain(src, cfg, workflows);
   tool.findings.forEach((f) => findings.push(f));
+
+  // ---- handbook reconciliation (stamps) -----------------------------------
+  checkStamps(src, ctx.handbook, ctx.templateNames, fail, warn);
 
   function finish() {
     info.findings = findings;
@@ -483,8 +663,9 @@ function loadTargets(opts) {
   if (opts.slugs.length) {
     entries.push(...opts.slugs);
   } else if (!opts.locals.length) {
-    if (!existsSync(opts.config)) die(`config not found: ${opts.config}`);
-    for (const line of readFileSync(opts.config, "utf8").split(/\r?\n/)) {
+    const cfg = resolveConfig(opts);
+    opts.resolvedConfig = cfg; // surfaced in the report header
+    for (const line of readFileSync(cfg.path, "utf8").split(/\r?\n/)) {
       const s = line.replace(/#.*$/, "").trim();
       if (s) entries.push(s);
     }
@@ -514,11 +695,21 @@ function labelForPath(p) {
 
 // ------------------------------------------------------------------------- output
 
-function report(results, opts) {
+function report(results, opts, ctx) {
   if (opts.json) {
-    console.log(JSON.stringify({ generated: new Date().toISOString(), results }, null, 2));
+    console.log(JSON.stringify({
+      generated: new Date().toISOString(),
+      handbook: { version: ctx.handbook.version, untagged: ctx.handbook.untagged, root: ctx.handbook.root },
+      configSource: opts.resolvedConfig?.source ?? (opts.locals.length || opts.slugs.length ? "ad-hoc (--local / positional)" : null),
+      results,
+    }, null, 2));
     return;
   }
+
+  // Header: which repo list + handbook version, so a scheduled run is self-documenting.
+  if (opts.resolvedConfig) console.log(`repo list: ${opts.resolvedConfig.source}`);
+  console.log(`handbook:  ${ctx.handbook.version}${ctx.handbook.untagged ? " (untagged — stamp checks inactive)" : ""}`);
+  console.log("");
 
   const shown = opts.quiet ? results.filter((r) => !r.clean) : results;
   const width = Math.max(0, ...shown.map((r) => r.repo.length));
@@ -548,12 +739,14 @@ function report(results, opts) {
 
 const opts = parseArgs(process.argv.slice(2));
 const targets = loadTargets(opts);
-if (!targets.length) die("nothing to audit — add entries to repos.txt or pass --local <path>");
+if (!targets.length) die("nothing to audit — add entries to the repo list or pass --local <path>");
+
+const ctx = { handbook: handbookInfo(), templateNames: templateNames() };
 
 const results = [];
 for (const t of targets) {
   try {
-    results.push(auditRepo(t));
+    results.push(auditRepo(t, ctx));
   } catch (err) {
     // Degrade gracefully: one broken repo must never take the whole sweep down.
     results.push({
@@ -567,5 +760,5 @@ for (const t of targets) {
   }
 }
 
-report(results, opts);
+report(results, opts, ctx);
 process.exit(results.every((r) => r.ok) ? 0 : 1);

@@ -21,8 +21,18 @@ Starting points you **copy into your own repo**. That is the entire model.
 
 ## How to adopt
 
-1. **Copy** the template into the path in the table (rename it — templates are named
-   by purpose; your workflow is named `ci.yml` / `release.yml`).
+1. **Copy — use `colab template`.** It copies the template *and* prepends a version
+   stamp in one act, so the audit can later tell you when the source moved on:
+
+   ```sh
+   colab template                                   # list templates + handbook version
+   colab template ci-node   --dest .github/workflows/ci.yml
+   colab template release-tag --dest .github/workflows/release.yml
+   ```
+
+   The stamp is one prepended line — `# colab-handbook: <name> @ <version>`. Do a plain
+   `cp` only if you have no `colab` on PATH, and then add that stamp line by hand
+   (an unstamped copy is untrackable — the audit will nag you to re-copy).
 2. **Walk the `# EDIT:` markers.** Each one is a decision only your repo can make:
    which branches exist, self-hosted runner or not, the build command, working
    directory.
@@ -32,12 +42,23 @@ Starting points you **copy into your own repo**. That is the entire model.
    CI fails on purpose with a message telling you to declare it.
 4. **Add `.github/project.yml`** if you have not — copy the reference at the handbook's
    own `.github/project.yml`. The audit tool and the CI resolution step both read it.
-5. **Paste the CLAUDE block** so the next agent in the repo can find its way back here.
+5. **Paste the CLAUDE block** (`repo-CLAUDE-block.md`) so the next agent in the repo can
+   find its way back here. Set its `<!-- colab-handbook @ <version> -->` stamp to the
+   handbook version you adopted at.
 6. **Own it.** From this point the file is yours. Edit freely; nothing overwrites it.
+
+## Reconciliation — how you find out when a template changes
+
+Because you own your copy, nothing pushes updates to you. Instead the copy is
+**stamped** with the handbook version it came from, and `audit/audit.mjs` compares that
+stamp against the handbook's git history. When a template you copied has changed since
+your stamp, the audit flags it: review the diff, take what you want, and re-run
+`colab template … --force` to re-stamp. That is the whole loop — no remote calls, no
+silent updates, just an honest report that you are behind.
 
 ## Keeping honest
 
 `audit/audit.mjs` in this handbook sweeps many repos and reports when a `project.yml`
 is missing or incoherent, when a declared toolchain disagrees with what CI actually
-pins, and when branch names drift. It is advisory — run it locally or on a schedule.
-It is **not** wired into any repo's CI.
+pins, when branch names drift, and when a stamped copy has fallen behind its template.
+It is advisory — run it locally or on a schedule. It is **not** wired into any repo's CI.

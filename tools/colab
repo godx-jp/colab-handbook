@@ -911,6 +911,116 @@ function cmdConfig(argv) {
 }
 
 // ---------------------------------------------------------------------------
+// template — copy a handbook workflow template into a repo, STAMPED with the
+// handbook's current version. The stamp (`# colab-handbook: <name> @ <version>`) is
+// what audit/audit.mjs reads to tell an adopter their copy has fallen behind a changed
+// template. Copy-and-own is deliberate: these are never called remotely. Making
+// copy+stamp one command matters because a manual stamp is the step people skip.
+// ---------------------------------------------------------------------------
+
+/** Handbook root + templates dir, relative to this script (tools/colab). */
+function handbookPaths() {
+  const root = path.resolve(__dirname, '..');
+  return { root, templatesDir: path.join(root, 'templates') };
+}
+
+/** Current handbook version = nearest tag; 'v0' before the first tag exists. */
+function handbookVersion(root) {
+  const d = git.git(['describe', '--tags', '--abbrev=0'], root);
+  return d.ok && d.stdout ? d.stdout : 'v0';
+}
+
+function listTemplates(templatesDir) {
+  try {
+    return fs.readdirSync(templatesDir)
+      .filter((f) => /\.ya?ml$/.test(f))
+      .map((f) => f.replace(/\.ya?ml$/, ''))
+      .sort();
+  } catch (_) {
+    throw new UserError(`Cannot read handbook templates dir: ${templatesDir}`);
+  }
+}
+
+const HELP_TEMPLATE = `colab template [<name>] [--dest <path>] [--repo <path>] [--force]
+
+Copy a colab-handbook workflow template into a repo, STAMPED with the handbook's current
+version. The stamp lets the audit tell you later when the source template has moved on.
+
+  colab template                    list available templates + current handbook version
+  colab template <name>             copy templates/<name>.yml → <repo>/.github/workflows/<name>.yml
+  colab template <name> --dest F    copy to an explicit file F
+                                    (adopters usually want --dest .github/workflows/ci.yml)
+
+Options:
+  --repo <path>   target repo root for the default destination (default: git root of cwd)
+  --force         overwrite an existing destination. You OWN the copy — local edits are lost.
+
+The copied file gets one line prepended:
+  # colab-handbook: <name> @ <version>
+These templates are NEVER called remotely — copy, edit, own. When the audit flags your
+copy as behind a changed template, review the diff and re-copy to re-stamp.
+`;
+
+function cmdTemplate(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--dest': 'dest', '--repo': 'repo' },
+    flags: { '--force': 'force', '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help) return print(HELP_TEMPLATE);
+
+  const { root, templatesDir } = handbookPaths();
+  const available = listTemplates(templatesDir);
+  const version = handbookVersion(root);
+
+  // No name → list.
+  const name = opts._[0];
+  if (!name) {
+    print(`colab-handbook templates (handbook ${version}):`);
+    for (const t of available) print(`  ${t}`);
+    print('');
+    print('Copy one:  colab template <name> [--dest <path>] [--repo <path>]');
+    print('The CLAUDE block (templates/repo-CLAUDE-block.md) is pasted by hand — see the note in that file.');
+    return 0;
+  }
+
+  const stem = name.replace(/\.ya?ml$/, '');
+  const srcFile = path.join(templatesDir, `${stem}.yml`);
+  if (!fs.existsSync(srcFile)) {
+    throw new UserError(`No template "${stem}". Available: ${available.join(', ') || '(none)'}`);
+  }
+
+  // Destination: explicit --dest, else <repo>/.github/workflows/<name>.yml.
+  let destFile;
+  if (opts.dest) {
+    destFile = path.resolve(opts.dest);
+  } else {
+    const repoAbs = resolveRepo(opts);
+    destFile = path.join(repoAbs, '.github', 'workflows', `${stem}.yml`);
+  }
+
+  if (fs.existsSync(destFile) && !opts.force) {
+    warn(`${destFile} already exists — not overwriting.`);
+    print('Compare your copy against the current template:');
+    print(`  diff "${destFile}" "${srcFile}"`);
+    print('Re-copy with --force to replace it (you own that file; local edits are lost).');
+    return 1;
+  }
+
+  if (version === 'v0') {
+    warn('handbook has no tags yet — stamping @ v0. Tag the handbook, then re-copy to stamp a real version.');
+  }
+
+  const body = fs.readFileSync(srcFile, 'utf8');
+  const stampLine = `# colab-handbook: ${stem} @ ${version}\n`;
+  fs.mkdirSync(path.dirname(destFile), { recursive: true });
+  fs.writeFileSync(destFile, stampLine + body);
+
+  print(`✓ ${stem} @ ${version} → ${destFile}`);
+  print('  stamped. Walk its # EDIT: markers, declare your toolchain, then commit. You own this file now.');
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // dispatch
 // ---------------------------------------------------------------------------
 
@@ -936,6 +1046,7 @@ Commands:
 
   doctor [--prune] [--ttl H] [--json]   heal dead worktrees / orphan + stale claims / orphan ports
   release-notes [<range>] [--repo P] [--out F] [--headline "..."]   grouped Markdown release summary
+  template [<name>] [--dest F] [--repo P] [--force]   copy a handbook workflow template, stamped
   config [show|add-repo P|rm-repo P|set K V]
 
 State is machine-local at ~/.colab/ (override with COLAB_HOME). Run any command with
@@ -958,6 +1069,7 @@ function main(argv) {
     case 'worktrees': return cmdWorktrees(rest);
     case 'doctor': return cmdDoctor(rest);
     case 'release-notes': return cmdReleaseNotes(rest);
+    case 'template': return cmdTemplate(rest);
     case 'config': return cmdConfig(rest);
     case undefined:
     case '-h': case '--help': case 'help': return print(HELP_ROOT);

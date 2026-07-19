@@ -239,7 +239,7 @@ resolve.
 
 ---
 
-## 8. Conformance
+## 8. Conformance and reconciliation
 
 Because branch protection is unavailable, conformance is checked **from outside** rather than
 by a job inside each repo. The [`audit/`](audit/) tool reads repos across every owner —
@@ -250,9 +250,34 @@ futurelastic/shoots-automation   tier A   ⚠ node: engines=22 but ci.yml pins 2
 futurelastic/everyday            tier B   ⚠ missing .github/project.yml
 ```
 
-Run it on a schedule. It is advisory: it reports, it does not block. That is a deliberate
-trade — an external auditor covers repos that never adopted anything, which an in-repo job
-by definition cannot.
+Run it on a schedule. It reports; only genuine findings fail the exit code.
+
+### How repos find out when the handbook changes
+
+The handbook is git-tagged `vX.Y.Z` (its current version is
+`git describe --tags --abbrev=0`; before the first tag it is treated as `v0` and stamp
+checks stay inactive). Templates are **copy-and-own**, never called remotely — so nothing
+pushes updates to an adopter. Instead, every copy is **stamped** with the handbook version
+it came from, and drift is surfaced by the audit, not by luck:
+
+- Workflow copies carry a first line `# colab-handbook: <template> @ <version>`.
+- The CLAUDE conventions block carries `<!-- colab-handbook @ <version> -->`.
+- **Copy via `colab template <name>`** — it copies *and* stamps in one act, because a
+  manual stamp is exactly the kind of step that gets skipped. It refuses to overwrite an
+  existing file without `--force`.
+
+The audit compares each stamp against the handbook's git history: a template that **changed
+since the stamped version** is a finding ("review the diff, re-copy"); an unstamped copy, an
+unknown template name, or a stamp newer than the handbook are advisories. A flagged repo is
+reconciled deliberately: read the diff, take what you want, `colab template <name> --force`,
+commit. No remote calls, no silent updates — an honest "you are behind" report.
+
+### The fleet registry is private
+
+The list of repos the audit sweeps lives at `~/.colab/repos.txt` — machine-local, never
+committed, because this handbook repo is public and a fleet list names private repos. The
+committed [`audit/repos.txt`](audit/repos.txt) is a neutral format example and last-resort
+fallback only. Resolution order: `--config` flag > `~/.colab/repos.txt` > bundled example.
 
 ---
 
@@ -275,7 +300,8 @@ here.
    reason a future agent will ever discover these conventions; agents read `CLAUDE.md`,
    they do not go looking for a handbook they have not heard of.
 6. **Make sure CI meets the outcome in [§7](#7-ci-and-toolchain)** — secret scan + build,
-   toolchain resolved not hardcoded. Copy a template if useful.
+   toolchain resolved not hardcoded. Copy a template if useful — via
+   `colab template <name>`, which stamps the copy for reconciliation ([§8](#8-conformance-and-reconciliation)).
 7. **Leave existing branches alone.** Grandfathered ([§4](#4-branches-and-commits)).
 8. **Do not create `dev`** unless the repo is genuinely Tier A.
 

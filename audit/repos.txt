@@ -1,45 +1,24 @@
-# Repos audited by audit.mjs. One per line. `#` starts a comment.
+# EXAMPLE fleet registry — this committed file is a FALLBACK and a format reference only.
 #
-# Two accepted forms:
-#   /absolute/path/to/repo   -> audited from the working tree on this machine
-#   owner/name               -> audited through the GitHub API via `gh` (nothing cloned)
+# The real repo list is MACHINE-LOCAL and lives at ~/.colab/repos.txt (override the
+# directory with COLAB_HOME). It is intentionally NOT committed: this handbook repo may
+# be public, and a list of private repo paths/slugs is not something to publish.
 #
-# Prefer the local path when the repo is checked out here: it is faster, needs no
-# network, and can see local branches. Use the slug for repos that live only on
-# GitHub, or when auditing from a machine without the checkouts.
+# audit.mjs resolves its repo list in this order:
+#   1. --config <path>       explicit; errors if the path is missing
+#   2. ~/.colab/repos.txt    your private fleet list (used automatically when present)
+#   3. this file             the neutral example below (fallback only)
 #
-# Local-only repos with no GitHub presence at all are perfectly valid entries — that
-# is half the point of this tool. Just give the path.
+# Format — one entry per line, `#` starts a comment. Two accepted forms:
+#   /absolute/path/to/repo   audited from the working tree on this machine
+#   owner/name               audited through the GitHub API via `gh` (nothing cloned)
+# Local-only repos with no remote are valid — just give the path.
+#
+# To build your real list:
+#   mkdir -p ~/.colab
+#   cp audit/repos.txt ~/.colab/repos.txt   # then replace the examples with your repos
 
-# ---------------------------------------------------------------- godx-jp (futurelastic)
-/Users/nhanvo/Future/futurelastic/everyday
-/Users/nhanvo/Future/futurelastic/shoots-automation
-/Users/nhanvo/Future/futurelastic/hr-double
-/Users/nhanvo/Future/futurelastic/corebooks
-/Users/nhanvo/Future/futurelastic/books
-/Users/nhanvo/Future/futurelastic/website
-
-# ---------------------------------------------------------------- rika-entertainment
-/Users/nhanvo/Future/rika-entertainment/dreamlab
-/Users/nhanvo/Future/rika-entertainment/talkie
-/Users/nhanvo/Future/rika-entertainment/media-tools
-
-# ---------------------------------------------------------------- tiximax-net
-/Users/nhanvo/Future/tiximax-group/tiximax-partner-crm
-/Users/nhanvo/Future/tiximax-group/b2b-trading
-/Users/nhanvo/Future/tiximax-group/tiximax-jp-web
-
-# ---------------------------------------------------------------- vo2vo
-/Users/nhanvo/Future/infrastructure/vpn-manager
-
-# ---------------------------------------------------------------- betoya-jp
-/Users/nhanvo/Future/betoya-group/betoyafoods-com
-
-# ---------------------------------------------------------------- local-only (no remote)
-/Users/nhanvo/Future/renkai/homepage2026
-/Users/nhanvo/Future/infrastructure/colab-handbook
-
-# ---------------------------------------------------------------- remote-only examples
-# Uncomment to audit through the API instead of a local checkout:
-# godx-jp/hr-double
-# tiximax-net/b2b-trading
+# --- example entries (safe placeholders — replace in ~/.colab/repos.txt) ---
+# /Users/you/code/example-app
+# /Users/you/code/example-service
+# example-org/example-repo

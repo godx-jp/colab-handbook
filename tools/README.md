@@ -180,6 +180,7 @@ Run `colab <cmd> --help` for full detail.
 | `worktrees [--json]` | list worktrees (with on-disk liveness) |
 | `doctor [--prune] [--ttl H] [--json]` | heal dead worktrees / orphan + stale claims / orphan ports |
 | `release-notes [<range>] [--repo P] [--out F] [--headline "..."]` | grouped Markdown release summary from git history (see below) |
+| `template [<name>] [--dest F] [--repo P] [--force]` | copy a handbook workflow template into a repo, **stamped** with the handbook version (see below) |
 | `config [show \| add-repo P \| rm-repo P \| set K V]` | manage config |
 
 ### Release notes
@@ -202,6 +203,17 @@ Composable — pipe straight into `gh`:
 ```sh
 colab release-notes v0.3.0..v0.4.0 | gh release create v0.4.0 --notes-file - --generate-notes
 ```
+
+### Templates
+
+`colab template` copies a handbook workflow template (`../templates/*.yml`) into a repo
+and **prepends a version stamp** — `# colab-handbook: <name> @ <version>`, where the
+version is `git describe --tags` in the handbook checkout (`v0` before any tag). With no
+name it lists the available templates; it refuses to overwrite an existing destination
+unless `--force` (and prints a `diff` hint instead). The stamp exists so
+`../audit/audit.mjs` can later tell an adopter that the source template has changed since
+they copied it — copy-and-own with a reconciliation trail, never a remote call. Making
+copy+stamp one command matters because a manual stamp is the step people skip.
 
 ## Safety
 
