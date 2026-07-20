@@ -209,6 +209,7 @@ const WORKFLOW_FINGERPRINTS = [
   { marker: 'CI (Laravel) — TEMPLATE. Copy me into your repo', kind: 'text', template: 'ci-laravel' },
   { marker: 'CI (Python) — TEMPLATE. Copy me into your repo', kind: 'text', template: 'ci-python' },
   { marker: 'Release (tag) — TEMPLATE. Copy me into your repo', kind: 'text', template: 'release-tag' },
+  { marker: 'Deploy (SSH/rsync to shared hosting) — TEMPLATE. Copy me into your repo', kind: 'text', template: 'deploy-xserver' },
   // The header convention itself, unattributed: this catches a copy of any template ADDED LATER
   // without anyone remembering to extend this list — provided the new template keeps the house
   // header. A template that omits it is invisible here, which is worth knowing when writing one.
@@ -222,6 +223,13 @@ const WORKFLOW_FINGERPRINTS = [
   { marker: 'Detect optional tooling', kind: 'step', template: 'ci-python' },
   { marker: 'Build grouped release summary', kind: 'step', template: 'release-tag' },
   { marker: 'Resolve tag and previous tag', kind: 'step', template: 'release-tag' },
+  // deploy-xserver. These two were CHOSEN to differ from the step names in the hand-written deploy
+  // workflows this template was derived from ("Setup Node", "Smoke test (…)"), which is the same
+  // admission test as above read from the other end: those files must keep classifying as
+  // `unrelated`, and a marker they happen to contain would reclassify them as copies and invite an
+  // overwrite. Verified against all three before being added here.
+  { marker: 'Resolve deploy toolchain', kind: 'step', template: 'deploy-xserver' },
+  { marker: 'Verify the deployed site answers', kind: 'step', template: 'deploy-xserver' },
   // Shared by all three ci-* templates: proves derivation, cannot say from which. Note the exact
   // parenthetical — hand-written installers on this fleet say "(pinned binary)", which is why the
   // step NAME discriminates where the URL inside the step does not.

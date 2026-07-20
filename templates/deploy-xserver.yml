@@ -1,0 +1,531 @@
+# Deploy (SSH/rsync to shared hosting) — TEMPLATE. Copy me into your repo at .github/workflows/deploy-xserver.yml.
+#
+# This is a starting point, not a dependency. Once you copy it, YOU OWN THIS FILE.
+# Edit it freely: rename jobs, add steps, drop the parts you do not need. Nothing
+# calls this file remotely and nothing will update it for you — divergence between
+# your copy and the handbook is expected and fine. If you find an improvement worth
+# sharing, change the handbook template too, but that is a manual, deliberate act.
+#
+# EDIT POINTS are marked `# EDIT:` — walk them once after copying.
+#
+# For: a PHP-framework + Vite fullstack app deployed to SHARED HOSTING over SSH —
+#      no root, no Docker, no container registry. The release is built on a runner
+#      and rsynced into a directory in the hosting account's home; a docroot symlink
+#      points the web server at the app's `public/`. Database migrations then run
+#      ON THE SERVER, against production.
+#
+# NOT for: anything with a container runtime or an orchestrator on the far side
+#      (build an image and push it instead); static sites (no server step to run);
+#      any host you cannot reach over SSH from the runner.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# THIS FILE DOES NOT CHANGE YOUR REPO'S TIER.
+#
+# Tier counts the gates between a merge and users; it is declared in
+# `.github/project.yml` and changed only by the checklist in CONVENTIONS.md §9.
+# Copying a deploy workflow in is not that checklist. Concretely:
+#
+#   - A tag push only deploys where `deploy: tag` is declared. If your repo says
+#     `deploy: manual`, adopting this file is the moment to change that field
+#     deliberately (and drop the now-false `runbook:`), NOT a side effect of the
+#     copy. Until you do, the two disagree and the audit will say so.
+#   - Tier B repos have no production at all. If you are copying this into one,
+#     stop: you are changing what the repo IS, which is a deliberate decision with
+#     its own checklist, not a workflow file.
+#
+# SECRETS ARE NAMED HERE, NEVER VALUED.
+#
+#   - `secrets.DEPLOY_SSH_KEY` — the private key that logs into the hosting
+#     account. ONE KEY PER REPO. Do not share a key between repos that deploy to
+#     the same account: a leak from any one of them then reaches all of them, and
+#     you cannot rotate one without breaking the rest.
+#   - `vars.DEPLOY_KNOWN_HOSTS` (optional) — see the "Setup SSH" step. Without it
+#     the host key is learned at run time, which is trust-on-first-use ON EVERY
+#     RUN rather than genuine host verification.
+#
+# Nothing else is secret. The host, port, user and paths below are configuration:
+# keep them in the `env:` block where a reviewer can see them, or move them to
+# repo variables if this repo is public and you would rather not publish them.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# SELF-HOSTED RUNNER — the assumptions that differ from a hosted one.
+#
+# Many shared hosts restrict SSH to domestic IP ranges, which a hosted runner in
+# another region cannot satisfy; a runner inside the right region can. If that is
+# why you are on a self-hosted runner, three things follow and this file depends
+# on all of them:
+#
+#   1. THE WORKSPACE IS NOT CLEAN BETWEEN RUNS. Files a previous run left behind
+#      are still there — including a previous `.env` and previous build output.
+#      Every step here either overwrites what it needs or is explicitly idempotent,
+#      and the final cleanup runs `if: always()`. Do not add a step that assumes
+#      an empty directory.
+#   2. TOOL VERSIONS ARE WHATEVER THE BOX HAS. The runner's native PHP and
+#      Composer are used as-is — there is no setup-php step. If the box's PHP does
+#      not satisfy the app's `require.php`, the build fails here rather than in
+#      production, which is the correct place; fix the box, do not pin around it.
+#      Node IS installed per-run, at the version this repo declares (below).
+#   3. BILLING OUTAGES DO NOT STOP IT. A hosted-runner billing lock halts every
+#      `ubuntu-latest` job in the org while this keeps deploying. That is a
+#      feature, and also a hazard: your CI can be silently dead while deploys
+#      still succeed. Check CI is alive before you release, not just green.
+#
+# On a hosted runner instead: change `runs-on`, and add a setup-php step, because
+# assumption 2 no longer holds.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# ONE-TIME SERVER PREPARATION — none of this is automated, and the first deploy
+# fails without it. Copy this checklist into the repo's deploy runbook and tick it:
+#
+#   [ ] Hosting panel: subdomain created, on the PHP version pinned in PHP_BIN below.
+#   [ ] Hosting panel: TLS certificate issued for that subdomain.
+#   [ ] Hosting panel: database + user created, granted on that database only.
+#   [ ] DNS record pointing at the host (some panels only issue a certificate once
+#       the name resolves to them directly — i.e. not behind a proxy).
+#   [ ] `<APP_DIR>/.env` written on the server, mode 600. It lives ONLY there:
+#       the rsync below excludes it, so it is never overwritten and never comes
+#       from the repo. Production values, `APP_DEBUG=false`, a generated app key.
+#   [ ] Deploy public key appended to the hosting account's `~/.ssh/authorized_keys`,
+#       its private half stored as this repo's `DEPLOY_SSH_KEY` secret.
+#   [ ] Scheduler / queue cron entries registered in the panel, IF the app has any
+#       scheduled tasks or queued jobs. It probably does not on day one — add them
+#       when it does, and wrap the queue worker in `flock` so a slow run cannot
+#       overlap the next tick.
+#   [ ] First deploy only: seed whatever an empty database needs, then immediately
+#       rotate any password the seeder hardcoded.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Deploy # EDIT: name it after the environment, e.g. "Deploy to production".
+
+on:
+  push:
+    tags:
+      # EDIT: only if your tag convention differs. This trigger is what makes
+      # `deploy: tag` true — a tag is the deploy, a branch push is not.
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch/tag/SHA to deploy (defaults to the triggering ref)"
+        required: false
+        default: ""
+
+# Serialise deploys, and NEVER cancel one in flight: a cancelled run can leave the
+# server rsynced but not migrated, which is the one state nothing recovers from
+# automatically. A queued second deploy is cheap; a half-applied one is not.
+concurrency:
+  group: deploy-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  # EDIT: every value in this block. This is the ONLY place per-repo configuration
+  # belongs — no step below hardcodes any of it, so adopting a later version of
+  # this template stays a small, readable diff.
+  #
+  # On a public repo you may prefer not to publish the host: replace with
+  # `${{ vars.DEPLOY_HOST }}` and set it as a repo variable. Variables are not
+  # secrets — they are for reducing noise, not for hiding credentials.
+  SSH_HOST: deploy.example.net
+  SSH_PORT: "22"
+  SSH_USER: deployuser
+  # Path RELATIVE to the SSH user's home directory.
+  APP_DIR: apps/myapp
+  # Absolute path of the docroot the web server serves. The reconcile step keeps
+  # this a symlink to $APP_DIR/public on every deploy.
+  DOCROOT_LINK: /home/deployuser/example.com/public_html/app.example.com
+  # Absolute path to the PHP binary ON THE SERVER. Shared hosts install several
+  # versions side by side and the default `php` on the SSH path is frequently NOT
+  # the one the web server runs. Pin the one that matches the domain's FPM
+  # version — otherwise migrations run under a different PHP than the site does.
+  PHP_BIN: /opt/php-8.4/bin/php
+  # EDIT: match the app's display name, or leave empty if the build does not read it.
+  VITE_APP_NAME: ""
+  # EDIT: arguments passed to the build-time route/codegen command.
+  WAYFINDER_ARGS: "--with-form"
+  # EDIT: the URL the smoke test asks. Must be the PUBLIC url, not the host above.
+  SMOKE_URL: https://app.example.com/
+  # EDIT: HTTP codes that mean "the app booted". 302 is here because an app behind
+  # auth redirects to its login page — that is a live app, not a failure.
+  SMOKE_OK_CODES: "200 302"
+
+jobs:
+  deploy:
+    name: Build & deploy
+    # EDIT: your runner label. See the SELF-HOSTED RUNNER note in the header —
+    # this file assumes PHP and Composer already exist on the box.
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref }}
+          # No credentials left in .git/config — on a self-hosted runner the
+          # workspace outlives the job.
+          persist-credentials: false
+
+      # -------------------------------------------------------------------------
+      # Toolchain resolution. Precedence, highest first:
+      #   Node:  1. .github/project.yml -> node:   2. .nvmrc, else package.json engines.node
+      #   ...and if neither declares it, FAIL.
+      #
+      # There is deliberately NO fallback default, and a DEPLOY workflow is where
+      # that rule was learned the hard way: every hand-written ancestor of this
+      # template hardcoded its Node version here. One of them was fixed when its CI
+      # turned out to build on a different major than this file deployed on — CI
+      # was green and proved nothing about what shipped. The other copies stayed
+      # wrong, because there was no template and therefore no way to see it.
+      #
+      # Reading the same declaration CI reads is the entire point. Do not replace
+      # this with a literal, however obvious the version seems today.
+      # -------------------------------------------------------------------------
+      - name: Resolve deploy toolchain
+        id: toolchain
+        run: |
+          set -euo pipefail
+
+          # "^8.3" / ">=22.1" / "v22" / "8.4.*" -> "8.3" / "22.1" / "22" / "8.4"
+          normalise() {
+            printf '%s' "$1" \
+              | tr -d '"' \
+              | sed -E 's/^[^0-9]*//' \
+              | sed -E 's/[[:space:]].*$//' \
+              | sed -E 's/\.(x|\*)$//' \
+              | sed -E 's/[^0-9.].*$//' \
+              | sed -E 's/\.$//'
+          }
+
+          # Read a flat `key: value` out of .github/project.yml. That file is a
+          # handful of top-level keys by design, so this is sufficient.
+          from_project_yml() {
+            [ -f .github/project.yml ] || return 0
+            sed -nE "s/^[[:space:]]*$1:[[:space:]]*\"?([^\"#[:space:]]+)\"?.*/\1/p" .github/project.yml | head -1
+          }
+
+          # --- Node (used to build the assets that ship) --------------------------
+          NODE_VERSION=""; NODE_SOURCE=""
+          V="$(from_project_yml node || true)"
+          if [ -n "$V" ] && [ "$V" != "null" ]; then
+            NODE_VERSION="$(normalise "$V")"; NODE_SOURCE=".github/project.yml (node:)"
+          fi
+          if [ -z "$NODE_VERSION" ] && [ -f .nvmrc ]; then
+            V="$(grep -vE '^[[:space:]]*(#|$)' .nvmrc | head -1 | tr -d '[:space:]' || true)"
+            if [ -n "$V" ]; then
+              NODE_VERSION="$(normalise "$V")"; NODE_SOURCE=".nvmrc"
+            fi
+          fi
+          if [ -z "$NODE_VERSION" ] && [ -f package.json ]; then
+            V=""
+            if command -v node >/dev/null 2>&1; then
+              V="$(node -e "try{const e=require('./package.json').engines||{};process.stdout.write(String(e.node||''))}catch(_){}" || true)"
+            elif command -v python3 >/dev/null 2>&1; then
+              V="$(python3 -c "import json;print((json.load(open('package.json')).get('engines') or {}).get('node') or '')" || true)"
+            fi
+            if [ -n "$V" ]; then
+              NODE_VERSION="$(normalise "$V")"; NODE_SOURCE="package.json (engines.node)"
+            fi
+          fi
+          if [ -z "$NODE_VERSION" ]; then
+            echo "::error::No Node version is declared in this repository, and this workflow refuses to guess one."
+            {
+              echo "Declare it in ONE of:"
+              echo "  1. .github/project.yml  ->  node: \"22\"   (preferred)"
+              echo "  2. .nvmrc  ->  22        or  package.json -> \"engines\": { \"node\": \">=22\" }"
+              echo "Declare the SAME version CI builds with, or CI proves nothing about this deploy."
+            } >&2
+            exit 1
+          fi
+
+          # --- PHP: cross-check the SERVER binary against the declaration ---------
+          # PHP is NOT installed here (the runner's own PHP builds the release, see
+          # the header). What this checks is subtler and has no equivalent in CI:
+          # PHP_BIN names a specific interpreter on the far side, so a repo can
+          # declare one PHP version, test on it, and then migrate production with a
+          # different one — no error anywhere, just two PHPs. If the pinned path
+          # carries a version number, it must agree with the declaration.
+          PHP_DECLARED="$(from_project_yml php || true)"
+          if [ -n "$PHP_DECLARED" ] && [ "$PHP_DECLARED" != "null" ]; then
+            PHP_DECLARED="$(normalise "$PHP_DECLARED")"
+            PHP_BIN_VERSION="$(printf '%s' "$PHP_BIN" | sed -nE 's/.*([0-9]+\.[0-9]+).*/\1/p')"
+            if [ -z "$PHP_BIN_VERSION" ]; then
+              echo "::notice::PHP_BIN ($PHP_BIN) carries no version to check against the declared PHP $PHP_DECLARED — verify by hand that it is the same interpreter the web server runs."
+            elif [ "$PHP_BIN_VERSION" != "$PHP_DECLARED" ]; then
+              echo "::error::PHP_BIN points at PHP $PHP_BIN_VERSION but this repo declares php: $PHP_DECLARED."
+              {
+                echo "Production would migrate under a PHP the repo does not claim to support."
+                echo "Fix ONE of: the PHP_BIN path in this workflow, or php: in .github/project.yml."
+              } >&2
+              exit 1
+            fi
+          fi
+
+          echo "node-version=$NODE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Node $NODE_VERSION (from: $NODE_SOURCE) / server PHP: $PHP_BIN"
+          {
+            echo "Node **$NODE_VERSION** — resolved from \`$NODE_SOURCE\`"
+            echo ""
+            echo "Server PHP — \`$PHP_BIN\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: ${{ steps.toolchain.outputs.node-version }}
+
+      - name: Composer install (production, no scripts)
+        run: |
+          # --no-dev: dev dependencies must not ship. --no-scripts: the
+          # post-autoload-dump hook boots the application to discover packages, and
+          # it cannot boot against the server's .env from here. The package manifest
+          # is therefore regenerated ON THE SERVER after rsync (see reconcile).
+          composer install --no-dev --no-interaction --prefer-dist \
+            --optimize-autoloader --no-scripts
+
+      - name: Prepare env for build-time codegen (wayfinder)
+        run: |
+          # The Vite build shells out to the framework's route-codegen command, so
+          # the application must actually BOOT on the runner.
+          #
+          # Rewrite the database connection to sqlite against an empty file. Do this
+          # EVEN IF your .env.example already says sqlite: one ancestor of this
+          # template skipped these two lines because its example file happened to
+          # use sqlite, which quietly made the deploy depend on a file nobody
+          # thought of as deploy configuration. The sed is a no-op when it is
+          # already sqlite, and load-bearing the day someone edits .env.example.
+          #
+          # This .env is disposable and never leaves the runner — the rsync below
+          # excludes it. On a self-hosted runner a previous run's .env may still be
+          # sitting here, so this overwrites rather than creates.
+          cp .env.example .env
+          sed -i 's/^DB_CONNECTION=.*/DB_CONNECTION=sqlite/' .env
+          touch database/database.sqlite
+          php artisan key:generate --force
+
+          # Print the runner's PHP: when a build fails for version reasons, this is
+          # the line that says so immediately.
+          echo "=== PHP version on runner ==="
+          php -v
+
+          # Run codegen explicitly rather than letting the Vite plugin invoke it.
+          # The plugin swallows stderr and reports only "Command failed", which is
+          # unusable; run it here and a codegen failure shows its real error.
+          echo "=== wayfinder:generate (stderr visible) ==="
+          php artisan wayfinder:generate $WAYFINDER_ARGS
+
+      - name: Build frontend assets (Vite)
+        run: |
+          npm ci
+          npm run build
+
+      # SSH material is created HERE, after the build, not at the top of the job:
+      # it exists on disk for the shortest window that still works. On a shared
+      # self-hosted runner that window is the exposure.
+      - name: Setup SSH
+        run: |
+          # Key + known_hosts live in RUNNER_TEMP, which is removed after the job —
+          # never in ~/.ssh, which on a self-hosted runner is shared with every
+          # other job on the box.
+          install -m 700 -d "$RUNNER_TEMP/ssh"
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > "$RUNNER_TEMP/ssh/id_deploy"
+          chmod 600 "$RUNNER_TEMP/ssh/id_deploy"
+
+          # EDIT (optional, recommended): set a repo variable DEPLOY_KNOWN_HOSTS to
+          # the host's public key line and this becomes real host verification.
+          # Without it, the scan below is trust-on-first-use ON EVERY RUN: it
+          # accepts whatever answers on that address today, so strict host-key
+          # checking is enforcing a fact learned thirty seconds ago. That is the
+          # honest description; it is a deliberate trade for setup simplicity on a
+          # private network path, not a verified channel.
+          if [ -n "${{ vars.DEPLOY_KNOWN_HOSTS }}" ]; then
+            printf '%s\n' "${{ vars.DEPLOY_KNOWN_HOSTS }}" > "$RUNNER_TEMP/ssh/known_hosts"
+            echo "known_hosts pinned from repo variable"
+          else
+            echo "::notice::DEPLOY_KNOWN_HOSTS is not set — the host key is being learned at run time (trust on first use)."
+            # Retry with backoff, and REQUIRE a non-empty result: a single network
+            # blip on the SSH port must not break a release, and an empty
+            # known_hosts file would silently defeat strict host-key checking
+            # rather than fail. From a runner near the host this succeeds first try.
+            for attempt in 1 2 3 4 5; do
+              if ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" > "$RUNNER_TEMP/ssh/known_hosts" 2>/dev/null \
+                 && [ -s "$RUNNER_TEMP/ssh/known_hosts" ]; then
+                echo "ssh-keyscan ok (attempt $attempt)"
+                break
+              fi
+              if [ "$attempt" = 5 ]; then
+                echo "::error::ssh-keyscan could not reach $SSH_HOST:$SSH_PORT after 5 attempts"
+                exit 1
+              fi
+              echo "ssh-keyscan attempt $attempt failed — retrying in $((attempt * 3))s"
+              sleep "$((attempt * 3))"
+            done
+          fi
+
+      - name: Rsync release to the server
+        run: |
+          # --delete keeps the server a mirror of the release, so a file deleted in
+          # git disappears in production. The excludes are what makes that safe:
+          # everything listed is server-owned state that must survive the mirror.
+          # THINK BEFORE REMOVING ONE — an exclude dropped here deletes production
+          # data on the next deploy.
+          #
+          #   .env / .env.*  server-only configuration, written by hand once
+          #   /storage/      uploads, logs, generated keys — irreplaceable
+          #   /bootstrap/cache/  regenerated on the server, below
+          #   /database/database.sqlite  the throwaway build-time database
+          #
+          # EDIT: add any other server-owned path this app writes into.
+          rsync -az --delete \
+            -e "ssh -p $SSH_PORT -i $RUNNER_TEMP/ssh/id_deploy -o UserKnownHostsFile=$RUNNER_TEMP/ssh/known_hosts -o IdentitiesOnly=yes" \
+            --exclude='.env' \
+            --exclude='.env.*' \
+            --exclude='/storage/' \
+            --exclude='/.git/' \
+            --exclude='/node_modules/' \
+            --exclude='/bootstrap/cache/' \
+            --exclude='/tests/' \
+            --exclude='/database/database.sqlite' \
+            ./ "$SSH_USER@$SSH_HOST:$APP_DIR/"
+
+      # ---------------------------------------------------------------------------
+      # THIS STEP MIGRATES PRODUCTION.
+      #
+      # `migrate --force` runs pending migrations against the live database, with
+      # no backup taken here and no confirmation asked. That is intentional and it
+      # is the step to read before every release: check what migrations the tag
+      # carries, and take a database snapshot yourself if any of them is
+      # destructive. Do not make this quieter, do not add `|| true` to the migrate
+      # line, and do not move it behind a condition — a deploy that silently skips
+      # a migration produces a running site with the wrong schema, which is worse
+      # than a failed deploy in every case.
+      # ---------------------------------------------------------------------------
+      - name: Reconcile, migrate & cache on server
+        run: |
+          ssh -p "$SSH_PORT" -i "$RUNNER_TEMP/ssh/id_deploy" \
+            -o UserKnownHostsFile="$RUNNER_TEMP/ssh/known_hosts" -o IdentitiesOnly=yes \
+            "$SSH_USER@$SSH_HOST" bash -s <<REMOTE
+          set -euo pipefail
+          cd "$APP_DIR"
+          PHP="$PHP_BIN"
+
+          echo "==> ensure writable dirs"
+          # rsync excludes /storage/ and /bootstrap/cache/, so a BRAND NEW install
+          # has neither — and package:discover dies immediately without them. This
+          # only ever bites on the very first deploy, which is exactly why one
+          # ancestor of this template lacked it: the directories were already there
+          # from an earlier manual setup, so nobody found out. mkdir -p is free on
+          # every subsequent run.
+          mkdir -p bootstrap/cache storage/app/public storage/logs \
+            storage/framework/cache/data storage/framework/sessions storage/framework/views
+
+          echo "==> package:discover"
+          # Deferred from the composer step, which ran --no-scripts: the manifest
+          # must be generated where the real .env is.
+          \$PHP artisan package:discover --ansi
+
+          echo "==> reconcile generated migrations"
+          # Mark create-table migrations as already run when their table exists.
+          # This absorbs schema drift — a table created by a code generator or by
+          # hand outside the migration ledger — which otherwise fails the migrate
+          # below with "table already exists" and aborts the deploy.
+          #
+          # EDIT (required): the glob(s) naming your generated migrations. The path
+          # below is a PLACEHOLDER — point it at your generator's output directory,
+          # or reconciliation silently matches nothing and the migrate below fails
+          # on the first pre-existing table.
+          #
+          # Both a flat directory and one level of subdirectories are covered: a
+          # repo with only the flat layout gets an empty second glob, which costs
+          # nothing, and a repo that later grows subdirectories does not silently
+          # stop reconciling them. That asymmetry existed between the copies this
+          # came from — the one with nested output had to discover it the hard way.
+          #
+          # The temp file is mktemp'd, not a fixed name. Several repos can deploy
+          # into the SAME hosting account, and each ancestor of this template
+          # avoided the collision by inventing its own filename — which works right
+          # up until two of them choose the same one.
+          RECONCILE="\$(mktemp /tmp/reconcile.XXXXXX)"
+          trap 'rm -f "\$RECONCILE"' EXIT
+          cat > "\$RECONCILE" <<'PHP'
+          \$ran   = DB::table('migrations')->pluck('migration')->all();
+          \$files = array_merge(
+            glob(base_path('database/migrations/generated/*.php')) ?: [],
+            glob(base_path('database/migrations/generated/*/*.php')) ?: []
+          );
+          \$batch = (DB::table('migrations')->max('batch') ?? 0) + 1;
+          foreach (\$files as \$file) {
+            \$mig = basename(\$file, '.php');
+            if (in_array(\$mig, \$ran)) { continue; }
+            if (preg_match('/create_(.+)_table/', \$mig, \$m) && Schema::hasTable(\$m[1])) {
+              DB::table('migrations')->insert(['migration' => \$mig, 'batch' => \$batch]);
+              echo 'Reconciled: ' . \$mig . PHP_EOL;
+            }
+          }
+          PHP
+          # The trailing "|| true" is deliberate: reconciliation is best-effort and
+          # cleans up the PREVIOUS deploy's mess. The migrate below is the step that
+          # must not be forgiving — do not copy this tolerance down to it.
+          #
+          # (Note for anyone editing inside this heredoc: it is UNQUOTED, so the
+          # runner's shell expands it before sending. Backticks and un-escaped $
+          # are substituted HERE, even inside comments. Write \$ for the far side.)
+          \$PHP artisan tinker --no-interaction --execute "\$(cat \$RECONCILE)" 2>&1 || true
+
+          echo "==> migrate (PRODUCTION DATABASE)"
+          \$PHP artisan migrate --force
+
+          # EDIT: app-specific commands that are PART OF the migration, not extras.
+          # If a schema change has a paired data backfill, it belongs here and not
+          # in a human's memory — a migrated schema with an unfilled table is a
+          # half-deployed release that looks fully deployed. Keep such commands
+          # idempotent so re-running a deploy is harmless, and let a verifier exit
+          # non-zero: a red job after the site is already updated is a loud alarm,
+          # which is what you want. Examples from repos this came from:
+          #   \$PHP artisan <your>:backfill-<thing>
+          #   \$PHP artisan <your>:verify-<thing>
+          #   \$PHP artisan passport:keys 2>/dev/null || true   # if using OAuth;
+          #     idempotent, and the keys live in storage/ which rsync never overwrites
+
+          echo "==> caches"
+          \$PHP artisan config:cache
+          # route:cache fails on closure-based routes; tolerated because an
+          # uncached route table is slow, not broken.
+          \$PHP artisan route:cache 2>/dev/null || true
+          \$PHP artisan event:cache
+          \$PHP artisan storage:link 2>/dev/null || true
+
+          echo "==> ensure docroot symlink"
+          # Re-asserted every deploy: panels recreate the docroot as a real
+          # directory when the domain is touched, which silently starts serving an
+          # empty folder instead of the app.
+          if [ ! -L "$DOCROOT_LINK" ]; then rm -rf "$DOCROOT_LINK"; fi
+          ln -sfn "/home/$SSH_USER/$APP_DIR/public" "$DOCROOT_LINK"
+
+          echo "==> server steps complete"
+          REMOTE
+
+      # ---------------------------------------------------------------------------
+      # KEEP THIS STEP. It is the only one that asks the question the whole workflow
+      # exists to answer. Everything above proves the pipeline ran; this proves the
+      # site answers. A deploy can rsync perfectly, migrate cleanly, exit zero, and
+      # serve a 500 or the host's default placeholder page — green workflow, dead
+      # site — and without this step the first report comes from a user.
+      # ---------------------------------------------------------------------------
+      - name: Verify the deployed site answers
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$SMOKE_URL" || echo 000)
+          echo "smoke: HTTP $code from $SMOKE_URL"
+          for ok in $SMOKE_OK_CODES; do
+            if [ "$code" = "$ok" ]; then
+              echo "OK — the app is serving"
+              exit 0
+            fi
+          done
+          echo "::error::Unexpected smoke status $code (expected one of: $SMOKE_OK_CODES)"
+          echo "000 means the request never completed: DNS, TLS or the host being down."
+          exit 1
+
+      - name: Cleanup
+        # always(): the key must not survive a failed run. On a self-hosted runner
+        # the workspace persists, so a skipped cleanup leaves a usable private key
+        # on a shared machine until something else happens to overwrite it.
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/ssh"

@@ -18,6 +18,7 @@ Starting points you **copy into your own repo**. That is the entire model.
 | `ci-laravel.yml` | `.github/workflows/ci.yml` | Laravel + Inertia + Vite fullstack (Omnify) | Same resolution for **both** PHP and Node. Includes the sqlite bootstrap + explicit wayfinder step. |
 | `ci-python.yml` | `.github/workflows/ci.yml` | Python: FastAPI/Flask services, CLIs, libraries | Resolves Python from `project.yml` → `.python-version`/`requires-python` → **fails**. `requirements.txt` does not count. **Hybrid** Python+Node repo: copy this, then paste `ci-node.yml`'s `build:` job alongside — see the template header. |
 | `release-tag.yml` | `.github/workflows/release.yml` | Any repo cutting `v*.*.*` releases | Triggers on tag push. Publishes a grouped GitHub Release. No toolchain, no deploy. |
+| `deploy-xserver.yml` | `.github/workflows/deploy-xserver.yml` | PHP-framework + Vite apps shipped to **shared hosting over SSH** (no root, no Docker): build on a runner, rsync, migrate on the server | Derived from three independently-written copies. Resolves Node the same way the CI templates do — all three hardcoded it, and one shipped on a different major than its CI built on. Migrates **production**; keeps a **mandatory** smoke test. Does **not** change your tier. |
 | `repo-CLAUDE-block.md` | *paste into* `CLAUDE.md` | Every adopting repo | The discovery hook — how an agent finds the handbook at all. |
 
 ## How to adopt
@@ -29,6 +30,7 @@ Starting points you **copy into your own repo**. That is the entire model.
    colab template                                   # list templates + handbook version
    colab template ci-node   --dest .github/workflows/ci.yml
    colab template release-tag --dest .github/workflows/release.yml
+   colab template deploy-xserver --dest .github/workflows/deploy-xserver.yml
    ```
 
    The stamp is one prepended line — `# colab-handbook: <name> @ <version>`. Do a plain
@@ -49,6 +51,40 @@ Starting points you **copy into your own repo**. That is the entire model.
    find its way back here. Set its `<!-- colab-handbook @ <version> -->` stamp to the
    handbook version you adopted at.
 6. **Own it.** From this point the file is yours. Edit freely; nothing overwrites it.
+
+### Adopting the deploy template — the extra steps
+
+A deploy workflow is the only template that can break something that is already
+live, so it carries obligations the CI ones do not:
+
+1. **Do the one-time server preparation first.** It is a checklist in the
+   template header — subdomain, certificate, database, the server-side `.env`, the
+   deploy key in `authorized_keys`. None of it is automated and the first deploy
+   fails without it. Copy that checklist into the repo's runbook rather than
+   leaving it in a workflow comment.
+2. **Fill the `env:` block, and nothing below it.** Every per-repo value — host,
+   user, paths, the server's PHP binary, the smoke URL — lives in that one block
+   precisely so your diff against this template stays readable. Editing step
+   bodies instead is how the three ancestors of this file drifted ~120 lines apart.
+3. **Add the secret, one per repo.** `DEPLOY_SSH_KEY`, never shared between repos
+   even when they deploy into the same hosting account: a shared key cannot be
+   rotated for one of them, and a leak from any reaches all.
+4. **Make `project.yml` true.** A tag deploys only where `deploy: tag` is
+   declared. **This does not change your tier** — tier says whether production
+   exists and how many gates guard it, and it moves only by the §9 checklist. If
+   the repo was `deploy: manual`, switching it now is a deliberate edit (and drop
+   the `runbook:` that is no longer the mechanism). Adopting this into a Tier B
+   repo is not an adoption at all: it is giving the repo a production, which is a
+   different decision.
+5. **Keep the smoke test.** It is the only step that distinguishes "the workflow
+   went green" from "the site answers", and a deploy can do the first while
+   failing the second.
+6. **Retro-fitting an existing hand-written deploy workflow is a per-repo job, by
+   hand.** Those files have local edits — extra artisan commands, app-specific
+   backfills — that a blind overwrite destroys. `colab update` will classify such
+   a file as `unrelated` (its name matches this template, its content never came
+   from here) and refuse to touch it. That is correct: diff the two yourself and
+   move across only what you mean to.
 
 ## Reconciliation — how you find out when a template changes
 
