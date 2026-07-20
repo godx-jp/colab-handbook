@@ -1,6 +1,6 @@
 ---
 name: code-wrap
-description: "Close a coding session in two phases. Phase A (an agent may do it): distill what you learned back onto the feature's GitHub Issue, update any repo docs the work made stale, run the repo's own quality gate, commit only the deliverable paths, push the session branch as backup — then STOP. Phase B (a human triggers it): verify trunk CI is alive and green, squash-merge with Closes #N, release the claim, optionally tear the worktree down. A Tier A release is a separate ritual, never bundled in. Trigger phrases: 'wrap up the session', 'finish coding', 'ship it', 'close the session', 'merge to trunk', 'merge it', 'done coding', 'update the issue and merge'. Pairs with code-start. Agents prepare releases; humans perform them."
+description: "Close a coding session in two phases. Phase A (an agent may do it): distill what you learned back onto the feature's GitHub Issue, update any repo docs the work made stale, run the repo's own quality gate, commit only the deliverable paths, push the session branch as backup — then STOP. Phase B (a human triggers it): verify trunk CI is alive and green, harvest every issue the branch carried, squash-merge with Closes #N, post evidence on each issue, release every claim, tear the worktree down. A Tier A release is a separate ritual, never bundled in. Trigger phrases: 'wrap up the session', 'finish coding', 'ship it', 'close the session', 'merge to trunk', 'merge it', 'done coding', 'update the issue and merge'. Pairs with code-start. Agents prepare releases; humans perform them."
 ---
 
 # code-wrap — close a session: distill → docs → gate → commit → (stop) → merge
@@ -118,6 +118,63 @@ A "failure" that never started (billing lockout, runner outage) still means
 **stop** — we once merged for 12 hours into repos whose CI was silently dead
 (`CONVENTIONS.md` §4). Branch protection can't check this for us; this command must.
 
+### B1b. Harvest every issue the branch carried
+
+B2 needs the **complete** set of issue numbers at the moment it writes the squash
+message. Build the set here — after the merge is pushed you can no longer add a
+missing `Closes` line without amending a commit that is already on trunk.
+
+**Primary source — git. Always works, no CLI required:**
+
+```sh
+{ git log --format=%B origin/<trunk>..<branch> | grep -oE '#[0-9]+' | tr -d '#'
+  printf '%s\n' "<branch>" | grep -oE '(-[0-9]+)+$' | tr -- '-' '\n'
+} | grep -E '^[0-9]+$' | sort -un
+```
+
+Commit bodies carry `#N`; branch names carry **bare** trailing digits
+(`fix/import-fixes-115-114-113`) — hence the two different extractions. Anchoring
+the branch half to the trailing group is deliberate: a plain `[0-9]+` sweep turns
+`feat/oauth2-login-88` into issues 2 and 88.
+
+**Optional cross-check — the claims registry, if `colab` is installed:**
+
+```sh
+colab claims --json    # filter .worktree == "<name>", or .repo for a trunk session
+```
+
+Claims live in `colab claims`, **not** on the worktree record — `colab worktrees
+--json` has no `issues` field (verified 2026-07-20; the table's ISSUES column is
+derived by filtering claims, so don't go looking for it in the JSON).
+
+The two sources fail in **opposite** directions, which is the point of running
+both: git catches an issue worked on but never claimed; the registry catches one
+claimed but never mentioned in a commit. A number in one set and not the other is
+a **finding** — chase it down, don't average it away.
+
+**Verify by code, not by commit message.** A commit saying `#88` proves only that
+someone typed `#88`. Grep trunk for the thing the issue actually describes — the
+column, route, UI string, function:
+
+```sh
+git log --oneline --all --grep="#88"
+grep -rn "<thing the issue describes>" <paths>
+```
+
+**Sort every number into one of three buckets — none may stay unsorted:**
+
+| Bucket | Action |
+|---|---|
+| **Done** | `Closes #N` in B2; confirm it actually closed; evidence in B2b. |
+| **Partial** | Close it **and** open a new linked issue for the remainder. |
+| **Untouched** | Leave open, with the next step written into it. |
+
+Never close a partial issue bare — that buries the open question where nobody
+will find it again. Never leave it whole either — the next session reads an
+untouched issue as untouched work and redoes what you already shipped. This is
+the same failure mode as `(#N)`: issues sitting open with their code long since
+merged (`CONVENTIONS.md` §4).
+
 ### B2. Squash-merge with `Closes #N`
 
 ```sh
@@ -130,11 +187,35 @@ git push origin <trunk>
 - **`Closes #N`, not a bare `(#N)`** — GitHub only auto-closes on the keyword. We
   measured 26/30 issues left open with their code long merged because commits
   said `(#N)` (`CONVENTIONS.md` §4).
-- One `Closes #N` per issue the branch carried — sweep them all, don't close only
-  the "main" one.
+- One `Closes #N` per issue the branch carried — the set you harvested in B1b, not
+  just the "main" one.
 - *(Machine-specific automation — migrate the trunk DB, restart the trunk dev
   server — hooks in here: `.colab/hooks/`. It is the one moment trunk may go down;
   keep the window short.)*
+
+### B2b. Post evidence on EVERY issue — including the auto-closed ones
+
+`Closes #N` closes the issue the instant trunk is pushed: silently, with nothing
+attached. So the best-evidenced rule in the handbook is exactly the one that skips
+the evidence step — the issue goes green and no one ever records *what* shipped.
+
+**Comment evidence on every issue the branch carried, whether it auto-closed or you
+closed it by hand.** This runs **after** the merge, because the sha you cite must be
+the **trunk squash sha** — the branch sha is gone once the branch is deleted (a
+squash leaves no merge relation, which is why deleting the branch needs
+`git branch -D`, not `-d`).
+
+Evidence is three parts: **trunk sha · `file:line` · what you checked and what came back.**
+
+```sh
+gh issue comment 88 -b "Shipped in \`a1b2c3d\` on <trunk>.
+\`app/Models/Payroll.php:142\` — added the \`overtime_rate\` column.
+Checked: ran the payroll fixture for a 25%-overtime employee; the premium is now
+applied once, not twice — the double-count this issue reported is gone."
+```
+
+**Not evidence:** quoting your own commit message · restating the ticked checklist ·
+"done in `feat/x-23`". All three assert the work happened; none show it did.
 
 ### B3. Release the claim(s)
 
@@ -146,10 +227,33 @@ gh issue edit $N --remove-label in-progress    # … else raw, one per issue
 Release **every** issue in the group, even ones you didn't finish — a stale claim
 silently blocks others (`CONVENTIONS.md` §5).
 
-### B4. Tear down the worktree (optional)
+**No exceptions — not "unless unfinished", not "unless the worktree stays".**
+code-start adds the claim, code-wrap removes it: symmetric and unconditional.
+Because:
 
-Finished-but-not-removed worktrees are the single most-skipped step we measured.
-If you made one:
+- A conditional release rule is one agents skip. The unconditional one is the one
+  that actually gets executed.
+- A claim is scoped to a **session**. Once the session ends it names a holder who
+  no longer exists.
+- Nothing ages a claim out. A kept-but-forgotten worktree would hold its issues
+  indefinitely and **no health check flags it** — the worktree is alive, so the
+  claim looks healthy.
+- Re-claiming next session is one command already in the code-start flow. The cost
+  of releasing is near zero; the cost of a stale claim is someone else blocked.
+
+*Tradeoff, chosen deliberately:* releasing gives up the lock that stopped a second
+session starting a colliding branch on a kept worktree. That protection now rests
+on the **session-start check** — before starting, verify whether the work already
+exists (`git log --grep`, grep the code, and look for an existing branch or
+worktree for that issue) rather than trusting the absence of a label. code-start
+already says *open ≠ untouched*; this is why.
+
+### B4. Tear down the worktree — remove by DEFAULT
+
+Made a worktree? **Remove it.** Finished-but-not-removed worktrees are the single
+most-skipped step we measured (8 of 9 sessions, 2.9 GB) — and the permissive
+"(optional)" this step used to open with is what produced that miss rate. Removal
+is the default path; keeping one is the exception you must justify.
 
 ```sh
 colab worktree rm <name>    # if colab is installed (releases its claims, frees its ports) …
@@ -157,8 +261,24 @@ git worktree remove <path>  # … else raw git
 ```
 
 `colab worktree rm` runs the repo's `.colab/hooks/pre-remove` (e.g. dropping a
-cloned DB) and refuses if there's uncommitted tracked work. Can't remove it
-(uncommitted, unsure)? Say so in your report — don't silently leave it.
+cloned DB) and refuses if there's uncommitted tracked work.
+
+**Keep it only for a named reason,** and write the reason in your report — never
+leave one standing silently:
+
+- the group branch still has unfinished issues,
+- a human just told you to keep working in it,
+- teardown is blocked by uncommitted tracked work.
+
+> **If you keep it, release its claims by hand.** `colab worktree rm` is *what*
+> releases claims — skip the removal and that automatic path never runs, so B3
+> did not happen for you. Do it explicitly:
+> ```sh
+> colab release <N>                              # … or, without colab:
+> gh issue edit <N> --remove-label in-progress
+> ```
+> B3 is unconditional: a kept worktree changes **who runs** the release, never
+> **whether** it runs.
 
 ### B5. Tier A release — a SEPARATE ritual, and not yours
 
@@ -173,8 +293,12 @@ not perform it.
 ## Verify complete
 
 - `gh issue view $N`: checklist ticked, Decisions/Gotchas updated, session comment added.
-- Every issue the branch carried is either closed with evidence, split into a new
-  issue for the leftover, or left open with a written reason. No number left dangling.
+- Every issue the branch carried (B1b's harvested set) is either closed with evidence,
+  split into a new issue for the leftover, or left open with a written reason. No number
+  left dangling.
+- Every one of those issues has an evidence comment — **including the ones `Closes #N`
+  auto-closed**, which attach nothing on their own.
 - If Phase A only: trunk is unchanged (no session commit in `git log <trunk>`).
-- After Phase B: `git log --oneline -5 <trunk>` shows the squash-merge; claims released;
-  worktree removed or explicitly kept.
+- After Phase B: `git log --oneline -5 <trunk>` shows the squash-merge; **every** claim
+  released (unconditionally, finished or not); worktree removed — or kept with the reason
+  written in your report and its claims released by hand.
