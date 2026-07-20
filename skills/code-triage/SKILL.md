@@ -1,13 +1,13 @@
 ---
 name: code-triage
-description: "Decide what to work on next. Takes every open Issue, discards the ones already shipped and the ones someone else holds, groups what must move together (issues touching the same files MUST share a branch), orders what remains by blast radius, and says which groups can be started RIGHT NOW — including whether the repo's trunk CI is alive enough to merge into. Outputs claim + branch commands that feed straight into code-start. Trigger phrases: 'what should I work on', 'triage the issues', 'what can we start', 'plan the next session', 'group the open issues', 'what is ready to pick up', 'sort the backlog'. Runs before code-start; pairs with code-start and code-wrap."
+description: "Decide what to work on next in ONE repo. Takes every open Issue, discards the ones already shipped and the ones someone else holds, groups what must move together (issues touching the same files MUST share a branch), orders what remains by blast radius, and says which groups can be started RIGHT NOW — including whether the repo's trunk CI is alive enough to merge into. Outputs claim + branch commands that feed straight into code-start. Trigger phrases: 'what should I work on', 'triage the issues', 'what can we start', 'plan the next session', 'group the open issues', 'what is ready to pick up', 'sort the backlog'. Runs before code-start; pairs with code-start and code-wrap."
 ---
 
 # code-triage — what should we work on next?
 
-Runs **before** [`code-start`](../code-start/SKILL.md). Its output is a short ranked
-list of *groups* you could open a session on today, plus an honest account of why
-everything else is not on it.
+Runs **before** [`code-start`](../code-start/SKILL.md), on **one repo**. Its output is
+a short ranked list of *groups* you could open a session on today, plus an honest
+account of why everything else is not on it.
 
 `code-triage` → `code-start` → `code-wrap`.
 
@@ -34,15 +34,22 @@ gh issue list --state open --label in-progress            # …of which, taken
 because it is answering a different question (does a memory exist?) rather than this
 one (what is left to do?).
 
-**Fleet mode** — across every repo the machine knows:
+**Scope: this repo. Not the fleet.** Every `code-*` skill is one repo — that is the
+family's whole shape, and a single skill quietly going wide is the kind of
+inconsistency people discover by surprise.
+
+Want the machine-wide picture instead? Two tools already give it, mechanically and
+in more useful form than prose triage could:
 
 ```sh
-colab claims                     # what is held, everywhere, and by whom
-# then gh issue list per repo in the registry
+node "$COLAB_HANDBOOK/audit/audit.mjs"   # conformance across every registered repo
+colab update                             # which repos have drifted from the handbook
+colab claims                             # what is held, everywhere, and by whom
 ```
 
-Say plainly that this reads the *machine-local* registry, so it is "every repo on
-this machine", not "every repo that exists".
+All three read the **machine-local** registry, so "fleet" means every repo on *this*
+machine — never every repo that exists. That distinction matters once a second
+machine has its own registry.
 
 ## 2. Discard what is not really open
 
