@@ -11,6 +11,7 @@
 
 This repo follows the [colab-handbook](https://github.com/godx-jp/colab-handbook/blob/main/CONVENTIONS.md) conventions.
 
-- **Tier:** `<A|B>` — <A = deploys to production · B = no production target>
+- **Tier:** `<A|B|C>` — <A = a tag deploys · C = promotion dev→main deploys · B = no production target>
 - **Trunk:** `<dev|main>` (feature branches `feat|fix|docs|chore|refactor|test|perf/<slug>`)
+  <!-- Tier A and C both use `dev`; only Tier B uses `main`. Delete this line after filling in. -->
 - **Descriptor:** see `.github/project.yml`. CI workflows are copy-and-own from the handbook's `templates/` — this repo owns its copies, they are not called remotely.

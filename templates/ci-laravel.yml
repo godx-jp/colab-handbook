@@ -30,15 +30,20 @@ name: CI
 on:
   push:
     # EDIT: keep only the branches this repo actually has.
-    # Tier A repos have both dev (trunk) and main (release). Tier B has main only.
+    # Tier A and C have both dev (trunk) and main (release). Tier B has main only.
+    # Do NOT drop `dev` on a Tier A or C repo: dev is the trunk, so a main-only
+    # trigger runs zero checks on the branch you actually merge into — and nothing
+    # looks broken (CONVENTIONS.md §7).
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
 
 env:
   # Light CI on the dev trunk (does it build at all, ~2 min); heavy CI on main, where
-  # the Pest suite gates a release. EDIT: set to a literal 'true' if this repo is
-  # Tier B (main is trunk) and you always want the suite.
+  # the Pest suite gates a release. On Tier C main IS production — promotion is the
+  # deploy — so this suite is the last gate before users, not a release formality.
+  # EDIT: set to a literal 'true' if this repo is Tier B (main is trunk) and you
+  # always want the suite.
   RUN_TESTS: ${{ github.ref == 'refs/heads/main' || github.base_ref == 'main' }}
   # EDIT: bump deliberately, not automatically.
   GITLEAKS_VERSION: "8.30.1"

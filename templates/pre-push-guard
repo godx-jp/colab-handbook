@@ -1,8 +1,10 @@
 #!/bin/sh
 # pre-push-guard — refuse raw `git push` to protected branches unless a sanctioned path set the env.
 #   TRUNK (from .github/project.yml): allowed by COLAB_SHIP=1 (colab ship) or COLAB_HUMAN=1.
-#   MAIN, only on tier A (trunk != main): allowed by COLAB_PROMOTE=1 (colab promote) or COLAB_HUMAN=1.
+#   MAIN, on tier A and C (trunk != main): allowed by COLAB_PROMOTE=1 (colab promote) or COLAB_HUMAN=1.
 #     COLAB_SHIP does NOT open main — ship is trunk-only by design.
+#     The guard keys on `trunk != main`, never on the tier letter, so tier C is covered
+#     automatically — main there is what promotion deploys, so it needs the gate most.
 # On tier B (trunk == main) the trunk rule already covers main. Non-protected pushes always pass.
 # Missing .github/project.yml → degrade to ALLOW (with a warning) rather than block work.
 #

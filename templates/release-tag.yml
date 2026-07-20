@@ -8,9 +8,12 @@
 #
 # EDIT POINTS are marked `# EDIT:` — walk them once after copying.
 #
-# Under the tiered branch model, a Tier A release is: merge dev -> main, heavy CI on
-# main goes green, tag v*.*.*. The tag is what triggers deployment. This workflow runs
-# alongside that deploy and produces the human-facing record of the release.
+# TIER A ONLY. Under the tiered branch model, a Tier A release is: merge dev -> main,
+# heavy CI on main goes green, tag v*.*.*. The tag is what triggers deployment. This
+# workflow runs alongside that deploy and produces the human-facing record of the release.
+#
+# Do NOT copy this into a Tier C repo. Tier C has no tag step — promotion dev -> main
+# IS the deploy — so this workflow would never fire. Tier B has no production at all.
 #
 # It publishes a GitHub Release whose body is:
 #   1. A hand-readable summary WE build — commits since the previous tag, grouped by
