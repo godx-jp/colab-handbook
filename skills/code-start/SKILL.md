@@ -13,6 +13,31 @@ never grab the same work. Close the session with **code-wrap**.
 Notation: `$N` = the feature's Issue number (keep it for the whole session).
 `<trunk>` = the branch sessions merge into (from `project.yml`, below).
 
+## 0. Say who you are — once, before you claim anything
+
+Skip this and every claim and worktree you create is **anonymous**: a dashboard row
+with a branch and no owner. Someone finding a stale claim then knows it is stale but
+not who to ask.
+
+```sh
+export COLAB_SESSION_NAME="import-fixes"                  # short, human, about the WORK
+export COLAB_SESSION="https://claude.ai/code/session_…"   # your agent session URL, if it has one
+```
+
+- **Once, via the environment — not per command.** `colab` resolves each field
+  flag > env > empty, so one export at the top covers every later `colab claim` and
+  `colab worktree new`. Per-command flags are the step people forget on the third
+  worktree.
+- **Do this before step 3**, not inside step 4. Sessions that work directly on trunk
+  still claim, and they deserve a name just as much as worktree sessions.
+- **Name it after the work, not the branch.** The table already shows the branch;
+  `import-fixes` or `payroll-hotfix` tells a human something new, `fix-import-115`
+  does not.
+- **No session URL?** Set the name alone. It is the column humans actually read; the
+  URL is what lets them jump to the session. Both is best, one is far better than none.
+- **No `colab` installed?** Nothing breaks — the fields simply do not exist, and
+  claiming still works through `gh`.
+
 ## 1. Read the repo marker
 
 ```sh
@@ -200,6 +225,9 @@ git worktree add -b <type>/<slug>-$N ../<slug>-$N origin/<trunk>
 
 - Issue URL (`gh issue view $N --json url -q .url`) or the notes-file path, and
   whether you **reopened** a closed Issue rather than creating one.
+- The session name you set in step 0 — it is how a human matches your report to the
+  row holding this work. Confirm it stuck: `colab worktrees` (or `colab claims`)
+  should show it, not a `—`.
 - Branch name, and the worktree path if you made one. If the step-3 check found an
   existing branch or worktree for this issue, say so and say what you did about it.
 - What you loaded from the Issue and your plan (checklist groups, file split if
