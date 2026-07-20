@@ -366,7 +366,8 @@ Never hardcode a version in CI. Resolve it, in this order:
 1. **`.github/project.yml`** toolchain keys, if present — wins. For cases the ecosystem
    cannot express, or a deliberate pin.
 2. **The ecosystem's own manifest** — `.nvmrc` or `package.json → engines.node`;
-   `composer.json → require.php`. This is the normal answer.
+   `composer.json → require.php`; `.python-version` or
+   `pyproject.toml → requires-python`. This is the normal answer.
 3. **Fail the build.** Never fall back to a default.
 
 That last rule is the point. A silent default is how one repo ended up building on Node 20
@@ -376,6 +377,16 @@ skew in production.
 
 When both sources exist and disagree, that is a finding to report, not something to quietly
 resolve.
+
+A trap worth naming: **`requirements.txt` does not declare an interpreter.** It pins
+dependencies only, so a Python repo carrying just that file has declared no version at all
+and must add `python:` to `project.yml` or a `.python-version`. We learned this the
+expensive way — a Python repo adopted the handbook, found no Python template, copied the
+**Node** one and grafted a Python job into it with `python-version: "3.13"` hardcoded. The
+repo did the reasonable thing with what existed; the rule was right and there was simply
+nowhere to declare the value. **A missing template is not a neutral absence** — it does not
+stop adoption, it redirects it into a worse form, and leaves behind a file whose header
+lies about what it is.
 
 ---
 

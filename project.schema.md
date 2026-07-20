@@ -219,19 +219,32 @@ repo's `.colab/hooks/pre-ship` regen step instead of forcing a human. Extends th
 built-in default set (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
 `composer.lock`, `Cargo.lock`, `go.sum`, `dist/`, `build/`, `public/build/`, `.astro/`).
 
-### `node`, `php` — optional toolchain pins
+### `node`, `php`, `python` — optional toolchain pins
 
 ```yaml
 node: 22
 php: 8.4
+python: 3.13
 ```
 
-Explicit toolchain versions. These **win** over the ecosystem manifest
-(`.nvmrc`, `package.json → engines`, `composer.json → require.php`) per the
-precedence in [CONVENTIONS.md §7](CONVENTIONS.md#7-ci-and-toolchain). Use only
-when the manifest cannot express the truth, or for a deliberate pin — the
-manifest is the normal answer. If neither source declares a version, CI must
+Explicit toolchain versions. These **win** over the ecosystem manifest per the
+precedence in [CONVENTIONS.md §7](CONVENTIONS.md#7-ci-and-toolchain):
+
+| Key | Manifest it overrides |
+|---|---|
+| `node` | `.nvmrc`, then `package.json → engines.node` |
+| `php` | `composer.json → require.php` |
+| `python` | `.python-version`, then `pyproject.toml → requires-python` |
+
+Use only when the manifest cannot express the truth, or for a deliberate pin —
+the manifest is the normal answer. If neither source declares a version, CI must
 fail, not guess.
+
+**`requirements.txt` is not a manifest for this purpose.** It pins dependencies,
+never the interpreter. A Python repo carrying only a `requirements.txt` has
+declared nothing about which Python it runs on, so it must set `python:` here or
+add a `.python-version` — the alternative is a hardcoded version in CI, which is
+the exact failure this precedence exists to prevent.
 
 When a pin here contradicts the manifest, the audit tool reports it. That is
 intentional: a disagreement is a finding to surface, not to auto-resolve.

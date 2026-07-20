@@ -1,0 +1,233 @@
+# CI (Python) — TEMPLATE. Copy me into your repo at .github/workflows/ci.yml.
+#
+# This is a starting point, not a dependency. Once you copy it, YOU OWN THIS FILE.
+# Edit it freely: rename jobs, add steps, drop the parts you do not need. Nothing
+# calls this file remotely and nothing will update it for you — divergence between
+# your copy and the handbook is expected and fine. If you find an improvement worth
+# sharing, change the handbook template too, but that is a manual, deliberate act.
+#
+# EDIT POINTS are marked `# EDIT:` — walk them once after copying.
+#
+# For: Python projects — FastAPI/Flask services, CLI tools, libraries.
+#
+# HYBRID REPOS (a Python backend plus a Node/Vite frontend in one repo) are a real
+# and common shape here, and this template covers HALF of one. Do not copy the Node
+# template and graft a Python job into it: the header then lies about what the file
+# is, and that is exactly how a repo ended up with `python-version: "3.13"` hardcoded
+# — the Node template's own rule 1 forbids hardcoding, but there was nowhere to
+# declare a Python version, so the repo had no honest alternative. Instead:
+#
+#   1. copy THIS file to .github/workflows/ci.yml,
+#   2. copy the `build:` job out of ci-node.yml and paste it in alongside,
+#   3. keep BOTH "Resolve … version" steps — each ecosystem resolves independently,
+#      and neither may be hardcoded,
+#   4. stamp the file with whichever template you copied first, and say in a comment
+#      that the other job came from the other template.
+#
+# NOT for: Laravel + Inertia fullstack apps — use ci-laravel.yml.
+#
+# What it does:
+#   1. Resolve the Python version from declared sources — never a hardcoded default.
+#   2. Secret scan with gitleaks (pinned release binary, see note at the step).
+#   3. Install dependencies from whichever manifest the repo actually has.
+#   4. Byte-compile — the cheapest possible "does it even parse" gate.
+#   5. Run lint / tests only if the repo has them, so a repo without a suite is not
+#      forced to add placeholders to keep CI green.
+
+name: CI
+
+on:
+  push:
+    # EDIT: keep only the branches this repo actually has.
+    # Tier A and C have both dev (trunk) and main (release). Tier B has main only.
+    # Do NOT drop `dev` on a Tier A or C repo: dev is the trunk, so a main-only
+    # trigger runs zero checks on the branch you actually merge into — and nothing
+    # looks broken (CONVENTIONS.md §7).
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+env:
+  # EDIT: bump deliberately, not automatically.
+  GITLEAKS_VERSION: "8.30.1"
+  # EDIT: the importable package/directory to byte-compile. Often `src` or the app name.
+  PACKAGE_DIR: "."
+
+jobs:
+  gitleaks:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest # EDIT: self-hosted label if this repo needs one.
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # Full history: gitleaks scans commits, not just the working tree, so a
+          # secret that was committed and later removed is still caught.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks (pinned release binary)
+        run: |
+          # Deliberately NOT gitleaks/gitleaks-action@v2: that action requires a paid
+          # GITLEAKS_LICENSE for repositories owned by an organization (free only for
+          # personal repos). The release binary itself is MIT and has no such gate.
+          # Repos also carry a local pre-commit gitleaks hook; this is the second layer.
+          curl -sSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          # Into $RUNNER_TEMP, not /usr/local/bin: no sudo, no global write — the same
+          # step then works on BOTH GitHub-hosted and shared self-hosted runners
+          # (a shared runner is infrastructure; jobs must not mutate it).
+          tar -xzf gitleaks.tar.gz -C "$RUNNER_TEMP" gitleaks
+          chmod +x "$RUNNER_TEMP/gitleaks"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          rm -f gitleaks.tar.gz
+
+      - name: gitleaks detect
+        run: gitleaks detect --source . --no-banner
+
+  build:
+    name: Build (Python)
+    runs-on: ubuntu-latest # EDIT: self-hosted label if this repo needs one.
+    defaults:
+      run:
+        # EDIT: set to the directory holding the Python project if it is not at the root.
+        working-directory: .
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      # ---------------------------------------------------------------------------
+      # Toolchain resolution. Precedence, highest first:
+      #   1. .github/project.yml    ->  python: <version>
+      #   2. .python-version        (pyenv; also what most local tooling reads)
+      #   3. pyproject.toml         ->  [project] requires-python
+      #   4. FAIL.
+      #
+      # NOTE what is NOT on that list: requirements.txt. It pins DEPENDENCIES, never
+      # the interpreter — a repo with only a requirements.txt has declared nothing
+      # about which Python it runs on, and this workflow will (correctly) stop and
+      # say so. Add `python:` to project.yml or a `.python-version`; do not paper
+      # over it with a hardcoded version here.
+      #
+      # There is deliberately NO fallback default. A silent default is exactly how a
+      # repo here ended up building on Node 20 in CI while deploying on Node 22 —
+      # CI was green and proved nothing about what actually shipped. Python has the
+      # same failure with sharper edges: a minor is a real feature release, so 3.12
+      # vs 3.13 is not a cosmetic difference.
+      # ---------------------------------------------------------------------------
+      - name: Resolve Python version
+        id: toolchain
+        run: |
+          set -euo pipefail
+
+          # ">=3.13" / "~=3.12" / "3.13.1" / "3.13" -> "3.13" / "3.12" / "3.13.1"
+          normalise() {
+            printf '%s' "$1" \
+              | tr -d '"' \
+              | sed -E 's/^[^0-9]*//' \
+              | sed -E 's/[[:space:],].*$//' \
+              | sed -E 's/\.(x|\*)$//' \
+              | sed -E 's/[^0-9.].*$//' \
+              | sed -E 's/\.$//'
+          }
+
+          PY_VERSION=""
+          SOURCE=""
+
+          # 1. project.yml wins. Flat `python: 3.13` mapping; good enough, this file
+          #    is a handful of keys by design.
+          if [ -f .github/project.yml ]; then
+            V="$(sed -nE 's/^[[:space:]]*python:[[:space:]]*"?([^"#[:space:]]+)"?.*/\1/p' .github/project.yml | head -1 || true)"
+            if [ -n "$V" ] && [ "$V" != "null" ]; then
+              PY_VERSION="$(normalise "$V")"; SOURCE=".github/project.yml (python:)"
+            fi
+          fi
+
+          # 2. .python-version
+          if [ -z "$PY_VERSION" ] && [ -f .python-version ]; then
+            V="$(grep -vE '^[[:space:]]*(#|$)' .python-version | head -1 | tr -d '[:space:]' || true)"
+            if [ -n "$V" ]; then
+              PY_VERSION="$(normalise "$V")"; SOURCE=".python-version"
+            fi
+          fi
+
+          # 3. pyproject.toml -> [project] requires-python. Read with a line match, not
+          #    a TOML parser: the field is a single top-level string and the runner is
+          #    not guaranteed to have tomllib available before setup-python has run.
+          if [ -z "$PY_VERSION" ] && [ -f pyproject.toml ]; then
+            V="$(sed -nE 's/^[[:space:]]*requires-python[[:space:]]*=[[:space:]]*["'"'"']([^"'"'"']+)["'"'"'].*/\1/p' pyproject.toml | head -1 || true)"
+            if [ -n "$V" ]; then
+              PY_VERSION="$(normalise "$V")"; SOURCE="pyproject.toml (requires-python)"
+            fi
+          fi
+
+          # 4. No declared source -> stop. Do not guess.
+          if [ -z "$PY_VERSION" ]; then
+            echo "::error::No Python version is declared in this repository, and this workflow refuses to guess one."
+            {
+              echo ""
+              echo "Declare it in ONE of these places (checked in this order):"
+              echo "  1. .github/project.yml  ->  python: \"3.13\"   (preferred: one descriptor for the whole repo)"
+              echo "  2. .python-version      ->  3.13              (also drives local dev via pyenv)"
+              echo "  3. pyproject.toml       ->  [project] requires-python = \">=3.13\""
+              echo ""
+              echo "requirements.txt does NOT count — it pins dependencies, not the interpreter."
+              echo "Pick the version your DEPLOY target runs. CI on a different minor than"
+              echo "production proves less than you think."
+            } >&2
+            exit 1
+          fi
+
+          echo "python-version=$PY_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Python $PY_VERSION (resolved from: $SOURCE)"
+          echo "Python **$PY_VERSION** — resolved from \`$SOURCE\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.toolchain.outputs.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Whichever manifest the repo actually has. A packaged project (pyproject)
+          # installs itself so imports resolve the way they will in production;
+          # a plain requirements.txt service just installs its pins.
+          if [ -f pyproject.toml ]; then
+            pip install -e .
+          elif [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            echo "::warning::No pyproject.toml or requirements.txt — nothing to install."
+          fi
+
+      - name: Byte-compile
+        # The cheapest gate there is: every module parses. Catches the syntax error
+        # that only ever runs on a code path nobody tests.
+        run: python -m compileall -q "$PACKAGE_DIR"
+
+      - name: Detect optional tooling
+        id: tools
+        run: |
+          # EDIT: add the tools this repo uses. Each is optional so a repo without it
+          # is not forced to adopt one to keep CI green.
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          for t in ruff mypy pytest; do
+            if python -m "$t" --version >/dev/null 2>&1; then
+              echo "$t=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "$t=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::$t not installed — skipping."
+            fi
+          done
+
+      - name: Lint (ruff)
+        if: steps.tools.outputs.ruff == 'true'
+        run: python -m ruff check .
+
+      - name: Typecheck (mypy)
+        if: steps.tools.outputs.mypy == 'true'
+        run: python -m mypy "$PACKAGE_DIR"
+
+      - name: Test (pytest)
+        if: steps.tools.outputs.pytest == 'true'
+        run: python -m pytest -q

@@ -16,10 +16,15 @@
 #               Capacitor mobile app and forced a repo to be mislabelled, so the
 #               enum was actively doing harm. Nothing validates this value; it is
 #               documentation for humans and for grep.
-#   node / php  OPTIONAL toolchain pins. When present these WIN over .nvmrc /
-#               package.json engines / composer.json require.php. Set them when a
+#   node / php / python
+#               OPTIONAL toolchain pins. When present these WIN over the ecosystem
+#               manifest — .nvmrc / package.json engines; composer.json require.php;
+#               .python-version / pyproject.toml requires-python. Set them when a
 #               repo's manifest is vague (">=22") but CI must be exact, or when
 #               there is no manifest to read. Omit them and the manifest decides.
+#               NOTE requirements.txt is not a source: it pins dependencies, never
+#               the interpreter, so a Python repo with only that file must declare
+#               `python:` here (or add .python-version) or CI has nothing to resolve.
 #
 tier: B
 trunk: main

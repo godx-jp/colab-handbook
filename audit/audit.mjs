@@ -478,6 +478,50 @@ function makeSource(target) {
   };
 }
 
+// --------------------------------------------------------------------- self-audit
+//
+// The sweep covers the handbook's CONSUMERS — and the handbook itself is in the repo
+// list, so it ends up asking the handbook whether it has copied the handbook. The
+// answer is permanently "no", and the two stamp advisories that follow can never be
+// cleared honestly: this repo's ci.yml is purpose-written rather than derived from
+// templates/ci-node.yml, and its CLAUDE.md is the source the conventions block is
+// extracted FROM, not a paste of it. Hand-stamping them would clear the output and
+// simultaneously make the repo claim it copied itself from a version of itself —
+// converting an honest advisory into a false claim, which is strictly worse than noise.
+//
+// Detected STRUCTURALLY, never by matching the string "colab-handbook": a fork or a
+// rename must keep working, and a consumer that merely happens to carry that name must
+// not inherit the exemption. Two structural facts, in order:
+//
+//   1. the target resolves to HANDBOOK_ROOT — the ordinary case.
+//   2. the target shares a git COMMON DIR with HANDBOOK_ROOT — a linked worktree of the
+//      handbook is still the handbook. Sessions run from a worktree while the repo list
+//      names the main checkout, so a path-only test would silently miss exactly when an
+//      agent is looking at the output.
+//
+// Remote (owner/name) targets are out of scope: recognising "self" through the API would
+// require the name match this deliberately avoids.
+
+function gitCommonDir(root) {
+  try {
+    const out = execFileSync("git", ["-C", root, "rev-parse", "--git-common-dir"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return out ? resolve(root, out) : null;
+  } catch {
+    return null; // not a git checkout, or git unavailable
+  }
+}
+
+function isHandbookItself(target) {
+  if (target.kind !== "local") return false;
+  const raw = target.path.startsWith("~") ? join(process.env.HOME || "", target.path.slice(1)) : target.path;
+  const root = resolve(raw);
+  if (!existsSync(root)) return false;
+  if (root === HANDBOOK_ROOT) return true;
+  const a = gitCommonDir(root);
+  const b = gitCommonDir(HANDBOOK_ROOT);
+  return a !== null && b !== null && a === b;
+}
+
 // ------------------------------------------------------------------------- checks
 
 const BRANCH_RE = /^(feat|fix|docs|chore|refactor|test|perf)\/[a-z0-9._-]+$/;
@@ -508,7 +552,11 @@ const VALID_DEPLOY = new Set(["tag", "manual", "push-main", "none"]);
 function auditRepo(target, ctx) {
   const src = makeSource(target);
   const findings = []; // { level: 'fail'|'warn', text }
-  const info = { repo: src.label, kind: src.kind, tier: null, findings: [] };
+  // `self` = this target IS the handbook, not one of its consumers. Surfaced in the
+  // report (and in --json) so the row reads as source-of-truth rather than clean-by-luck:
+  // a silent skip is indistinguishable from a check that quietly stopped working.
+  const isSelf = isHandbookItself(target);
+  const info = { repo: src.label, kind: src.kind, tier: null, self: isSelf, findings: [] };
 
   const fail = (t) => findings.push({ level: "fail", text: t });
   const warn = (t) => findings.push({ level: "warn", text: t });
@@ -651,7 +699,16 @@ function auditRepo(target, ctx) {
   tool.findings.forEach((f) => findings.push(f));
 
   // ---- handbook reconciliation (stamps) -----------------------------------
-  checkStamps(src, ctx.handbook, ctx.templateNames, fail, warn);
+  // EXEMPTION, not suppression, and scoped by CONSTRUCTION: a single guarded STATEMENT
+  // rather than `if (!isSelf) { … }`, so a check somebody adds next to this one cannot
+  // silently inherit the exemption by landing inside the block. The handbook is not
+  // exempt from its own rules — every check above runs on it unchanged — it is exempt
+  // only from being audited as its own consumer.
+  //
+  // Note this is narrower than it may look: rika-entertainment/preflight-hub emits the
+  // SAME two advisory lines, legitimately (its ci.yml really is an unstamped copy).
+  // Identical text, opposite meanings — nothing here may generalise to that row.
+  if (!isSelf) checkStamps(src, ctx.handbook, ctx.templateNames, fail, warn);
 
   function finish() {
     info.findings = findings;
@@ -770,10 +827,15 @@ function collectToolchain(src, cfg, workflows) {
   const declared = {
     node: cfg && "node" in cfg ? cfg.node : null,
     php: cfg && "php" in cfg ? cfg.php : null,
+    python: cfg && "python" in cfg ? cfg.python : null,
   };
 
   // --- manifest -------------------------------------------------------------
-  const manifest = { node: null, nodeRaw: null, nodeFrom: null, php: null, phpRaw: null, phpFrom: null };
+  const manifest = {
+    node: null, nodeRaw: null, nodeFrom: null,
+    php: null, phpRaw: null, phpFrom: null,
+    python: null, pythonRaw: null, pythonFrom: null,
+  };
 
   const nvmrc = src.readFile(".nvmrc");
   if (nvmrc && nvmrc.trim()) {
@@ -811,8 +873,33 @@ function collectToolchain(src, cfg, workflows) {
     manifest.phpFrom = "composer.json require.php";
   }
 
+  // Python. Precedence mirrors node's: the dedicated version file first (pyenv's
+  // .python-version, which local tooling also reads), then the package manifest.
+  //
+  // requirements.txt is deliberately ABSENT from this list — it pins dependencies,
+  // never the interpreter. A repo carrying only a requirements.txt has declared
+  // nothing about which Python it runs on, and the undeclared-but-pinned advisory
+  // below is exactly the right thing to say about it.
+  const pyver = src.readFile(".python-version");
+  if (pyver && pyver.trim()) {
+    manifest.pythonRaw = pyver.split("\n").find((l) => l.trim() && !l.trim().startsWith("#"))?.trim() ?? null;
+    manifest.python = normaliseVersion(manifest.pythonRaw);
+    manifest.pythonFrom = ".python-version";
+  }
+  const pyproject = src.readFile("pyproject.toml");
+  if (pyproject && !manifest.python) {
+    // A line match, not a TOML parser: this tool is dependency-free by design, and
+    // requires-python is a single top-level string in [project].
+    const m = pyproject.match(/^\s*requires-python\s*=\s*["']([^"']+)["']/m);
+    if (m) {
+      manifest.pythonRaw = m[1];
+      manifest.python = normaliseVersion(m[1]);
+      manifest.pythonFrom = "pyproject.toml requires-python";
+    }
+  }
+
   // --- what the workflows actually pin -------------------------------------
-  const pins = { node: [], php: [] };
+  const pins = { node: [], php: [], python: [] };
   for (const wf of workflows) {
     const text = src.readFile(`.github/workflows/${wf}`);
     if (!text) continue;
@@ -822,13 +909,16 @@ function collectToolchain(src, cfg, workflows) {
     for (const [, v] of text.matchAll(/^\s*php-version:\s*["']?([^"'\s#]+)/gm)) {
       if (!v.includes("${{")) pins.php.push({ wf, v: normaliseVersion(v) });
     }
+    for (const [, v] of text.matchAll(/^\s*python-version:\s*["']?([^"'\s#]+)/gm)) {
+      if (!v.includes("${{")) pins.python.push({ wf, v: normaliseVersion(v) });
+    }
   }
 
-  for (const eco of ["node", "php"]) {
+  for (const eco of ["node", "php", "python"]) {
     const d = declared[eco] ? normaliseVersion(declared[eco]) : null;
     const m = manifest[eco];
-    const rawConstraint = eco === "node" ? manifest.nodeRaw : manifest.phpRaw;
-    const from = eco === "node" ? manifest.nodeFrom : manifest.phpFrom;
+    const rawConstraint = manifest[`${eco}Raw`];
+    const from = manifest[`${eco}From`];
 
     // Descriptor vs manifest. If the manifest states a range, the descriptor's
     // concrete version must live inside it; otherwise compare them directly.
@@ -945,15 +1035,18 @@ function report(results, opts, ctx) {
   for (const r of shown) {
     const tier = r.tier ? `tier ${r.tier}` : "tier ?";
     const head = `${r.repo.padEnd(width)}  ${tier.padEnd(tierW)}`;
-    if (r.clean) {
-      console.log(`${head}  ✓`);
-      continue;
-    }
-    r.findings.forEach((f, i) => {
-      const mark = f.level === "fail" ? "⚠" : "·";
-      // Repeat the name on every line so the output stays greppable.
-      console.log(`${i === 0 ? head : "".padEnd(width + 2 + tierW + 2)}  ${mark} ${f.text}`);
-    });
+    const cont = "".padEnd(width + 2 + tierW + 2); // continuation indent
+
+    const lines = [];
+    // The handbook's own row says WHY it carries no stamp findings. Without this it
+    // would read as clean-by-luck, which is indistinguishable from a check that
+    // quietly stopped working.
+    if (r.self) lines.push("⌂ handbook source — every rule applies except its own stamps (it has nothing to copy from)");
+    else if (r.clean) lines.push("✓");
+    r.findings.forEach((f) => lines.push(`${f.level === "fail" ? "⚠" : "·"} ${f.text}`));
+
+    // Repeat the name on every line so the output stays greppable.
+    lines.forEach((l, i) => console.log(`${i === 0 ? head : cont}  ${l}`));
   }
 
   const failed = results.filter((r) => !r.ok).length;

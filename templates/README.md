@@ -16,6 +16,7 @@ Starting points you **copy into your own repo**. That is the entire model.
 |---|---|---|---|
 | `ci-node.yml` | `.github/workflows/ci.yml` | Pure Node repos: Vite SPA, node libs, Astro static, **Capacitor apps** | Resolves Node version from `project.yml` → `.nvmrc`/`engines` → **fails**. Never a default. |
 | `ci-laravel.yml` | `.github/workflows/ci.yml` | Laravel + Inertia + Vite fullstack (Omnify) | Same resolution for **both** PHP and Node. Includes the sqlite bootstrap + explicit wayfinder step. |
+| `ci-python.yml` | `.github/workflows/ci.yml` | Python: FastAPI/Flask services, CLIs, libraries | Resolves Python from `project.yml` → `.python-version`/`requires-python` → **fails**. `requirements.txt` does not count. **Hybrid** Python+Node repo: copy this, then paste `ci-node.yml`'s `build:` job alongside — see the template header. |
 | `release-tag.yml` | `.github/workflows/release.yml` | Any repo cutting `v*.*.*` releases | Triggers on tag push. Publishes a grouped GitHub Release. No toolchain, no deploy. |
 | `repo-CLAUDE-block.md` | *paste into* `CLAUDE.md` | Every adopting repo | The discovery hook — how an agent finds the handbook at all. |
 
@@ -37,9 +38,11 @@ Starting points you **copy into your own repo**. That is the entire model.
    which branches exist, self-hosted runner or not, the build command, working
    directory.
 3. **Declare your toolchain.** The CI templates refuse to guess a version. Put it in
-   `.github/project.yml` (`node: "22"`, `php: "8.4"`), or rely on `.nvmrc` /
-   `package.json engines.node` / `composer.json require.php`. If none of these exists,
-   CI fails on purpose with a message telling you to declare it.
+   `.github/project.yml` (`node: "22"`, `php: "8.4"`, `python: "3.13"`), or rely on
+   `.nvmrc` / `package.json engines.node` / `composer.json require.php` /
+   `.python-version` / `pyproject.toml requires-python`. If none of these exists,
+   CI fails on purpose with a message telling you to declare it. Note that
+   `requirements.txt` is **not** one of these — it pins dependencies, not the interpreter.
 4. **Add `.github/project.yml`** if you have not — copy the reference at the handbook's
    own `.github/project.yml`. The audit tool and the CI resolution step both read it.
 5. **Paste the CLAUDE block** (`repo-CLAUDE-block.md`) so the next agent in the repo can
