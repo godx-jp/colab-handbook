@@ -152,6 +152,9 @@ Either, both, or neither may be set — never an error.
 - **Display precedence** (tables, refusal / takeover / tie-break / doctor holder lines): the friendly
   `sessionName` wins; else the URL compacted to its `session_…` tail; else `-`. `--json` always
   carries **both** fields raw.
+- In the `worktrees` / `claims` tables a name with **no URL** behind it is suffixed `(!)`, with a
+  legend under the table. Without that marker a half-identity row renders identically to a fully
+  identified one — which is exactly how the state went unnoticed.
 - **GitHub comments** (`🔒 Claimed`, `🚢 Shipped`) render the session tail by shape:
   - both → a markdown link ` · session [<name>](<url>)`
   - URL only → ` · session <url>` (the original form)
@@ -165,6 +168,48 @@ Either, both, or neither may be set — never an error.
 Why: `host` says which *machine* holds a claim; the session says which *conversation* — and a short
 `sessionName` makes a table row readable at a glance while the URL stays one click away. When a claim
 looks stale, that's the difference between "which laptop is this?" and jumping straight to the chat.
+
+### The two fields are not equivalent
+
+`sessionName` is **display text**. `session` is **the only join key**: a consumer resolves a worktree
+to a live session through `worktree.session` → its `session_…` tail → the session. The name
+participates in no join at all. So the failure is asymmetric:
+
+| state | consequence |
+|---|---|
+| URL, no name | **cosmetic** — renders as `session_01Lz5rfq…`: ugly, still reachable |
+| name, no URL | **structural** — reads as owned, traces to nobody. Worse than anonymous |
+| neither | honestly anonymous |
+
+Therefore `claim` and `worktree new` **warn** (never fail — some agents genuinely have no URL) when a
+`sessionName` resolves non-empty while `session` resolves empty. The gap used to be silent at exactly
+the moment it was cheapest to close.
+
+**Identity is never inferred from the name.** A consumer tried by-name matching and reverted it: a
+worktree named `console-views-30-31-32` sat beside a live session with a nearly identical name and
+*was not it*. Absent identity renders as "unknown", never as a guess.
+
+### Repairing an existing worktree — `worktree tag`
+
+```sh
+colab worktree tag import-fixes-115-114-113 --session "https://claude.ai/code/session_…"
+colab worktree tag import-fixes-115-114-113 --session "<url>" --session-name "import-fixes"
+```
+
+- Writes the worktree record **and every claim attached to it**. Claims carry their own copies of
+  both fields, and claims are what `colab doctor` reports on — a worktree-only repair would leave
+  doctor still printing anonymous rows, looking like the fix failed. One command, both records.
+- Only the fields you pass are overwritten; the other is left as-is.
+- **No env fallback** (unlike `claim` / `worktree new`): a repair writes exactly what you type.
+  Inheriting `COLAB_SESSION_NAME` from a shell that never had `COLAB_SESSION` is how the
+  half-identity gets created in the first place.
+- Already-posted `🔒 Claimed` comments are **not** rewritten — a comment is dated history, not
+  current state. `~/.colab/state.json` is what tables and `doctor` read.
+
+**Agents: pass `--session` / `--session-name` as flags, not exports.** Shell state does not persist
+between tool calls, so an `export` made once evaporates before the later `worktree new` runs — which
+silently produces the anonymous rows the export was meant to prevent. The env route is for a human
+with a persistent shell.
 
 ## Worktree lifecycle (`status`)
 
@@ -342,6 +387,7 @@ Run `colab <cmd> --help` for full detail.
 | `ports [--json]` | list allocated ports + the reserved set |
 | `worktree new <branch> [--issues N,M] [--ports N \| --at p1,..] [--name X] [--trunk T] [--session S] [--session-name S] [--repo P]` | create a worktree (optional) |
 | `worktree rm <name> [--force] [--repo P]` | remove a worktree; release its group; free its ports |
+| `worktree tag <name> --session S [--session-name S]` | **repair** session identity on an existing worktree **and its claims** (see *Session identity*) |
 | `worktrees [--json]` | list worktrees (status + on-disk liveness) |
 | `ship [--worktree N \| --branch B] [--message M] [--keep-worktree] [--dry]` | code-wrap **Phase B**: squash-merge a session branch → trunk. Gated by repo autonomy (see *Phase B autonomy ladder*) |
 | `promote [--repo P] [--message M] [--dry]` | **promotion** trunk → main (`--no-ff`). Gated by `deploy` + `promotion`; never tags/deploys directly (see *Promotion*) |

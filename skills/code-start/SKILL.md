@@ -13,28 +13,52 @@ never grab the same work. Close the session with **code-wrap**.
 Notation: `$N` = the feature's Issue number (keep it for the whole session).
 `<trunk>` = the branch sessions merge into (from `project.yml`, below).
 
-## 0. Say who you are — once, before you claim anything
+## 0. Say who you are — the URL, above all
 
 Skip this and every claim and worktree you create is **anonymous**: a dashboard row
 with a branch and no owner. Someone finding a stale claim then knows it is stale but
 not who to ask.
 
+**The two fields are not equivalent, and the skill used to imply they were.**
+
+| field | what it is | missing it costs |
+|---|---|---|
+| `--session-name` | **display text.** The column a human scans. | cosmetic — the row falls back to the URL tail: ugly, still reachable |
+| `--session` (URL) | **the only join key.** A consumer resolves a worktree to a live session through it: `worktree.session` → its `session_…` tail → the session. | structural — the row can never be linked to anyone |
+
+The name participates in **no join**. So a name with no URL is the worst of the three
+states: it *reads* as owned and still traces to nobody. Set the URL first; the name is
+a nicety on top of it. `colab` now warns when you supply a name alone.
+
+Nothing infers identity from the name, and nothing should: a worktree once sat next to
+a live session with a near-identical name and **was not it**. Absent identity renders
+as "unknown" — never as a guess.
+
+### Pass them as flags, not exports — if you are an agent
+
 ```sh
-export COLAB_SESSION_NAME="import-fixes"                  # short, human, about the WORK
-export COLAB_SESSION="https://claude.ai/code/session_…"   # your agent session URL, if it has one
+colab claim $N --worktree <name> \
+  --session "https://claude.ai/code/session_…" \
+  --session-name "import-fixes"          # short, human, about the WORK
 ```
 
-- **Once, via the environment — not per command.** `colab` resolves each field
-  flag > env > empty, so one export at the top covers every later `colab claim` and
-  `colab worktree new`. Per-command flags are the step people forget on the third
-  worktree.
+- **An `export` does not survive between tool calls.** Each Bash call is its own shell,
+  so `export COLAB_SESSION=…` in step 0 has evaporated by the time `colab worktree new`
+  runs several steps later — silently producing the exact anonymous rows this step
+  exists to prevent. Flags are the only thing that reliably sticks for an agent.
+- **A human at one terminal may still export it once** (`export COLAB_SESSION=…`);
+  resolution is flag > env > empty, so both paths work. The env route is for people
+  with a persistent shell, not for agents.
 - **Do this before step 3**, not inside step 4. Sessions that work directly on trunk
-  still claim, and they deserve a name just as much as worktree sessions.
+  still claim, and they deserve identity just as much as worktree sessions.
 - **Name it after the work, not the branch.** The table already shows the branch;
   `import-fixes` or `payroll-hotfix` tells a human something new, `fix-import-115`
   does not.
-- **No session URL?** Set the name alone. It is the column humans actually read; the
-  URL is what lets them jump to the session. Both is best, one is far better than none.
+- **Genuinely no session URL?** Then set the name alone and know what you have: a
+  cosmetic label, not a traceable row. It is a degraded state, not an equal choice.
+- **Got the URL later, or already created the worktree anonymous?**
+  `colab worktree tag <name> --session <url> [--session-name <s>]` repairs the worktree
+  *and* the claims hanging off it. No hand-editing of `~/.colab/state.json`.
 - **No `colab` installed?** Nothing breaks — the fields simply do not exist, and
   claiming still works through `gh`.
 
@@ -216,7 +240,8 @@ conditional rule is one agents skip.
 **Worktree — the default.** It honours the invariant by construction:
 
 ```sh
-colab worktree new <type>/<slug>-$N --issues $N --ports 1    # claims AND creates — one command
+colab worktree new <type>/<slug>-$N --issues $N --ports 1 \
+  --session "$SESSION_URL" --session-name "<label>"     # claims AND creates — one command
 # … else fall back to plain git (then claim by hand, step 3):
 git worktree add -b <type>/<slug>-$N ../<slug>-$N origin/<trunk>
 ```
@@ -224,6 +249,9 @@ git worktree add -b <type>/<slug>-$N ../<slug>-$N origin/<trunk>
 `--issues` does the claiming, which is why step 3 tells you not to claim separately on
 this path. Pass **every** issue the branch will carry (`--issues 115,114,113`) — that
 set and the branch name are the two places code-wrap's harvest reads.
+
+**Repeat the identity flags here** (step 0): as an agent you cannot rely on an export
+made in an earlier tool call, and this is the command whose row a dashboard shows.
 
 **Plain branch — allowed, but only with a commitment.** Fine on a repo nothing reads
 from and where a worktree is more setup than the work deserves. If you take it, you
@@ -259,7 +287,8 @@ stop and move the work to a worktree.
   whether you **reopened** a closed Issue rather than creating one.
 - The session name you set in step 0 — it is how a human matches your report to the
   row holding this work. Confirm it stuck: `colab worktrees` (or `colab claims`)
-  should show it, not a `—`.
+  should show it, not a `—`. A name showing with **no URL behind it** is a half-fix,
+  not a pass: repair it with `colab worktree tag <name> --session <url>` and say so.
 - Branch name, and the worktree path if you made one. If the step-3 check found an
   existing branch or worktree for this issue, say so and say what you did about it.
 - What you loaded from the Issue and your plan (checklist groups, file split if

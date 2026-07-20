@@ -108,6 +108,23 @@ function resolveSessionName(opts) {
   return String(s).trim();
 }
 
+/**
+ * A `sessionName` with no `session` URL is a HALF-identity, and it is worse than no identity at
+ * all: the row reads as owned, yet nothing can join it to a session. `sessionName` is display
+ * text; `session` is the only join key a consumer has (worktree.session → its `session_…` tail →
+ * the live session). Never match on the name to close the gap — a consumer tried and reverted
+ * after a worktree sat beside a live session with a near-identical name and was NOT it.
+ *
+ * So: WARN at the CREATION paths (claim, worktree new) — the one moment the URL is cheap to
+ * supply — and never fail, because some agents genuinely have no session URL.
+ */
+function warnHalfIdentity(session, sessionName, what, ref) {
+  if (!sessionName || session) return;
+  warn(`session name "${sessionName}" recorded with NO session URL — this ${what} will read as owned`);
+  warn(`  but cannot be traced to a session. The name is display text; the URL is the join key.`);
+  if (ref) warn(`  Repair once you have it:  colab worktree tag ${ref} --session <url>`);
+}
+
 /** Compact a session URL for display: the `session_…` tail, or the raw value, capped. */
 function shortSession(s) {
   if (!s) return '';
@@ -125,6 +142,25 @@ function displayIdentity(sessionName, session) {
   if (sessionName) return sessionName;
   if (session) return shortSession(session);
   return '';
+}
+
+/**
+ * Table cell for the SESSION column. `displayIdentity` alone renders a name-with-no-URL row
+ * IDENTICALLY to a fully-identified one — which is the whole defect: the row *looks* owned and
+ * joins to nothing. The `(!)` suffix (explained by identityLegend below) is the only place a
+ * reader can see the difference without opening state.json. `--json` is untouched: it always
+ * carries both raw fields.
+ */
+function identityCell(sessionName, session) {
+  const text = displayIdentity(sessionName, session) || '-';
+  return (sessionName && !session) ? `${text} (!)` : text;
+}
+
+/** Print the `(!)` legend under a table, only when at least one row carries a half-identity. */
+function identityLegend(entries) {
+  if (!entries.some((e) => e && e.sessionName && !e.session)) return;
+  print('  (!) session NAME with no session URL — reads as owned, links to nothing.');
+  print('      Repair:  colab worktree tag <worktree> --session <url>');
 }
 
 /** The ` · session …` comment suffix, or '' — keeps the no-identity comment byte-stable. */
@@ -386,6 +422,7 @@ function cmdClaim(argv) {
   const wtName = opts.worktree || null;
   const session = resolveSession(opts);
   const sessionName = resolveSessionName(opts);
+  warnHalfIdentity(session, sessionName, 'claim', wtName);
   const gh = isGhUsable(repoAbs);
   const myLogin = gh ? git.ghCurrentLogin() : null;
 
@@ -526,8 +563,9 @@ function cmdClaims(argv) {
     const wt = st.worktrees[g];
     const portStr = wt && wt.ports.length ? ` ports:${wt.ports.join(',')}` : '';
     print(`\n▸ ${g}${portStr}`);
-    const rows = cs.map((c) => [c.issue, shortRepo(c.repo), c.branch || '-', c.host, displayIdentity(c.sessionName, c.session) || '-', c.created.slice(0, 10)]);
+    const rows = cs.map((c) => [c.issue, shortRepo(c.repo), c.branch || '-', c.host, identityCell(c.sessionName, c.session), c.created.slice(0, 10)]);
     print(table(rows, ['ISSUE', 'REPO', 'BRANCH', 'HOST', 'SESSION', 'SINCE']).split('\n').map((l) => '  ' + l).join('\n'));
+    identityLegend(cs);
   }
   return 0;
 }
@@ -779,7 +817,7 @@ function cmdPorts(argv) {
 // worktree
 // ---------------------------------------------------------------------------
 
-const HELP_WORKTREE = `colab worktree <new|rm> ...   ·   colab worktrees [--json]
+const HELP_WORKTREE = `colab worktree <new|rm|tag> ...   ·   colab worktrees [--json]
 
 Worktrees are OPTIONAL — claiming and port allocation work standalone without one.
 The portable core does only universal steps. Machine-specific steps (DB cloning,
@@ -810,6 +848,16 @@ dependency symlinking, dev-server restarts) live in OPTIONAL repo hooks, not her
       Releases ALL claims on the worktree, frees its ports, runs the pre-remove hook,
       then removes the worktree. Refuses if there are uncommitted TRACKED changes
       unless --force.
+
+  colab worktree tag <name> --session <url> [--session-name <s>]
+      REPAIR session identity on a worktree that already exists — and on every claim
+      attached to it (claims hold their own copy, and claims are what \`doctor\` reports).
+      Pass either field or both; only what you pass is overwritten. No env fallback here:
+      a repair writes exactly what you type. Existing GitHub claim comments are left as
+      posted (they are dated history, not current state).
+      Why it exists: \`sessionName\` is display text, \`session\` is the ONLY join key — a
+      worktree with a name and no URL reads as owned and links to nothing. Identity is
+      never inferred from the name; absent stays "unknown".
 
   colab worktrees [--json]     list worktrees with their claims and ports
 
@@ -863,6 +911,7 @@ function cmdWorktreeNew(argv) {
   const range = resolveWorktreeRange(opts, config, repoAbs); // --range > repo worktreePorts > default
   const session = resolveSession(opts);
   const sessionName = resolveSessionName(opts);
+  warnHalfIdentity(session, sessionName, 'worktree (and its claims)', name);
   const gh = isGhUsable(repoAbs);
   const myLogin = gh ? git.ghCurrentLogin() : null;
 
@@ -1029,10 +1078,66 @@ function cmdWorktreeRm(argv) {
   return 0;
 }
 
+/**
+ * `colab worktree tag <name> --session <url> [--session-name <s>]` — repair session identity on an
+ * ALREADY-created worktree. Before this, the only fix was hand-editing ~/.colab/state.json.
+ *
+ * It writes BOTH records. Claims keep their own copies of `session`/`sessionName` (inherited at
+ * creation), and claims are what `colab doctor` reports on — so a worktree-only repair would leave
+ * doctor still printing anonymous rows and look like the fix had not worked. One command, both.
+ */
+function cmdWorktreeTag(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--session': 'session', '--session-name': 'sessionName' },
+    flags: { '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help || opts._.length === 0) return print(HELP_WORKTREE);
+  const name = opts._[0];
+  // Deliberately NOT resolveSession()/resolveSessionName(): the env fallback belongs to CREATION.
+  // A repair must write exactly what the operator passed — inheriting COLAB_SESSION_NAME from a
+  // shell that never had COLAB_SESSION is how the half-identity is produced in the first place.
+  const session = String(opts.session || '').trim();
+  const sessionName = String(opts.sessionName || '').trim();
+  if (!session && !sessionName) {
+    throw new UserError('Nothing to tag — pass --session <url> and/or --session-name <s>');
+  }
+  if (!state.loadState().worktrees[name]) {
+    throw new UserError(`No worktree "${name}" in state (list them with: colab worktrees)`);
+  }
+
+  const out = state.mutate((st) => {
+    const wt = st.worktrees[name];
+    if (!wt) throw new UserError(`No worktree "${name}" in state`); // lost the race with a rm
+    const before = { session: wt.session || '', sessionName: wt.sessionName || '' };
+    if (session) wt.session = session;
+    if (sessionName) wt.sessionName = sessionName;
+    const claims = [];
+    for (const c of Object.values(st.claims)) {
+      if (c.worktree !== name) continue;
+      if (session) c.session = session;
+      if (sessionName) c.sessionName = sessionName;
+      claims.push(c.issue);
+    }
+    return { before, after: { session: wt.session || '', sessionName: wt.sessionName || '' }, claims };
+  });
+
+  const arrow = (b, a) => `${b || '—'} → ${a || '—'}`;
+  print(`✓ Tagged worktree "${name}"`);
+  print(`  session:      ${arrow(out.before.session, out.after.session)}`);
+  print(`  sessionName:  ${arrow(out.before.sessionName, out.after.sessionName)}`);
+  print(`  claims retagged: ${out.claims.join(' ') || '— (none attached)'}`);
+  // Already-posted "🔒 Claimed" comments are NOT rewritten: a comment is a dated record of what was
+  // known then, and editing history to look tidy is exactly the lie this handbook warns about.
+  print(`  note: existing GitHub claim comments keep their original text (history, not state)`);
+  warnHalfIdentity(out.after.session, out.after.sessionName, 'worktree', name);
+  return 0;
+}
+
 function cmdWorktree(argv) {
   const sub = argv[0];
   if (sub === 'new') return cmdWorktreeNew(argv.slice(1));
   if (sub === 'rm') return cmdWorktreeRm(argv.slice(1));
+  if (sub === 'tag') return cmdWorktreeTag(argv.slice(1));
   return print(HELP_WORKTREE);
 }
 
@@ -1046,9 +1151,10 @@ function cmdWorktrees(argv) {
   const rows = wts.map((wt) => {
     const claims = Object.values(st.claims).filter((c) => c.worktree === wt.name).map((c) => c.issue).join(' ') || '-';
     const alive = wt.path ? (fs.existsSync(wt.path) ? 'yes' : 'MISSING') : 'n/a';
-    return [wt.name, shortRepo(wt.repo), wt.branch, wt.ports.join(',') || '-', claims, wtStatus(wt), displayIdentity(wt.sessionName, wt.session) || '-', alive];
+    return [wt.name, shortRepo(wt.repo), wt.branch, wt.ports.join(',') || '-', claims, wtStatus(wt), identityCell(wt.sessionName, wt.session), alive];
   });
   print(table(rows, ['NAME', 'REPO', 'BRANCH', 'PORTS', 'ISSUES', 'STATUS', 'SESSION', 'ON-DISK']));
+  identityLegend(wts);
   return 0;
 }
 
