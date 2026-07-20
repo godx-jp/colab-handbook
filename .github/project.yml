@@ -26,3 +26,4 @@ trunk: main
 production: null
 deploy: none
 stack: docs + copy-and-own CI templates + audit CLI (no build)
+autonomy: auto-trunk
