@@ -44,6 +44,18 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve, basename, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+
+// The stamp/drift logic is SHARED with `colab update` (tools/lib/stamp.js), which refreshes what
+// this tool reports. Two readings of a stamp that disagreed about what "behind" means is the
+// two-places-drift disease this handbook exists to kill, so there is one implementation. It is
+// CommonJS because the CLI is; `createRequire` is how ESM consumes it.
+const require = createRequire(import.meta.url);
+const stamp = require("../tools/lib/stamp.js");
+const {
+  handbookInfo, templateNames, templateChangedSince, cmpParts, cmpSemver,
+  parseWorkflowStamp, parseClaudeStamp, looksLikeHandbookWorkflow, looksLikeHandbookClaude,
+} = stamp;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 // audit/ lives inside the handbook checkout; COLAB_HANDBOOK overrides for running the
@@ -147,15 +159,7 @@ function isRange(s) {
   return /^[\^~><=]/.test(t) || /[\s|]/.test(t) || /\.(\*|x)$/i.test(t);
 }
 
-function cmpParts(a, b) {
-  const n = Math.max(a.length, b.length);
-  for (let i = 0; i < n; i++) {
-    const x = a[i] ?? 0;
-    const y = b[i] ?? 0;
-    if (x !== y) return x < y ? -1 : 1;
-  }
-  return 0;
-}
+// (cmpParts comes from tools/lib/stamp.js — one numeric version compare, shared.)
 
 // Agreement at the precision both sides actually state. "22" vs "22.1" agree —
 // nobody declared the minor, so nobody is claiming anything about it. "8.3" vs "8.4"
@@ -211,90 +215,11 @@ function satisfiesConstraint(version, constraint) {
 //   2. Whether a template CHANGED since a given stamp — `git log <stamp>..HEAD` scoped
 //      to that template's file. Non-empty history = the adopter's copy is behind.
 
-function gitIn(root, args) {
-  try {
-    return {
-      ok: true,
-      out: execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(),
-    };
-  } catch {
-    return { ok: false, out: "" };
-  }
-}
-
-function handbookInfo() {
-  const isGit = gitIn(HANDBOOK_ROOT, ["rev-parse", "--show-toplevel"]).ok;
-  if (!isGit) return { root: HANDBOOK_ROOT, hasGit: false, untagged: true, version: "v0" };
-  const d = gitIn(HANDBOOK_ROOT, ["describe", "--tags", "--abbrev=0"]);
-  if (!d.ok || !d.out) return { root: HANDBOOK_ROOT, hasGit: true, untagged: true, version: "v0" };
-  return { root: HANDBOOK_ROOT, hasGit: true, untagged: false, version: d.out };
-}
-
-// Template stems present in the handbook (e.g. "ci-node", "ci-laravel", "release-tag").
-function templateNames() {
-  try {
-    return new Set(
-      readdirSync(join(HANDBOOK_ROOT, "templates"))
-        .filter((f) => /\.ya?ml$/.test(f))
-        .map((f) => f.replace(/\.ya?ml$/, "")),
-    );
-  } catch {
-    return new Set();
-  }
-}
-
-// vX.Y.Z comparison; missing components count as 0. Non-numeric junk sorts as 0 so a
-// malformed stamp never throws.
-function cmpSemver(a, b) {
-  const norm = (s) => String(s).replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
-  return cmpParts(norm(a), norm(b));
-}
-
-// Did any of the given template files change between the stamped version and HEAD?
-// Returns { verifiable, changed }. verifiable=false when the stamped ref does not
-// resolve in this checkout (a tag we don't have) — reported, never guessed.
-function templateChangedSince(files, sinceRef) {
-  const resolvable = gitIn(HANDBOOK_ROOT, ["rev-parse", "--verify", "--quiet", sinceRef + "^{commit}"]).ok;
-  if (!resolvable) return { verifiable: false, changed: false };
-  const log = gitIn(HANDBOOK_ROOT, ["log", "--oneline", `${sinceRef}..HEAD`, "--", ...files]);
-  return { verifiable: true, changed: log.ok && log.out.length > 0 };
-}
-
-// First-line-ish workflow stamp: `# colab-handbook: <name> @ <version>`.
-function parseWorkflowStamp(text) {
-  if (!text) return null;
-  const m = text.match(/#\s*colab-handbook:\s*([A-Za-z0-9._-]+)\s*@\s*(v?[0-9][0-9A-Za-z.\-+]*)/);
-  return m ? { name: m[1], version: m[2] } : null;
-}
-
-// CLAUDE-block stamp: `<!-- colab-handbook @ <version> -->`.
-function parseClaudeStamp(text) {
-  if (!text) return null;
-  const m = text.match(/<!--\s*colab-handbook\s*@\s*(v?[0-9][0-9A-Za-z.\-+]*)\s*-->/);
-  return m ? { version: m[1] } : null;
-}
-
-// Content fingerprints that mark a workflow/CLAUDE file as a handbook derivative even
-// when someone renamed the file or pasted the block without the stamp. Precise on
-// purpose: better to miss an unstamped copy than to nag an unrelated ci.yml.
-const WORKFLOW_FINGERPRINTS = [
-  "gitleaks/gitleaks/releases/download", // our exact pinned-binary install
-  "wayfinder:generate",                  // ci-laravel bootstrap
-  "Build grouped release summary",       // release-tag
-  "Resolve Node version",                // ci-node toolchain step
-  "Resolve toolchain versions",          // ci-laravel toolchain step
-];
-function looksLikeHandbookWorkflow(text, stem, tmplNames) {
-  if (tmplNames.has(stem)) return true;
-  if (!text) return false;
-  return WORKFLOW_FINGERPRINTS.some((s) => text.includes(s));
-}
-
-// A CLAUDE.md that pasted the conventions block (the "follows the colab-handbook
-// conventions" line is unique to templates/repo-CLAUDE-block.md).
-function looksLikeHandbookClaude(text) {
-  return !!text && /follows the \[?colab-handbook/i.test(text);
-}
+// All of the above now lives in tools/lib/stamp.js, imported at the top of this file:
+// gitIn, handbookInfo, templateNames, cmpSemver, templateChangedSince, parseWorkflowStamp,
+// parseClaudeStamp, WORKFLOW_FINGERPRINTS, looksLikeHandbookWorkflow, looksLikeHandbookClaude.
+// They take the handbook root explicitly (this file passes HANDBOOK_ROOT) because `colab update`
+// locates the handbook differently.
 
 // Run all stamp/reconciliation checks for one repo, pushing findings via fail/warn.
 // Silent when there is nothing to say (the common, healthy case).
@@ -312,7 +237,7 @@ function checkStamps(src, hb, tmplNames, fail, warn) {
       warn(`${kind} stamped @ ${stampVersion} is NEWER than handbook current ${cur} — clock skew or a hand-edited stamp`);
       return;
     }
-    const { verifiable, changed } = templateChangedSince(files, stampVersion);
+    const { verifiable, changed } = templateChangedSince(HANDBOOK_ROOT, files, stampVersion);
     if (!verifiable) {
       warn(`${kind} stamped @ ${stampVersion}, a version not in this handbook checkout — cannot verify drift (fetch tags, or re-copy)`);
       return;
@@ -1015,7 +940,7 @@ const opts = parseArgs(process.argv.slice(2));
 const targets = loadTargets(opts);
 if (!targets.length) die("nothing to audit — add entries to the repo list or pass --local <path>");
 
-const ctx = { handbook: handbookInfo(), templateNames: templateNames() };
+const ctx = { handbook: handbookInfo(HANDBOOK_ROOT), templateNames: templateNames(HANDBOOK_ROOT) };
 
 const results = [];
 for (const t of targets) {

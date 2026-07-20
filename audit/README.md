@@ -107,6 +107,16 @@ the handbook's current version, so a scheduled run is self-documenting.
   tag exists** the version is treated as `v0` and stamp comparisons are **inactive**
   (the header says so) rather than failing.
 
+  This stamp reading is **shared code**, not a copy: it lives in `tools/lib/stamp.js` and
+  is used both here and by `colab update`, which refreshes what this tool reports. Two
+  implementations that disagreed about what "behind" means would be the exact
+  two-places-drift disease this handbook exists to kill. The module is CommonJS (the CLI
+  is); this ESM file pulls it in through `createRequire`.
+
+  The audit **reports** drift; `colab update` is the other half of the loop — it can
+  rewrite a copy that is provably pristine, and refuses to touch a hand-edited one. See
+  `tools/README.md`.
+
 `stack` is intentionally **not** validated — it is a free-form string now.
 
 ## The repo list — resolution order

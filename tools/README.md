@@ -348,6 +348,7 @@ Run `colab <cmd> --help` for full detail.
 | `doctor [--prune] [--ttl H] [--json]` | heal dead worktrees / orphan + stale claims / orphan ports; flip + sweep **merged** worktrees (see *Worktree lifecycle*) |
 | `release-notes [<range>] [--repo P] [--out F] [--headline "..."]` | grouped Markdown release summary from git history (see below) |
 | `template [<name>] [--dest F] [--repo P] [--force]` | copy a handbook workflow template into a repo, **stamped** with the handbook version (see below) |
+| `update [<repo>...] [--apply] [--json] [--quiet]` | sweep the fleet registry for stamped copies that fell behind a changed template; `--apply` refreshes the **pristine** ones. Never commits; never touches a hand-edited copy (see below) |
 | `register [<path>] [--remove] [--list]` | add/remove a repo in **both** fleet registries at once; `--list` flags drift (see below) |
 | `config [show \| add-repo P \| rm-repo P \| add-reserved-file P \| rm-reserved-file P \| set K V]` | manage config |
 
@@ -382,6 +383,57 @@ unless `--force` (and prints a `diff` hint instead). The stamp exists so
 `../audit/audit.mjs` can later tell an adopter that the source template has changed since
 they copied it — copy-and-own with a reconciliation trail, never a remote call. Making
 copy+stamp one command matters because a manual stamp is the step people skip.
+
+### Update (the outward sweep)
+
+`colab template` is how a repo *adopts* a template; `colab update` is how the machine finds out
+which adoptions have gone stale, and refreshes the ones it can prove are safe.
+
+It is an **outward sweep**, not a broadcast. The handbook cannot push to consumers — the fleet
+registry is machine-local and deliberately uncommitted (this repo is public; a list of private
+repo paths is not something to publish). So the sweep runs *from* the machine holding the list.
+
+```sh
+colab update                 # report on every registered repo (read-only)
+colab update everyday        # limit to one repo (abs path, or a trailing path segment)
+colab update --apply         # write the refreshable copies
+colab update --quiet --json  # for a scheduled run
+```
+
+Each stamped artifact is classified. The two git reads that matter are performed against the
+handbook's own history — **the classification never compares version strings alone**:
+
+| state | meaning | `--apply` |
+|---|---|---|
+| `current` | the stamp is the handbook's version, **or** `git log <stamp>..HEAD -- templates/<name>` is empty — the template genuinely has not moved | — |
+| `behind` | the stamp is older, the template really changed, **and** the copy still matches `git show <stamp>:templates/<name>` — i.e. pristine | **rewritten** |
+| `diverged` | the copy does *not* match the template as of **its own stamp**: hand-edited | **never written** |
+| `unstamped` | lineage unknown, so replacing it could destroy edits nobody can see | **never written** |
+| `n-a` | not assessable, always with a stated reason (an `owner/name` slug has no working tree here; a stamp from a tag this checkout lacks; an unknown template name) | — |
+
+Getting `diverged` right is the crux, and it is why the tool reads the template **at the old
+tag** rather than only the current one. Comparing a copy against today's template would label
+every out-of-date copy "hand-edited" and make the safe/unsafe distinction meaningless.
+
+**What it deliberately will not do:**
+
+- **Never commits, stages or pushes.** Every repo has its own tier and trunk rules; committing
+  into a Tier A repo's `dev` would have this tool violate the handbook it enforces. It writes
+  files into the working tree and stops — review with `git diff`, commit through that repo's flow.
+- **Never rewrites a `diverged` copy**, even with `--apply`. Copy-and-own (§7) makes local edits
+  legitimate; a tool that silently overwrote them would destroy the principle it serves.
+- **Never rewrites the CLAUDE conventions block.** That block is a *fragment* pasted into a
+  larger hand-written file, and the template ships placeholders the adopter fills in (`<A|B>`,
+  `<dev|main>`). A correctly adopted block therefore never matches byte-for-byte — divergence is
+  undecidable — and regenerating it would replace a repo's real tier and trunk with angle
+  brackets. It is classified (`current`/`behind`) and handed to a human to re-paste.
+- **Skips the handbook itself**, which is a guaranteed false positive: a stamp means "copied from
+  version X", and this repo *is* X.
+
+A refreshed file is byte-identical to what `colab template <name> --force` would have written —
+`update` is that command applied only where it can prove the copy was untouched.
+
+Exit code is **1 when anything is `behind`** (so a scheduled run can alert), 0 otherwise.
 
 ### Register (fleet registries)
 

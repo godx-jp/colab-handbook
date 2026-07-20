@@ -15,6 +15,7 @@ const { spawnSync } = require('child_process');
 const state = require('./lib/state');
 const git = require('./lib/git');
 const ports = require('./lib/ports');
+const stamp = require('./lib/stamp');
 const {
   HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
   parseArgs, table, shortRepo,
@@ -1655,6 +1656,309 @@ function cmdTemplate(argv) {
 }
 
 // ---------------------------------------------------------------------------
+// update — sweep the machine's fleet registry and refresh stamped handbook artifacts.
+//
+// The handbook cannot push to its consumers: the fleet registry is machine-local and
+// deliberately uncommitted (this repo is public; a list of private repo paths is not something
+// to publish — CONVENTIONS §8). So this is an OUTWARD SWEEP from the machine that holds the
+// list, not a broadcast from the handbook.
+//
+// Three refusals define this command, and each one protects something specific:
+//
+//   1. REPORT BY DEFAULT, write only under --apply. Copy-and-own (§7) means a repo may
+//      legitimately hand-edit its CI; a tool that silently overwrote it would destroy the very
+//      principle §7 exists to serve.
+//   2. NEVER COMMIT, STAGE OR PUSH. Every repo has its own tier and trunk rules — committing
+//      into a Tier A repo's `dev` would have this tool violate the handbook it enforces. It
+//      writes files into the working tree and stops; the human commits through that repo's flow.
+//   3. NEVER TOUCH A DIVERGED COPY, even with --apply. "Diverged" means someone edited it, and
+//      we cannot know what their edit was for.
+//
+// The classification (see classifyStamped in lib/stamp.js) rests on two git reads against the
+// handbook's own history, NOT on comparing version strings: `git log <stamp>..HEAD` scoped to the
+// template answers "did this actually change?", and `git show <stamp>:templates/<name>` answers
+// "was this copy pristine when it was made?". Comparing versions alone would mark the whole fleet
+// stale on every release, including releases that touched nothing anyone copied.
+// ---------------------------------------------------------------------------
+
+/** Repo-relative candidates for the CLAUDE conventions block. */
+const CLAUDE_FILE = 'CLAUDE.md';
+
+/**
+ * Inspect one registry entry. Returns { label, path, kind, artifacts[], note }.
+ * `artifacts` entries: { file, template, state, from, to, reason, applicable }.
+ */
+function inspectRepo(entry, ctx) {
+  const label = entryLabel(entry);
+
+  if (isSlug(entry)) {
+    return { label, path: null, kind: 'slug', artifacts: [],
+      note: 'owner/name slug — audit-only, no working tree on this machine to update' };
+  }
+  const abs = path.resolve(entry.startsWith('~') ? path.join(os.homedir(), entry.slice(1)) : entry);
+  if (!fs.existsSync(abs)) {
+    return { label, path: abs, kind: 'missing', artifacts: [], note: 'path does not exist on this machine' };
+  }
+  // Skip self. A stamp means "copied from version X"; this repo IS X, and its own ci.yml is
+  // purpose-written rather than copied — treating it as an adopter is a guaranteed false positive.
+  if (abs === ctx.handbookRoot) {
+    return { label, path: abs, kind: 'handbook', artifacts: [], note: 'the handbook itself — skipped' };
+  }
+
+  const artifacts = [];
+  const read = (rel) => {
+    const f = path.join(abs, rel);
+    try { return fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null; } catch (_) { return null; }
+  };
+
+  // --- workflow copies: whole-file copies, so a pristine one can be regenerated exactly ---
+  const wfDir = path.join(abs, '.github', 'workflows');
+  let wfs = [];
+  try { wfs = fs.existsSync(wfDir) ? fs.readdirSync(wfDir).filter((f) => /\.ya?ml$/.test(f)).sort() : []; }
+  catch (_) { wfs = []; }
+
+  for (const wf of wfs) {
+    const rel = `.github/workflows/${wf}`;
+    const text = read(rel);
+    const st = stamp.parseWorkflowStamp(text);
+    if (st) {
+      const c = stamp.classifyStamped({
+        root: ctx.handbookRoot, hb: ctx.hb, tmplNames: ctx.tmplNames,
+        templateName: st.name, stampVersion: st.version, localText: text, comparable: true,
+      });
+      artifacts.push({ file: rel, template: st.name, applicable: c.state === 'behind', ...c });
+    } else if (stamp.looksLikeHandbookWorkflow(text, wf.replace(/\.ya?ml$/, ''), ctx.tmplNames)) {
+      artifacts.push({ file: rel, template: null, state: 'unstamped', from: null, to: ctx.hb.version,
+        applicable: false,
+        reason: 'looks copied from the handbook but carries no stamp — lineage unknown, so replacing it could destroy unknown edits; re-copy with `colab template <name> --force`' });
+    }
+    // No stamp and no fingerprint = not ours. Silence is correct: this is somebody's own workflow.
+  }
+
+  // --- the CLAUDE conventions block ---
+  //
+  // REPORTED, NEVER WRITTEN — and this is a deliberate departure from treating every stamped
+  // artifact alike. The block is a FRAGMENT pasted into a larger hand-written file, and the
+  // template ships PLACEHOLDERS the adopter fills in (`<A|B>`, `<dev|main>`). So a correctly
+  // adopted block never matches the template byte-for-byte: divergence is undecidable here, and
+  // regenerating it would overwrite a repo's real tier/trunk with angle brackets — and take the
+  // rest of its CLAUDE.md with it. We classify it (current/behind) and hand it to a human.
+  const claude = read(CLAUDE_FILE);
+  if (claude) {
+    const st = stamp.parseClaudeStamp(claude);
+    if (st) {
+      const c = stamp.classifyStamped({
+        root: ctx.handbookRoot, hb: ctx.hb, tmplNames: ctx.tmplNames,
+        templateName: null, stampVersion: st.version, localText: claude, comparable: false,
+      });
+      artifacts.push({
+        file: CLAUDE_FILE, template: 'repo-CLAUDE-block', applicable: false, ...c,
+        reason: c.state === 'behind'
+          ? 'the conventions block moved — re-paste templates/repo-CLAUDE-block.md by hand and bump its stamp (it has placeholders only you can fill, so this is never automated)'
+          : c.reason,
+      });
+    } else if (stamp.looksLikeHandbookClaude(claude)) {
+      artifacts.push({ file: CLAUDE_FILE, template: 'repo-CLAUDE-block', state: 'unstamped',
+        from: null, to: ctx.hb.version, applicable: false,
+        reason: 'has the conventions block but no stamp — re-paste the current block including its `<!-- colab-handbook @ ... -->` line' });
+    }
+  }
+
+  const note = artifacts.length ? null : 'no stamped handbook artifacts — nothing adopted here yet';
+  return { label, path: abs, kind: 'local', artifacts, note };
+}
+
+/** Two path segments read better than one in a report: `futurelastic/everyday`. */
+function entryLabel(entry) {
+  if (isSlug(entry)) return entry;
+  const r = entry.replace(/\/+$/, '');
+  const parent = path.basename(path.dirname(r));
+  return parent && parent !== '/' && parent !== '.' ? `${parent}/${path.basename(r)}` : path.basename(r);
+}
+
+/** Rewrite a behind-but-pristine workflow copy as the current template, freshly stamped. */
+function refreshArtifact(repo, art, ctx) {
+  const src = path.join(ctx.templatesDir, `${art.template}.yml`);
+  if (!fs.existsSync(src)) return { ok: false, err: `template ${art.template}.yml is not in the handbook` };
+  const body = fs.readFileSync(src, 'utf8');
+  const dest = path.join(repo.path, art.file);
+  try {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, stamp.stampLine(art.template, ctx.hb.version) + body);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, err: e.message };
+  }
+}
+
+const HELP_UPDATE = `colab update [<repo> ...] [--apply] [--json] [--quiet]
+
+Sweep this machine's fleet registry and report which repos' stamped handbook artifacts have
+fallen behind — then, with --apply, refresh the ones that are safe to refresh.
+
+  <repo> ...   limit the sweep (match an absolute path, or a trailing path segment such as
+               "everyday" or "futurelastic/everyday"). Default: every registered repo.
+  --apply      WRITE the refreshable copies. Without it nothing on disk is touched.
+  --quiet, -q  only show repos with something to say
+  --json       machine-readable
+
+Each stamped artifact is classified:
+  current     the stamp is the handbook's version, or the template genuinely has not changed
+              since that stamp (checked with git log, not by comparing version strings — so a
+              release that touched nothing you copied does not mark you stale)
+  behind      the stamp is older, the template really did change, AND your copy is still
+              pristine as of its own stamp -> safe to regenerate. Only these are written.
+  diverged    your copy does not match the template as of ITS OWN stamp: it was hand-edited.
+              Copy-and-own makes that legitimate, so it is REPORTED AND NEVER WRITTEN.
+  unstamped   lineage unknown, so replacing it could destroy edits nobody can see.
+              Re-copy deliberately with \`colab template <name> --force\`.
+  n-a         cannot be assessed, always with a stated reason (an owner/name slug has no
+              working tree here; a stamp from a tag this checkout lacks; an unknown template).
+
+What this command will NOT do, by design:
+  • It never commits, stages or pushes. Every repo has its own tier and trunk rules; committing
+    for you would make this tool violate the handbook it enforces. It writes files and stops —
+    review with \`git diff\` and commit through that repo's own flow.
+  • It never rewrites a diverged copy, even with --apply.
+  • It never rewrites the CLAUDE conventions block: that block has placeholders only you can
+    fill, so it is reported for a hand re-paste.
+  • It skips the handbook repo itself.
+
+Exit code: 0 when nothing is behind, 1 when anything is behind (scriptable), 2 on usage error.
+`;
+
+function cmdUpdate(argv) {
+  const opts = parseArgs(argv, {
+    flags: { '--apply': 'apply', '--json': 'json', '--quiet': 'quiet', '-q': 'quiet', '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help) return print(HELP_UPDATE);
+
+  const { root, templatesDir } = handbookPaths();
+  const hb = stamp.handbookInfo(root);
+  const ctx = { handbookRoot: root, templatesDir, hb, tmplNames: stamp.templateNames(root) };
+
+  const registryPath = reposTxtPath();
+  const entries = reposTxtEntries(readReposTxt());
+  if (!entries.length) {
+    throw new UserError(`No repos registered (${registryPath}) — add one with: colab register [<path>]`);
+  }
+
+  // Positional filters: an absolute path, or any trailing path segment ("everyday").
+  const filters = opts._;
+  const selected = filters.length
+    ? entries.filter((e) => filters.some((f) => {
+      if (e === f || e === path.resolve(f)) return true;
+      const norm = e.replace(/\/+$/, '');
+      return norm.endsWith(`/${f.replace(/^\/+|\/+$/g, '')}`);
+    }))
+    : entries;
+  if (filters.length && !selected.length) {
+    throw new UserError(`No registered repo matches: ${filters.join(', ')} — see \`colab register --list\``);
+  }
+
+  const repos = selected.map((e) => inspectRepo(e, ctx));
+
+  // --- apply -------------------------------------------------------------
+  // Only `behind` + `applicable` artifacts are eligible; everything else was already excluded by
+  // the classification, which is where the refusals live.
+  const written = [];
+  const failed = [];
+  if (opts.apply && !hb.untagged) {
+    for (const r of repos) {
+      for (const a of r.artifacts) {
+        if (a.state !== 'behind' || !a.applicable) continue;
+        const res = refreshArtifact(r, a, ctx);
+        if (res.ok) { a.written = true; written.push({ repo: r.label, file: a.file, template: a.template, from: a.from, to: a.to }); }
+        else { a.writeError = res.err; failed.push({ repo: r.label, file: a.file, err: res.err }); }
+      }
+    }
+  }
+
+  // --- tally -------------------------------------------------------------
+  const all = repos.flatMap((r) => r.artifacts);
+  const count = (s) => all.filter((a) => a.state === s).length;
+  const summary = {
+    repos: repos.length,
+    artifacts: all.length,
+    current: count('current'), behind: count('behind'), diverged: count('diverged'),
+    unstamped: count('unstamped'), na: count('n-a'),
+    // Repos with no assessable artifact at all are counted SEPARATELY from artifact-level n-a:
+    // they are repos, not artifacts, and folding them into the artifact tally would make the
+    // arithmetic on that line stop adding up.
+    skippedRepos: repos.filter((r) => !r.artifacts.length).length,
+    refreshable: all.filter((a) => a.state === 'behind' && a.applicable && !a.written).length,
+    written: written.length,
+  };
+
+  if (opts.json) {
+    print(JSON.stringify({
+      generated: nowISO(),
+      handbook: { version: hb.version, untagged: hb.untagged, root },
+      registry: registryPath,
+      applied: !!opts.apply,
+      repos, written, failed, summary,
+    }, null, 2));
+    return summary.behind > 0 ? 1 : 0;
+  }
+
+  // --- report ------------------------------------------------------------
+  print(`registry:  ${registryPath}`);
+  print(`handbook:  ${hb.version}${hb.untagged ? ' (untagged — stamp comparison inactive)' : ''}`);
+  print('');
+  if (hb.untagged) {
+    warn('the handbook has no tags — there is no version line to compare against. Tag it, then re-run.');
+    return 0;
+  }
+
+  const rows = [];
+  for (const r of repos) {
+    if (!r.artifacts.length) {
+      if (!opts.quiet) rows.push([r.label, '—', 'n-a', r.note || 'nothing to assess']);
+      continue;
+    }
+    for (const a of r.artifacts) {
+      if (opts.quiet && a.state === 'current') continue;
+      const move = a.from ? `${a.from} → ${a.to}` : `→ ${a.to}`;
+      const mark = a.written ? 'updated' : a.state;
+      const detail = a.writeError ? `WRITE FAILED: ${a.writeError}` : `${move}  ${a.reason}`;
+      rows.push([r.label, a.file, mark, detail]);
+    }
+  }
+  if (rows.length) print(table(rows, ['REPO', 'ARTIFACT', 'STATE', 'DETAIL']));
+  else print('Nothing to report — every stamped artifact is current.');
+
+  print('');
+  print(`${summary.repos} repo(s), ${summary.artifacts} stamped artifact(s): ` +
+    `${summary.current} current, ${summary.behind} behind, ${summary.diverged} diverged, ` +
+    `${summary.unstamped} unstamped, ${summary.na} n-a.`);
+  if (summary.skippedRepos) {
+    print(`${summary.skippedRepos} repo(s) had nothing to assess (nothing adopted, an audit-only slug, a missing path, or the handbook itself).`);
+  }
+
+  if (opts.apply) {
+    if (written.length) {
+      print(`Refreshed ${written.length} file(s) to ${hb.version}:`);
+      for (const w of written) print(`  ✓ ${w.repo}  ${w.file}  (${w.template} ${w.from} → ${w.to})`);
+      print('');
+      print('NOTHING was committed, staged or pushed — that is deliberate: each repo has its own');
+      print('tier and trunk rules. Review with `git diff` and commit through that repo\'s own flow.');
+    } else {
+      print('Nothing was refreshable — no files were written.');
+    }
+    for (const f of failed) warn(`could not write ${f.repo} ${f.file}: ${f.err}`);
+  } else if (summary.refreshable) {
+    print(`${summary.refreshable} pristine copy/copies can be refreshed: re-run with --apply.`);
+  }
+
+  if (summary.diverged || summary.unstamped) {
+    print(`${summary.diverged} diverged + ${summary.unstamped} unstamped need a human — never written by this command.`);
+    print('  Review the diff, take what you want, then: colab template <name> --force');
+  }
+
+  return summary.behind > 0 ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
 // ship — the ONE sanctioned door for code-wrap Phase B (session branch → TRUNK).
 //
 // Autonomy is granted by the REPO (project.yml `autonomy: auto-trunk`), never by the caller: a
@@ -2274,6 +2578,9 @@ Commands:
   doctor [--prune] [--ttl H] [--json]   heal dead worktrees / orphan + stale claims / orphan ports
   release-notes [<range>] [--repo P] [--out F] [--headline "..."]   grouped Markdown release summary
   template [<name>] [--dest F] [--repo P] [--force]   copy a handbook workflow template, stamped
+  update [<repo>...] [--apply] [--json] [--quiet]   sweep the fleet for stamped copies that fell
+                                        behind a changed template; --apply refreshes the pristine
+                                        ones (never commits, never touches a hand-edited copy)
   register [<path>] [--remove] [--list]   add a repo to BOTH fleet registries (repos.txt + config.json)
   config [show|add-repo P|rm-repo P|set K V]
 
@@ -2300,6 +2607,7 @@ function main(argv) {
     case 'doctor': return cmdDoctor(rest);
     case 'release-notes': return cmdReleaseNotes(rest);
     case 'template': return cmdTemplate(rest);
+    case 'update': return cmdUpdate(rest);
     case 'register': return cmdRegister(rest);
     case 'config': return cmdConfig(rest);
     case undefined:

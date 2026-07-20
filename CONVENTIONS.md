@@ -412,6 +412,19 @@ unknown template name, or a stamp newer than the handbook are advisories. A flag
 reconciled deliberately: read the diff, take what you want, `colab template <name> --force`,
 commit. No remote calls, no silent updates — an honest "you are behind" report.
 
+The other half of that loop is **`colab update`**: an outward sweep from the machine holding
+the registry. It classifies every stamped copy and, with `--apply`, refreshes only those still
+pristine as of their own stamp. It never commits, and it never rewrites a hand-edited copy — a
+repo that edited its CI keeps its edit and gets a report instead. Two consequences worth
+stating, because both are deliberate:
+
+- **A stamp older than the current version is not "behind".** Behind means the template
+  *actually changed* since that stamp — checked with `git log <stamp>..HEAD` scoped to the
+  template's own path. Comparing version strings instead would mark the entire fleet stale on
+  every release and train everyone to ignore the report.
+- **An unstamped copy is never rewritten**, by any flag. Unknown lineage means we cannot know
+  what replacing it would destroy; it is reported, and a human re-copies deliberately.
+
 ### The fleet registry is private
 
 The list of repos the audit sweeps lives at `~/.colab/repos.txt` — machine-local, never
