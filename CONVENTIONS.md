@@ -21,7 +21,8 @@ tool you must adopt.
 
 ## 1. The model in one picture
 
-Which model a repo uses depends on **one question: does it deploy to production?**
+Which model a repo uses depends on **two questions: does it deploy to production, and
+if so, what gates that deploy?**
 
 ```
 TIER B — no production yet
@@ -29,11 +30,20 @@ TIER B — no production yet
                            │
                         your CI
 
-TIER A — has production
+TIER C — live; the promotion IS the deploy
+  feat/<slug>-<issue> ──▶ dev ──▶ main
+                           │       │
+                        fast CI  deploy
+
+TIER A — live; a tag deploys
   feat/<slug>-<issue> ──▶ dev ──▶ main ──▶ tag v1.2.0
                            │       │        │
                         fast CI  full CI  deploy
 ```
+
+Count the gates between a merge and users: **B** has none (no production), **C**
+has one (the promotion), **A** has two (the promotion, then the tag). C is A minus
+the tag.
 
 **Tier B is the default.** A repo starts here and stays here until something actually
 consumes a release. Do not create `dev` "to be ready" — see [§10](#10-anti-patterns).
@@ -53,20 +63,68 @@ trust. Write the suite first, then split.
 
 ## 2. Tiers
 
-| | **Tier B** | **Tier A** |
-|---|---|---|
-| Has production | no | yes |
-| Trunk (where sessions merge) | `main` | `dev` |
-| Release branch | — | `main` |
-| CI on trunk | fast | fast |
-| CI on `main` | — | full suite |
-| Tags | optional | required, `v*.*.*` |
-| Deploy trigger | none | tag push |
+| | **Tier B** | **Tier C** | **Tier A** |
+|---|---|---|---|
+| Has production | no | yes | yes |
+| Gates between merge and users | 0 | 1 | 2 |
+| Trunk (where sessions merge) | `main` | `dev` | `dev` |
+| Release branch | — | `main` (= what is live) | `main` |
+| CI on trunk | fast | fast | fast |
+| CI on `main` | — | full suite | full suite |
+| Tags | optional | optional | required, `v*.*.*` |
+| Deploy trigger | none | the `dev` → `main` promotion | tag push — or a human running the repo's runbook |
+
+**A, B and C are labels, not grades.** Read down the table naively and `C` looks
+like a worse `B` — it is not. `B` has no production at all: a tier B repo cannot
+break anything for users, because it has none. The letters name *shapes*, not
+seriousness or maturity. Moving `B` → `C` is not a demotion, and `C` → `A` is not
+a reward for good behaviour; each is a claim about how many gates your pipeline
+really has. Claim the one that is true.
+
+**The first tier question is "is there a production target *today*?", not "is
+deploying automated?"** No production → Tier B, and an imminent launch is still B.
+Production → A or C, and the second question decides which: **does a deliberate
+release artifact gate production, or does the promotion itself ship?** A tag ritual
+someone actually honours → A. The `dev` → `main` merge goes straight to users → C.
+
+A repo that is live but ships by hand — rsync, `docker compose up -d --build`, an
+upload — is Tier A with `deploy: manual`, naming its procedure in `runbook:`: the
+promotion there does not itself deploy, a human running the runbook does, which is
+still two acts. Automation is a property of the pipeline; the tier is a property of
+the *stakes and the gates*, and the stakes are set by production existing. Forcing
+any live repo to Tier B would make it declare `production: null` — a lie about a
+live product, which is the failure [§10](#10-anti-patterns) is entirely about.
+
+Hand-deployed Tier A keeps the same two branches, and they earn their keep: `main`
+is **what is currently running on the host**, `dev` is where sessions land, and the
+`dev` → `main` promotion is the deliberate "I am about to deploy" act. That is what
+preserves the meaning of `main` in the absence of a workflow — it is the only record
+of what shipped and when.
+
+**Tier C exists because a tag ritual nobody honours is worse than no tag ritual.** A
+live but low-stakes site — a brochure page, an internal dashboard — gains nothing from
+cutting versions, and a repo forced to pretend it does ends up with a `main` that
+deploys on every push and docs claiming a gate that was never there. C describes that
+shape honestly: `deploy: push-main`, `main` is what is live, and the promotion is the
+one moment where someone decides to ship. It is not a lesser A; it is a different gate
+count, chosen deliberately.
+
+**Deploying straight off a `main` push does not meet Tier A's contract — it meets
+C's.** `deploy: push-main` is a legal value and a perfectly reasonable way to ship
+software; for the repos on it, pushing `main` genuinely does deploy, and a marker file
+that describes something other than reality is the failure
+[§8](#8-conformance-and-reconciliation) is about. The mismatch is with the *tier*: A's
+contract is that a deliberate release artifact gates production ([§6](#6-releases)),
+and where every push to `main` reaches users there is no such artifact. So `tier: A` +
+`push-main` is a finding, and the usual fix is **retiering to C** — no pipeline change,
+the descriptor simply stops claiming a gate it never had. Migrating to a tag trigger
+(`deploy: tag`) or declaring a hand-deploy (`deploy: manual` + `runbook:`) remain the
+alternatives when the site has genuinely earned them.
 
 **"Trunk" is a role, not a branch name.** It means *the branch sessions merge into* — `main`
-in Tier B, `dev` in Tier A. When our internal docs say "merge về trunk" or "trunk luôn sống",
-they mean the role. Read `project.yml` to learn which branch that is in a given repo. Never
-create a branch literally named `trunk`.
+in Tier B, `dev` in Tiers A and C. When our internal docs say "merge về trunk" or "trunk
+luôn sống", they mean the role. Read `project.yml` to learn which branch that is in a given
+repo. Never create a branch literally named `trunk`.
 
 ---
 
@@ -76,12 +134,18 @@ Every repo commits this file. It is how a human or an agent learns the repo's st
 guessing, without an API call, and even when the repo has no GitHub remote at all.
 
 ```yaml
-tier: B                  # A = has production · B = none yet
-trunk: main              # dev (tier A) · main (tier B)
+tier: B                  # A = live, tag deploys · C = live, promotion deploys · B = no production
+trunk: main              # dev (tiers A, C) · main (tier B)
 production: null         # url, or null for tier B
-deploy: none             # tag (tier A) · none (tier B)
+deploy: none             # tag · manual (tier A) · push-main (tier C) · none (tier B)
 stack: capacitor-vite    # free-form; describe the repo honestly
 ```
+
+`deploy` says **how** the repo reaches production, never **whether** production exists.
+`manual` means a human runs a documented procedure; it then requires
+`runbook: <path>` naming that document, and the audit checks the file is really
+there. A hand-deploy nobody wrote down is how a repo ends up with exactly one
+person able to ship it.
 
 `stack` is a **free-form string**, not a fixed list. Describe what the repo actually is. A
 closed enum was tried and immediately failed on a Capacitor app that was neither a plain SPA
@@ -89,7 +153,7 @@ nor a mobile-native project.
 
 Optional toolchain keys (`node:`, `php:`, …) may be added — see [§7](#7-ci-and-toolchain).
 
-Mirror the tier as a GitHub **topic** (`tier-a` / `tier-b`) so `gh repo list --topic tier-a`
+Mirror the tier as a GitHub **topic** (`tier-a` / `tier-b` / `tier-c`) so `gh repo list --topic tier-a`
 gives a fleet-wide view. The file is the source of truth; the topic is for discovery.
 
 Full field reference: [`project.schema.md`](project.schema.md).
@@ -109,9 +173,12 @@ issue number in the name means the claim registry, the worktree, and the Issue l
 without a lookup table.
 
 **A branch may carry a group of related issues** — suffix them all:
-`fix/import-fixes-115-114-113`. Claim every issue in the group before starting; release
-each as it completes. The branch (and its worktree, if any) stays alive until the last
-one is done.
+`fix/import-fixes-115-114-113`. Claim every issue in the group before starting. The branch
+(and its worktree, if any) stays alive until the last one is done, and **every claim in the
+group is released together when the session wraps** — unconditionally, including issues
+that did not get finished. Releasing is about freeing the issue for someone else, not about
+declaring it done; an unfinished issue that stays claimed silently blocks whoever picks it
+up next.
 
 **Branches that predate adoption are grandfathered.** Do not rename them — several may be
 checked out in live worktrees, and renaming breaks active sessions for no benefit. Apply the
@@ -126,7 +193,7 @@ these prefixes. A commit with no prefix is invisible in release notes.
 **Merging:**
 
 - Feature branch → trunk: **squash**, so trunk history is one commit per unit of work.
-- `dev` → `main` promotion (Tier A only): **`--no-ff` merge commit**, never squash. The merge
+- `dev` → `main` promotion (Tiers A and C): **`--no-ff` merge commit**, never squash. The merge
   commit *is* the release boundary; squashing it destroys the record of what shipped together.
 - **The merge message closes its issues: write `Closes #N`** (one per issue in the group),
   not a bare `(#N)` reference. GitHub auto-closes on the keyword and ignores the reference —
@@ -160,21 +227,36 @@ The label does not exist in a fresh repo. Creating it is part of adoption ([§9]
 
 ### Fast path — local cache
 
-`~/Future/.claude/issues.active` remains a zero-latency local read for parallel sessions on
-the same machine, written automatically when a worktree is created.
+The `colab` CLI keeps a machine-local cache at **`~/.colab/state.json`** (override the
+directory with `COLAB_HOME`), written automatically when you claim an issue or create a
+worktree. It is a zero-latency read for parallel sessions **on the same machine** — no API
+call, no rate limit.
 
-**It is a cache, not the truth.** It is machine-local and uncommitted, so it cannot see other
-people's work — and manual trunk claims are never auto-healed, so they accumulate. When the
-cache and GitHub disagree, **GitHub wins**.
+**It is a cache, not the truth.** It is machine-local and uncommitted, so it cannot see
+work claimed from any other machine or by any other person. When the cache and GitHub
+disagree, **GitHub wins.**
+
+Reconcile it rather than trusting it:
+
+```sh
+colab claims --sync      # reconcile local cache against GitHub
+colab doctor --prune     # free claims whose worktrees no longer exist
+```
 
 ### Rules
 
 - Claim **before** you start, not when you open the PR. An unclaimed issue is fair game.
-- **Claims are enforced, not advisory.** `colab claim` and `colab worktree new` *refuse* an
-  issue that already has a live claim (local state for same-machine, GitHub for
+- **A live claim is enforced, not advisory.** `colab claim` and `colab worktree new`
+  *refuse* an issue that already has a live claim (local state for same-machine, GitHub for
   cross-machine), naming the holder. `--force` takes over loudly — a takeover is always a
   visible, logged act. Advisory warnings were tried first; measurement showed they get
   skipped exactly when they matter.
+
+  Know the limit of that guarantee: it protects an issue only while a claim is *live*, and
+  since a session releases its whole group at wrap, an issue you left unfinished is
+  immediately claimable again. The refusal prevents two sessions holding one issue at the
+  same time; it does not reserve work for later. If you intend to come back to something,
+  say so on the Issue — the claim will not hold it for you.
 - **A claim carries its details as a structured Issue comment** —
   `🔒 Claimed — worktree … · branch … · host … · <timestamp>` on claim, `✅ Released` on
   release. The label answers *whether* an issue is taken; the comment answers *by what*,
@@ -195,7 +277,10 @@ cache and GitHub disagree, **GitHub wins**.
 
 ## 6. Releases
 
-Tier A only. A release is: **merge `dev` → `main`, then tag.**
+Tiers A and C — the two tiers that have production. The sequence differs by exactly one
+step, the tag.
+
+**Tier A.** A release is: **merge `dev` → `main`, then tag.**
 
 ```sh
 git checkout main && git merge --no-ff dev && git push
@@ -205,12 +290,38 @@ git tag v1.2.0 && git push origin v1.2.0     # ← this is what deploys
 Pushing the tag is the deploy trigger. Pushing `main` is **not** — that only runs the full
 test suite. This separation lets you promote code and decide to ship it later.
 
+**Tier C.** A release is: **merge `dev` → `main`. That is the deploy.**
+
+```sh
+git checkout main && git merge --no-ff dev && git push   # ← this is what deploys
+```
+
+Same `--no-ff` merge, never squash, for the same reason: the merge commit is the record of
+what shipped and when. There is no tag step and no "ship it later" — the promotion is
+irreversible in the sense that matters, because users have it the moment you push. Treat
+the promotion itself with the seriousness Tier A gives the tag: that is the whole gate.
+
+Tagging on C is optional and harmless — nothing fires from it — but if you find yourself
+wanting tags consistently, that is the signal the repo has earned Tier A ([§9](#9-adopting-this)).
+
+On a `deploy: manual` repo the sequence is the same, with the last step performed by a
+person: promote, tag, then run the runbook. Nothing about the absence of automation makes
+promotion safer to delegate — it makes it *less* safe, because the deploy that follows has
+no gate but the operator. Promotion there always requires a human, and `promotion:
+main-loop` cannot say otherwise.
+
 That separation is also a permission ladder, one rung per boundary: **ship**
 (branch→trunk, gated by `autonomy:`) · **promote** (trunk→main, gated by `deploy:` +
 `promotion:` — safe to automate only where deploy is tag-gated) · **release** (the tag —
 always a human act, on every repo, with no field that can say otherwise). The
 `pre-push-guard` hook enforces the first two rungs mechanically; `COLAB_SHIP` never opens
 `main`.
+
+**On Tier C the ladder has two rungs, not three, and the second is the deploy.** Promotion
+there always requires a human (`COLAB_HUMAN=1`) for precisely that reason — `promotion:
+main-loop` applies only where `deploy: tag` makes promotion verification-only, so it can
+never apply to C. Nothing about C widens what an agent may do: `autonomy: auto-trunk` still
+only ever merges into `dev`, which does not deploy.
 
 **Versioning** — SemVer. Patch for fixes, minor for features, major for breaking changes.
 Pre-1.0 repos use `v0.x.y` and treat minor as "meaningful increment".
@@ -318,11 +429,15 @@ here.
 ### Any repo, first-time adoption
 
 1. **Determine the tier.** Does a deploy target exist *today*? Not "soon" — today. If no,
-   Tier B. An imminent launch does not make a repo Tier A.
+   Tier B; an imminent launch does not change that. If yes, ask the second question: does
+   a **tag** gate production (Tier A), or does the `dev` → `main` promotion itself deploy
+   (Tier C)? **Deploying by hand does not make a repo Tier B** — the question is whether
+   production exists, not whether shipping is automated ([§2](#2-tiers)).
 2. **Write `.github/project.yml`** ([§3](#3-githubprojectyml--the-marker)).
 3. **Create the claim label** — it will not exist yet:
    `gh label create in-progress --color FBCA04 --description "Claimed by an active session"`
-4. **Add the tier topic** — `gh repo edit <owner>/<repo> --add-topic tier-b`
+4. **Add the tier topic** — `gh repo edit <owner>/<repo> --add-topic tier-b` (or
+   `tier-c` / `tier-a`)
 5. **Add the handbook pointer to the repo's `CLAUDE.md`** — copy
    [`templates/repo-CLAUDE-block.md`](templates/repo-CLAUDE-block.md). If the repo has no
    `CLAUDE.md` yet, create one with just this block. **Do not skip this.** It is the only
@@ -336,23 +451,54 @@ here.
    the reserved-ports aggregation. An unregistered repo is invisible to the fleet
    audit, so drift in it accumulates unseen.
 8. **Leave existing branches alone.** Grandfathered ([§4](#4-branches-and-commits)).
-9. **Do not create `dev`** unless the repo is genuinely Tier A.
+9. **Do not create `dev`** unless the repo is genuinely Tier A or Tier C.
 
-### Promoting Tier B → Tier A
+### Going live: Tier B → Tier C or Tier A
 
-Do this **on the day a deploy target exists** — not before. Order matters:
+Do this **on the day a deploy target exists** — not before. The steps are shared; only
+the mechanism differs, so decide first which tier you are going to ([§2](#2-tiers)):
+does a tag gate production (A), or does the promotion itself deploy (C)?
 
-1. Add the deploy workflow, pointed at the real production host.
+1. **Write down the path to production.** For **C**: the deploy workflow, triggered by a
+   push to `main`. For **A**: the deploy workflow triggered by a **tag** — or, if the repo
+   ships by hand, the runbook (hosts, commands, order, how to verify). One of these must be
+   committed before you go on.
 2. `git checkout -b dev main && git push -u origin dev`
 3. Set the repo's default branch to `dev`, so PRs target it by default.
 4. **Add `dev` to every CI workflow's trigger branches.** The trunk just moved; CI that
    still gates only `main` will run zero checks on your actual work — and nothing will
    look broken ([§7](#7-ci-and-toolchain)).
-5. Update `project.yml`: `tier: A`, `trunk: dev`, `deploy: tag`, real `production:` URL.
-6. Swap the topic to `tier-a`; update the internal project table (ports, prod URL).
-7. Tag the first release.
+5. Update `project.yml`:
+   - **Tier C** — `tier: C`, `trunk: dev`, real `production:` URL, `deploy: push-main`.
+   - **Tier A** — `tier: A`, `trunk: dev`, real `production:` URL, and `deploy: tag`, or
+     `deploy: manual` plus `runbook: <path>` for a hand-deployed repo. Not `push-main`:
+     a fine mechanism, but it cannot meet A's release-gate contract — that shape is C.
+6. Swap the topic to `tier-c` / `tier-a`; update the internal project table (ports, prod URL).
+7. **Tier A only:** tag the first release. (On a `manual` repo, tags are still worth
+   cutting: they name what you deployed. Nothing fires from them.) On C there is nothing
+   to tag — the promotion in step 2's new flow is the release.
 
-Step 1 comes first on purpose. `main` only becomes meaningful once something consumes it.
+Step 1 comes first on purpose. `main` only becomes meaningful once something consumes it
+— and a human following a runbook is something consuming it, as long as the runbook is
+committed. What must not exist is a `main` that nothing and nobody reads.
+
+### Tier C → Tier A — when the site earns a release ritual
+
+Do this when you find yourself *wanting* to name what shipped: hotfixes are getting
+confused with feature work, or someone has asked "what version is live?" and there was no
+answer. Not before — an unused tag ritual decays exactly like an unused branch.
+
+1. **Retrigger the deploy workflow on a tag** (`on: push: tags: ['v*.*.*']`) instead of a
+   `main` push. This is the whole change; until it lands, the tier claim would be false.
+2. Update `project.yml`: `tier: A`, `deploy: tag`. `trunk` stays `dev` — the branch shape
+   is identical, which is what makes this migration cheap.
+3. Swap the topic to `tier-a`.
+4. Tag the current `main`, so the first tagged release names what is already live.
+
+The reverse — **A → C** — is the fix the audit points at when a repo declares `tier: A`
+with `deploy: push-main`. It is descriptor-only: set `tier: C`, leave the pipeline, the
+branches and the workflow exactly as they are, and swap the topic. Nothing about how the
+repo ships changes; it simply stops claiming a gate it never had.
 
 ---
 
@@ -374,6 +520,14 @@ promotion is a tax you pay on every hotfix.* We use two, deliberately.
 zero tags. Every deploy in its history was a manual dispatch — the workflow was copy-pasted
 from a sibling and the tag ritual never took. *Copy-pasted CI encodes intentions nobody
 adopted.* If you copy a template, read it and make it yours.
+
+**A merge that ships itself — while claiming otherwise.** Two live repos deploy on every
+push to `main`, and both declare Tier A, whose contract says a release artifact gates
+production. Nothing is broken and nothing looks wrong — which is the trouble: there is no
+moment at which someone decides "this goes to users now", because the merge already did.
+Hotfix and half-finished refactor leave by the same door, at the same speed, with the same
+amount of thought. *The mechanism is fine; claiming a gate you do not have is not.* Now a
+finding, so the descriptor and the pipeline have to agree.
 
 **Docs describing a repo that doesn't exist.** Our most heavily documented repo prescribes
 trunk `main` (its actual default is `master`), "rebase, never squash" (every commit is a

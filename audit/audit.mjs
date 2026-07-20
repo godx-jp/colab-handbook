@@ -542,8 +542,25 @@ function makeSource(target) {
 
 const BRANCH_RE = /^(feat|fix|docs|chore|refactor|test|perf)\/[a-z0-9._-]+$/;
 const INTEGRATION_BRANCHES = new Set(["main", "dev", "master", "trunk"]);
-const VALID_TIERS = new Set(["A", "B"]);
-const VALID_DEPLOY = new Set(["tag", "push-main", "none"]);
+// Tiers count the GATES between a merge and users: B has no production (0), C promotes and
+// that promotion IS the deploy (1), A promotes to verify and a tag deploys (2). They are
+// labels, not grades — C is not "worse than B"; B has no production at all.
+const VALID_TIERS = new Set(["A", "B", "C"]);
+const VALID_DEPLOY = new Set(["tag", "manual", "push-main", "none"]);
+// `deploy` answers HOW a repo reaches production, never WHETHER it is tier A — the tier
+// test is "does a deploy target exist today?". `manual` describes the honest third case:
+// production exists, but shipping is a human running a documented runbook (rsync, compose
+// up) with no workflow and no tag trigger. Before it existed, such repos had to either
+// claim `tier: A, deploy: tag` (and fail the deploy-workflow rule) or claim `tier: B` and
+// declare `production: null` — a lie, which §8 calls the worst outcome we can produce.
+// `push-main` stays in the enum and always will: for the repos using it, a push to `main`
+// GENUINELY triggers the deploy, and a project.yml that describes something other than what
+// happens is the worst outcome this tool can produce (§8). It is a legitimate mechanism —
+// the finding is on the combination `tier: A` + `push-main` (see the tier A block), because
+// tier A's contract requires a release artifact gating production, which this shape has no
+// room for. That is a mismatch with the tier, not a defect in the mechanism — and `tier: C`
+// is where the mechanism fits, so the finding now has somewhere to point rather than only
+// telling repos what they are not.
 // NOTE: `stack` is deliberately NOT validated against a closed set. The old enum had
 // no value for a Capacitor mobile app and forced everyday to be mislabelled, so the
 // enum was doing harm. It is now free-form documentation.
@@ -584,7 +601,7 @@ function auditRepo(target, ctx) {
   info.tier = tier;
 
   if (cfg) {
-    if (!VALID_TIERS.has(tier)) fail(`tier is ${JSON.stringify(tier)}, expected "A" or "B"`);
+    if (!VALID_TIERS.has(tier)) fail(`tier is ${JSON.stringify(tier)}, expected "A", "B" or "C"`);
     if (deploy !== null && !VALID_DEPLOY.has(deploy)) fail(`deploy is ${JSON.stringify(deploy)}, expected one of: ${[...VALID_DEPLOY].join(", ")}`);
     // Only when the key exists but is blank — a wholly absent key is already
     // reported by the missing-keys check above, and saying it twice is noise.
@@ -593,22 +610,64 @@ function auditRepo(target, ctx) {
     // ---- tier <-> trunk coherence ------------------------------------------
     if (tier === "A" && trunk !== "dev") fail(`tier A requires trunk "dev", found ${JSON.stringify(trunk)}`);
     if (tier === "B" && trunk !== "main") fail(`tier B requires trunk "main", found ${JSON.stringify(trunk)}`);
+    // C uses A's two-branch split: main = what is live, dev = where sessions land.
+    if (tier === "C" && trunk !== "dev") fail(`tier C requires trunk "dev", found ${JSON.stringify(trunk)} — C uses the same split as A (main = what is live, dev = where sessions land)`);
   }
 
   // ---- deploy workflow presence -------------------------------------------
   const workflows = src.listDir(".github/workflows").filter((f) => /\.ya?ml$/.test(f));
   const deployWorkflows = workflows.filter((f) => /^deploy[-.]/.test(f));
 
+  const runbook = cfg && "runbook" in cfg ? cfg.runbook : null;
+
   if (tier === "A") {
-    if (!deployWorkflows.length) fail("tier A but no .github/workflows/deploy-*.yml — the path to production is not in the repo");
+    // An automated path to production must be IN the repo; a manual one must be WRITTEN
+    // DOWN in it. Either way the answer to "how does this reach production?" is committed.
+    if (deploy !== "manual" && !deployWorkflows.length) fail("tier A but no .github/workflows/deploy-*.yml — the path to production is not in the repo (use deploy: manual + runbook: if it really ships by hand)");
     if (production === null || production === "") fail("tier A but production is null — set the live URL, or drop to tier B");
-    if (deploy === "none") fail('tier A with deploy: none is contradictory — use "tag" or "push-main"');
+    if (deploy === "none") fail('tier A with deploy: none is contradictory — use "tag" or "manual"');
+    if (deploy === "manual") checkRunbook(src, runbook, fail, warn);
+    // A TIER MISMATCH, not a bad mechanism. push-main is a perfectly good way to deploy;
+    // it just cannot satisfy tier A's contract, which is that a deliberate release artifact
+    // gates production. Here every push to main reaches users, so that gate does not exist.
+    // The message says "options include" on purpose: the two named exits are not exhaustive
+    // and must not read as though they were.
+    if (deploy === "push-main") {
+      fail(
+        "tier A with deploy: push-main — tier A's contract is that a deliberate release " +
+        "artifact gates production, and here every push to main reaches users with no such " +
+        "gate. Options include: retier to C (tier C is exactly this shape — promotion IS the " +
+        "deploy — and is the honest home for a live, low-stakes site), migrate the pipeline " +
+        "to a tag trigger (deploy: tag), or — if shipping really is run by hand — " +
+        "deploy: manual plus runbook: naming the committed procedure.",
+      );
+    }
+  } else if (tier === "C") {
+    // C = "promotion IS the deploy": one gate (the dev→main merge) stands between a merge and
+    // users. It exists because a tag ritual nobody honours is worse than no tag ritual — a
+    // live low-stakes site had nowhere honest to sit, so it claimed A and failed A's contract.
+    if (production === null || production === "") fail("tier C but production is null — tier C is for repos that ARE live; set the live URL, or drop to tier B");
+    if (!deployWorkflows.length) fail("tier C but no .github/workflows/deploy-*.yml — the path to production is not in the repo");
+    // C is defined by its mechanism: the promotion itself deploys. Any other `deploy` value
+    // describes a DIFFERENT number of gates, which is a different tier — so each wrong value
+    // is redirected to the tier that actually matches it, rather than being merely rejected.
+    if (deploy !== "push-main") {
+      if (deploy === "tag") {
+        fail('tier C with deploy: tag — a tag gating production is tier A\'s shape (promotion verifies, the tag deploys = two gates). If you really have a tag ritual, you are tier A; if the tag is aspirational, drop it and use deploy: push-main');
+      } else if (deploy === "manual") {
+        fail('tier C with deploy: manual — there the promotion does NOT deploy (a human running the runbook does), which is tier A with deploy: manual. Retier to A, or use deploy: push-main if the promotion itself ships');
+      } else if (deploy === "none") {
+        fail('tier C with deploy: none is contradictory — tier C means the promotion deploys. Use deploy: push-main, or drop to tier B if nothing is live');
+      } else {
+        fail(`tier C requires deploy: push-main, found ${JSON.stringify(deploy)} — C is defined as "promotion IS the deploy"`);
+      }
+    }
   } else if (tier === "B") {
     // This was silently unchecked before: a tier B repo that actually deploys is
     // either mistiered or shipping to production with none of the tier A gates.
-    if (deploy !== null && deploy !== "none") fail(`tier B must have deploy: none, found ${JSON.stringify(deploy)} — retier to A if this really deploys`);
-    if (production !== null && production !== "") fail(`tier B must not declare a production URL, found ${JSON.stringify(production)} — retier to A`);
-    if (deployWorkflows.length) fail(`tier B but a deploy workflow exists (${deployWorkflows.join(", ")}) — retier to A, or delete it`);
+    if (deploy !== null && deploy !== "none") fail(`tier B must have deploy: none, found ${JSON.stringify(deploy)} — if this really deploys, retier: C when the promotion itself ships, A when a tag or a runbook gates it`);
+    if (production !== null && production !== "") fail(`tier B must not declare a production URL, found ${JSON.stringify(production)} — retier to C (promotion deploys) or A (a tag/runbook gates the deploy)`);
+    if (deployWorkflows.length) fail(`tier B but a deploy workflow exists (${deployWorkflows.join(", ")}) — retier to C or A, or delete it`);
   }
 
   // ---- declared trunk actually exists -------------------------------------
@@ -650,15 +709,39 @@ function auditRepo(target, ctx) {
   return finish();
 }
 
+// `deploy: manual` promises that the hand-deploy procedure is written down and findable.
+// An unwritten runbook is how "only one person can ship this" happens, so the field is
+// required and the path is verified — but verification degrades by source:
+//
+//   local working tree  → authoritative. A declared path that is not on disk is a FAIL.
+//   remote (gh API)     → best-effort. A miss can mean "file absent" OR "the API read
+//                         failed" (private repo, token scope, rate limit, default branch
+//                         differs). Those are indistinguishable from here, so a miss is an
+//                         ADVISORY naming both possibilities. We would rather under-report
+//                         than invent a violation — the same reason `branches === null`
+//                         downgrades the trunk check to "unverified".
+function checkRunbook(src, runbook, fail, warn) {
+  if (runbook === null || runbook === "") {
+    fail("deploy: manual requires runbook: — name the committed doc that describes the hand-deploy (e.g. docs/deploy.md), or nobody but you can ship");
+    return;
+  }
+  const path = String(runbook).trim().replace(/^\.\//, "");
+  if (src.readFile(path) !== null) return;
+  if (src.kind === "local") fail(`runbook "${runbook}" does not exist in the repo — deploy: manual points at a doc that is not there`);
+  else warn(`runbook "${runbook}" not found via the API — either it is missing, or the read failed (permissions/branch); verify in a checkout`);
+}
+
 // The bug this catches (found in the wild in shoots/hr-double/corebooks): a repo moved
 // its trunk (main -> dev) but its CI workflows' push triggers still named the OLD
 // branches, so every merge to the real trunk ran ZERO CI — silently — while the B1
 // gate ("check trunk CI is green") checked runs that could never exist.
 //
-// Deploy/release workflows are NOT CI gates: a tier-A repo's deploy-*.yml firing on a
-// push to main (dreamlab/talkie push-main deploy) is correct and must not be flagged.
-// We exclude them by filename (deploy*/release*) and by trigger shape (a tags-only or
-// workflow_dispatch-only workflow does no branch gating and is not CI-type).
+// Deploy/release workflows are NOT CI gates: a deploy-*.yml firing on a push to main is a
+// deploy trigger, not a check, so it must never be counted as "the trunk is gated". We
+// exclude them by filename (deploy*/release*) and by trigger shape (a tags-only or
+// workflow_dispatch-only workflow does no branch gating and is not CI-type). This exclusion
+// is about what COUNTS AS CI here and says nothing about whether the setup is desirable —
+// a `deploy: push-main` repo is separately a tier A finding above.
 function checkTrunkCiGated(src, trunk, workflows, branches, fail, warn) {
   if (!trunk || !workflows.length) return;
 

@@ -26,7 +26,7 @@ LaunchAgent).
 node audit.mjs                          # audit the resolved repo list (see below)
 node audit.mjs --quiet                  # only repos with findings
 node audit.mjs --json                   # machine-readable, for a dashboard/cron
-node audit.mjs --local ~/Future/foo     # one local path, ad hoc (repeatable)
+node audit.mjs --local ~/code/my-repo   # one local path, ad hoc (repeatable)
 node audit.mjs godx-jp/hr-double        # one remote slug, ad hoc
 node audit.mjs --config other-list.txt  # a different repo list
 ```
@@ -39,9 +39,22 @@ the handbook's current version, so a scheduled run is self-documenting.
 ## What it checks, per repo
 
 - `.github/project.yml` present, parses, and has the required keys.
-- Tier ↔ trunk coherence: tier A → `dev`, tier B → `main`.
+- Tier ↔ trunk coherence: tiers A and C → `dev`, tier B → `main`.
 - Tier A must have a `deploy-*.yml` workflow **and** a non-null `production`, and must
   not say `deploy: none`.
+- Tier A must not say `deploy: push-main` — a **tier mismatch**, not a bad mechanism. The
+  value stays legal and describes those repos truthfully (a `main` push really does deploy
+  them); what it cannot do is meet tier A's contract that a deliberate release artifact
+  gates production, since every push to `main` reaches users. Options include migrating to
+  a tag trigger (`deploy: tag`) or, if it genuinely ships by hand, `deploy: manual` +
+  `runbook:` — but the usual fix is **retiering to C**, which is exactly this shape and
+  needs no pipeline change at all.
+- Tier C rules: `trunk: dev`, non-null `production`, `deploy: push-main`, and a
+  `deploy-*.yml` workflow. A wrong `deploy` value on C is redirected to the tier that
+  matches its gate count rather than merely rejected — `tag` and `manual` point back to A,
+  `none` points to B.
+- `deploy: manual` must name a `runbook:` and the file must exist (a local checkout is
+  authoritative; over the API a miss is only an advisory).
 - Tier B must have `deploy: none`, no `production` URL, and no deploy workflow. (This
   was silently unchecked before — a tier B repo could quietly ship to production with
   none of the tier A gates.)
@@ -56,8 +69,9 @@ the handbook's current version, so a scheduled run is self-documenting.
   - Deploy/release workflows are **not** CI gates and are excluded — by filename
     (`deploy*`/`release*`) and by trigger shape (a **tags-only** or
     **`workflow_dispatch`-only** workflow does no branch gating). So a `deploy-*.yml`
-    firing on a push to `main` (the `deploy: push-main` repos) is correct, never
-    flagged; only CI-type gating of the **trunk** is what this checks.
+    firing on a push to `main` is never *counted as CI* here; only CI-type gating of the
+    **trunk** is what this check is about. That exclusion is scoping: whether such a repo
+    should be tier A is a separate check (see the `project.yml` rules above).
   - A repo with **no CI-type workflow at all** is out of scope (that is "should this
     repo have CI?", a different question) — the check only catches CI that *exists but
     points at the wrong branch*.

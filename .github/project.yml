@@ -7,7 +7,10 @@
 #   tier        A = has a production deploy target. B = does not.
 #   trunk       Branch feature work merges into. Tier A -> dev, tier B -> main.
 #   production  Live URL, or null. Tier A must set it; tier B must leave it null.
-#   deploy      tag | push-main | none. Tier B must be none.
+#   deploy      tag | manual | push-main | none. HOW production is reached, not
+#               whether it exists — that is tier's job. Tier B must be none.
+#               `manual` (a human runs a documented procedure) also requires
+#               `runbook: <path>` naming that committed document.
 #   stack       FREE-FORM string. Describe the stack however reads best.
 #               Deliberately NOT an enum: the old closed list had no value for a
 #               Capacitor mobile app and forced a repo to be mislabelled, so the

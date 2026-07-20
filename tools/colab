@@ -2032,12 +2032,18 @@ human step. There is no --tag/--release flag; promote only ever merges trunk→m
 Two gates, both must pass:
   • HARD SAFETY (from the repo's deploy semantics — no field or flag can lower it):
       deploy: push-main → promoting IS a production deploy → requires COLAB_HUMAN=1
+      deploy: manual    → promoting is the human's "about to deploy" step → requires COLAB_HUMAN=1
       deploy: tag       → promotion is verification-only (heavy CI on main, no deploy)
       anything else / absent → treated as production-risk → requires COLAB_HUMAN=1 (fail-closed)
   • promotion field (project.yml \`promotion: human | main-loop\`, default human, fail-closed):
       on a deploy:tag repo, \`promotion: main-loop\` lets the main-loop promote with no human word;
       otherwise a human (COLAB_HUMAN=1) is required.
   Tier B (trunk == main) has NO promotion — ship goes straight to main; promote refuses.
+  Tier C (deploy: push-main) promotes like A, but the promotion IS the deploy — always human.
+
+On a deploy: manual repo a SUCCESSFUL promote leaves production untouched — main moves, nothing
+deploys, and no workflow will fire. The command prints the repo's runbook: as the required next
+step, because finishing it does not finish the job.
 
 Preconditions (✓/✗): trunk CI green · trunk == origin/trunk · main == origin/main · main checkout usable.
 
@@ -2046,6 +2052,47 @@ Options:
   --message "<msg>" full override of the merge commit message (default: the release: line)
   --dry             print the precondition table + plan; change nothing
 `;
+
+// The post-promotion notice for `deploy: manual`, as an array of lines (pure — testable).
+//
+// On `tag` and `push-main` repos something downstream still runs: the tag deploys later, or
+// the push just deployed. `manual` is the ONE case where a SUCCESSFUL command leaves the job
+// unfinished — main moved, production did not, and nothing else will ever fire. Said quietly,
+// that produces the exact failure this rung exists to prevent: a promoted main everyone reads
+// as "shipped" while users are still on the old code. So it gets a block, not a line, and it
+// names the runbook the operator has to go run.
+function manualDeployBlock(runbookRaw, mainName) {
+  const runbook = runbookRaw ? String(runbookRaw).trim() : '';
+  const L = [
+    '',
+    '  ┌─────────────────────────────────────────────────────────────────',
+    '  │ PRODUCTION IS NOT UPDATED — deploy: manual',
+    '  │',
+    `  │ ${mainName} now matches what you are ABOUT to put on the host.`,
+    '  │ Nothing has reached production. No workflow will fire. Until a',
+    `  │ human runs the deploy, ${mainName} is AHEAD of what users run.`,
+    '  │',
+  ];
+  if (runbook) {
+    L.push('  │ NEXT STEP — run this runbook by hand:', `  │     ${runbook}`);
+  } else {
+    // Never print an empty path: a blank line here would read as "no step required",
+    // which is the one thing that must not happen on this branch.
+    L.push(
+      '  │ NEXT STEP — UNKNOWN: project.yml declares no runbook:.',
+      '  │     The hand-deploy is not written down, so this command cannot',
+      '  │     tell you what to run. Add runbook: <path> (the audit flags',
+      '  │     its absence) and commit the procedure.',
+    );
+  }
+  L.push(
+    '  │',
+    '  │ Then tag what you deployed — nothing fires from it, but it is',
+    '  │ the record of what is on the host.',
+    '  └─────────────────────────────────────────────────────────────────',
+  );
+  return L;
+}
 
 function cmdPromote(argv) {
   const opts = parseArgs(argv, {
@@ -2084,7 +2131,9 @@ function cmdPromote(argv) {
     if (!human) {
       const why = deploy === 'push-main'
         ? `deploy=push-main — promoting ${trunk}→main IS a PRODUCTION DEPLOY`
-        : `deploy=${deploy || '(absent)'} — promoting ${trunk}→main may deploy to production (fail-closed)`;
+        : deploy === 'manual'
+          ? `deploy=manual — promoting ${trunk}→main is the "about to deploy" step, and the hand-deploy that follows has no gate but the operator`
+          : `deploy=${deploy || '(absent)'} — promoting ${trunk}→main may deploy to production (fail-closed)`;
       process.stderr.write(`✗ ${shortRepo(repoAbs)}: ${why}.\n`);
       process.stderr.write('  This requires a human: re-run with COLAB_HUMAN=1. (No field or flag can lower this bar.)\n');
       return 1;
@@ -2140,7 +2189,9 @@ function cmdPromote(argv) {
 
   const nextRelease = deployIsTag
     ? '  Release is a SEPARATE human step: git tag vX.Y.Z && git push origin vX.Y.Z'
-    : '  (deploy: push-main — this promotion IS the deploy; there is no separate tag step)';
+    : deploy === 'manual'
+      ? `  Deploy is a SEPARATE human step and this command does NOT perform it: promoting moves main only.\n  Production stays on the old code until a human runs the runbook${doc.runbook ? ` (${doc.runbook})` : ' — and project.yml names none'}.`
+      : '  (deploy: push-main — this promotion IS the deploy; there is no separate tag step)';
 
   if (opts.dry) {
     print(preOk ? '→ READY: preconditions pass. Re-run without --dry to promote.' : '→ NOT READY: fix the ✗ rows above.');
@@ -2181,6 +2232,12 @@ function cmdPromote(argv) {
 
   print('');
   print(`✓ Promoted ${trunk} → ${MAIN} @ ${sha}`);
+
+  if (deploy === 'manual') {
+    manualDeployBlock(doc.runbook, MAIN).forEach(print);
+    return 0;
+  }
+
   print(deployIsTag
     ? '  main CI now runs the heavy verification suite (no deploy — deploy is by tag).'
     : '  main push will now DEPLOY to production (deploy: push-main).');

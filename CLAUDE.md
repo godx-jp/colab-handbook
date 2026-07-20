@@ -18,15 +18,31 @@ that one ever disagree, `CONVENTIONS.md` wins — and report the discrepancy.
 
 ## Hard rules — each one exists because we measured the failure
 
+- **There are three tiers, and they are labels, not grades.** They count the
+  gates between a merge and users:
+  - **B** — no production. 0 gates. Trunk `main`.
+  - **C** — live; the `dev` → `main` promotion **is** the deploy. 1 gate.
+    Trunk `dev`, `deploy: push-main`.
+  - **A** — live; promotion verifies and a **tag** deploys. 2 gates. Trunk `dev`.
+
+  C is A minus the tag. It is *not* "worse than B" — B has no production at all.
+  Never treat a tier as a quality score, and never "upgrade" a repo's tier to be
+  helpful.
 - **Never create a branch named `trunk`.** "Trunk" is a role: the branch
-  sessions merge into. It is `main` (Tier B) or `dev` (Tier A). Read
+  sessions merge into. It is `main` (Tier B) or `dev` (Tiers A and C). Read
   `project.yml` to learn which.
 - **Never create a `dev` branch in a Tier B repo** — not even "to be ready".
   A release branch nothing consumes decays into noise (we have one 76 commits
-  stale to prove it). Tier promotion is a deliberate checklist
+  stale to prove it). Changing tier is a deliberate checklist
   ([§9](CONVENTIONS.md#9-adopting-this)), not a side effect.
-- **An imminent launch does not make a repo Tier A.** The test is: does a
-  deploy target exist *today*?
+- **An imminent launch does not make a repo live.** The test is: does a
+  deploy target exist *today*? Deploying **by hand** does not make a repo
+  Tier B — a live repo that ships by rsync or `docker compose` is Tier A with
+  `deploy: manual` and a `runbook:` path. `deploy:` says *how* it reaches
+  production, `tier:` says *whether* production exists and *what gates* it.
+- **`tier: A` + `deploy: push-main` is a finding, and the fix is usually
+  `tier: C`** — same pipeline, honest descriptor. Report it; do not retier a
+  repo yourself unless that is the task you were given.
 - Branch names: `^(feat|fix|docs|chore|refactor|test|perf)/[a-z0-9._-]+$`,
   ending in the issue number(s): `feat/onboard-redesign-23`, or for a group
   `fix/import-fixes-115-114-113`. Existing branches that violate this are
@@ -48,13 +64,19 @@ that one ever disagree, `CONVENTIONS.md` wins — and report the discrepancy.
 4. Release your claim: `gh issue edit <N> --remove-label in-progress`.
    Do this even if you didn't finish — a stale claim silently blocks others.
 
-## Releases — Tier A only, and not yours to perform
+## Releases — Tiers A and C, and not yours to perform
 
 Promotion (`dev` → `main`, `--no-ff`, never squash) and tagging are performed
 by the human operator. **Your job ends with the trunk merge prepared and the
 Issue updated.** Prepare a release; do not perform one. If you believe a
 release is overdue (e.g. a production bug fix is merged but unreleased), say
 so explicitly in your report — that situation has bitten us in payroll.
+
+**On Tier C the promotion *is* the deploy** — there is no tag afterwards, so
+that merge puts code in front of users immediately. It is therefore the most
+consequential thing in this file that an agent must never do unattended, not
+the least. `colab promote` requires `COLAB_HUMAN=1` there, and `promotion:
+main-loop` cannot apply (it is gated on `deploy: tag`).
 
 **One graduated exception — the trunk merge itself.** If the repo's
 `project.yml` says `autonomy: auto-trunk`, you may complete Phase B through
@@ -63,7 +85,12 @@ green, no new migrations, no hand-code conflicts) and refuses when any fail;
 a refusal means a human finishes, not that you improvise around it. Raw
 `git push` to the trunk is blocked by hook regardless. This exception never
 extends to promotion, tags, or anything that deploys — those are human on
-every repo, with no field that can say otherwise.
+every repo, with no field that can say otherwise. `deploy: manual` is not a
+loophole: with no automated gate after the promotion, it is the *strictest*
+case, and `colab promote` requires a human there exactly as it does on
+`push-main`. Tier C is not a loophole either — `auto-trunk` there still only
+merges into `dev`, which does not deploy; the deploying step (promotion) stays
+human, as on every tier.
 
 ## Worktrees — optional
 

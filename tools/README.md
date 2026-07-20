@@ -480,6 +480,8 @@ Two gates, **both** must pass:
 - **Hard safety** — derived from the repo's `deploy:` semantics, and **no field or flag can lower
   it**:
   - `deploy: push-main` → promoting main *is* a production deploy → requires `COLAB_HUMAN=1`.
+  - `deploy: manual` → promoting main is the human's own "about to deploy" step, and the deploy
+    that follows has no gate but the operator → requires `COLAB_HUMAN=1`.
   - `deploy: tag` → promotion is **verification-only** (heavy CI runs on main, nothing deploys).
   - anything else / absent → treated as production-risk → `COLAB_HUMAN=1` (fail-closed).
 - **`promotion:` field** (`project.yml`, `human` | `main-loop`, default `human`, fail-closed on
@@ -487,6 +489,7 @@ Two gates, **both** must pass:
   word; otherwise a human (`COLAB_HUMAN=1`) is required.
 
 Tier B (`trunk == main`) has **no promotion** — `ship` goes straight to main; `promote` refuses.
+Tiers A and C both promote; the CLI keys on `trunk`/`deploy`, never on the tier letter.
 Preconditions (✓/✗ table): trunk CI green · `trunk == origin/trunk` · `main == origin/main` · main
 checkout usable (the repo checkout if it's on `main` and clean — **never** a dirty switch — else a
 temporary worktree). The merge message is `--message` (full override) or
@@ -494,13 +497,21 @@ temporary worktree). The merge message is `--message` (full override) or
 After a successful promotion on a `deploy: tag` repo it prints the release reminder:
 `git tag vX.Y.Z && git push origin vX.Y.Z`. `--dry` shows the table + plan and changes nothing.
 
+On a **`deploy: manual`** repo a *successful* promotion prints a block, not a line, because it is
+the one case where finishing the command does not finish the job: `main` moved, **production did
+not**, and no workflow will ever fire. The block says production is not updated and names the
+repo's `runbook:` as the required next step. If `runbook:` is absent it prints `NEXT STEP —
+UNKNOWN` rather than an empty path — silence there would read as "nothing further required",
+which is precisely the misreading (a promoted `main` everyone believes is live) this exists to
+prevent.
+
 ### `pre-push-guard` — trunk (and main) are push-protected locally
 
 `templates/pre-push-guard` is a POSIX-sh git `pre-push` hook that **refuses raw pushes to protected
 branches** (read from `.github/project.yml`):
 
 - **trunk** — unless `COLAB_SHIP=1` (set by `colab ship`) or `COLAB_HUMAN=1`.
-- **main**, only on **tier A** (`trunk != main`) — unless `COLAB_PROMOTE=1` (set by `colab promote`)
+- **main**, only where `trunk != main` (tiers A and C) — unless `COLAB_PROMOTE=1` (set by `colab promote`)
   or `COLAB_HUMAN=1`. `COLAB_SHIP` does **not** open main — `ship` is trunk-only by design.
 
 On tier B (`trunk == main`) the trunk rule already covers main. Non-protected pushes always pass; a
