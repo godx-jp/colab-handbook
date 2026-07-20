@@ -136,6 +136,13 @@ colab claim $N        # if colab is installed …
 gh issue edit $N --add-assignee @me --add-label in-progress    # … else raw
 ```
 
+> **On the default path, do not run `colab claim` here.** `colab worktree new
+> --issues $N` in step 4 claims as it creates, so claiming twice is a wasted step —
+> and for a long time it was worse than wasted: the second command refused your own
+> claim from the first. That is fixed, but one command is still the right shape.
+> Run the bare `colab claim $N` above **only** when you are taking the plain-branch
+> path, or when you want the issue held before you are ready to build anything.
+
 - An unclaimed issue is fair game — someone may take it out from under you.
   Claim first.
 - A branch may carry a group of issues; claim **every** issue in the group now
@@ -209,10 +216,14 @@ conditional rule is one agents skip.
 **Worktree — the default.** It honours the invariant by construction:
 
 ```sh
-colab worktree new <type>/<slug>-$N --issues $N --ports 1    # if colab is installed …
-# … else fall back to plain git:
+colab worktree new <type>/<slug>-$N --issues $N --ports 1    # claims AND creates — one command
+# … else fall back to plain git (then claim by hand, step 3):
 git worktree add -b <type>/<slug>-$N ../<slug>-$N origin/<trunk>
 ```
+
+`--issues` does the claiming, which is why step 3 tells you not to claim separately on
+this path. Pass **every** issue the branch will carry (`--issues 115,114,113`) — that
+set and the branch name are the two places code-wrap's harvest reads.
 
 **Plain branch — allowed, but only with a commitment.** Fine on a repo nothing reads
 from and where a worktree is more setup than the work deserves. If you take it, you

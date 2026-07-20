@@ -171,7 +171,18 @@ function localClaimConflicts(st, repoAbs, nums, wtName) {
   const out = [];
   for (const num of nums) {
     const ex = st.claims[claimKey(repoAbs, num)];
-    if (ex && (ex.worktree || null) !== want) out.push({ num, holder: ex });
+    if (!ex) continue;
+    if ((ex.worktree || null) === want) continue; // idempotent — same holder
+    // UPGRADE, not a collision: a TRUNK claim (worktree null) held on THIS host is the
+    // same session moving its work into a worktree. Refusing it made `colab claim N`
+    // followed by `colab worktree new --issues N` — the documented session order —
+    // reject the user's own claim. Note the GitHub check below already excludes
+    // yourself (`!assignees.includes(myLogin)`); this keeps the local side from being
+    // asymmetrically stricter than the remote one.
+    // Still a conflict: a DIFFERENT worktree holds it (two sessions on one machine),
+    // or the trunk claim belongs to another host.
+    if (want !== null && (ex.worktree || null) === null && ex.host === HOST) continue;
+    out.push({ num, holder: ex });
   }
   return out;
 }
