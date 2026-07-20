@@ -27,11 +27,21 @@ cat .github/project.yml        # tier, trunk, production, deploy, stack, ports
 ## 2. Load context from the feature's Issue — don't re-read the code
 
 ```sh
-gh issue list --search "<slug>" --state open    # find the feature's Issue
+gh issue list --search "<slug>" --state all     # find the feature's Issue — all, not open
 gh issue view $N                                 # goal + plan + knowledge
 gh issue view $N --comments                      # prior-session log
 ```
 
+- **`--state all`, never `--state open`** (`gh` defaults to open — you must pass
+  it). code-wrap closes the Issue at merge via `Closes #N`, correctly. So the
+  moment a feature ships its Issue goes invisible to an open-only lookup, this
+  step falls through to "No Issue" below, and you open a **duplicate** while every
+  decision and gotcha sits unread on the closed one — the precise loss the
+  Issue-as-memory model exists to prevent, arriving from the other direction.
+- **Match is CLOSED and the work continues** → read it *first*
+  (`gh issue view <N> --comments`), then reopen it: `gh issue reopen <N>`.
+  Never open a parallel Issue for a feature that already has one; two half-memories
+  are worse than one, because neither reader knows the other exists.
 - **Issue exists** → this is your whole context. Read only the paths it points
   to, plus the repo's `CLAUDE.md` if present. Do not sweep the codebase.
 - **No Issue** → create one and put the plan in it (this is the memory the next
@@ -65,6 +75,28 @@ gh issue view $N --comments                      # prior-session log
 > Already shipped → close it with evidence (sha + `file:line`), pick other work.
 > Partly shipped → narrow the task to what's actually missing before starting.
 
+### Two tiers of memory — know which one you're reading
+
+Closing an Issue at wrap is only safe because the durable knowledge was never
+supposed to live there alone:
+
+- **Task / session Issue** — the log of *one unit of work*: this plan, this
+  session's decisions, this branch's gotchas. code-wrap closes it at merge. It
+  stays readable forever (hence `--state all`), but nobody browses closed issues.
+  Knowledge left only here is not deleted; it is **buried**, which costs the same.
+- **Epic / umbrella Issue, and the repo's `docs/`** — the durable tier. A domain
+  map, an architecture decision, a gotcha that will bite again next quarter,
+  anything true after this feature ships: it belongs here. This is what code-wrap's
+  docs step exists to feed.
+
+So when you land on an epic, **read its body and its checklist table — do not trust
+its title.** An epic's title describes the ambition; its table describes what is
+actually done, in progress, and untouched. They diverge, and the table is the one
+that was maintained.
+
+If this session learns something that outlives the feature, plan to put it in the
+durable tier at wrap — not just in the session comment that closes with the issue.
+
 ## 3. Check claims, then claim before you start
 
 **Source of truth is GitHub** (visible from any machine, to any person):
@@ -82,13 +114,61 @@ gh issue edit $N --add-assignee @me --add-label in-progress    # … else raw
 - An unclaimed issue is fair game — someone may take it out from under you.
   Claim first.
 - A branch may carry a group of issues; claim **every** issue in the group now
-  (`colab claim 115 114 113`, or one `gh issue edit` each).
+  (`colab claim 115 114 113`, or one `gh issue edit` each). Claiming the whole
+  group is load-bearing at wrap, not bookkeeping — see step 4.
+
+### A clean label does not mean clean ground
+
+**No `in-progress` label no longer proves nobody has touched this issue.**
+code-wrap's B3 releases the claim **unconditionally** — every issue the branch
+carried, finished or not, worktree torn down or kept. That is deliberate: a
+conditional release is one agents skip, a claim outlives the session it names, and
+a kept-but-forgotten worktree would otherwise hold its issues forever with **no
+health check able to flag it** (the worktree is alive, so the claim looks healthy).
+
+The tradeoff is that the label stopped being a lock, so **this step carries the
+compensating check.** Before you create a branch or a worktree, look for work that
+already exists on that issue:
+
+```sh
+git fetch --prune origin                   # ← without this the check is blind (see below)
+git branch -a --list '*<issue-number>*'    # a previous session's branch may still exist
+colab worktrees                            # if colab is installed — is a worktree holding it?
+```
+
+- **`git fetch` first, always.** A stale clone cannot see a branch pushed from
+  another machine, and the check then reports clean ground with total confidence —
+  the one failure mode it exists to prevent. Verified: an unfetched clone lists
+  nothing for a branch that demonstrably exists upstream.
+- The glob is a substring match, so it **over-matches** — `'*23*'` also returns
+  `feat/thing-230`. That is the right direction to be wrong in: you are eyeballing
+  a short list, and a false positive costs a glance while a false negative costs a
+  duplicate branch.
+- Use `colab worktrees`, not `colab claims`, for this: B3 already released the
+  claims, so a kept worktree shows up in the worktree list and **nowhere else**.
+- **Found one → continue it, or ask.** Do not open a second branch on an issue
+  that already has one; you will each merge over the other's work.
+
+This check is the deliberate price of unconditional release, not an oversight in it.
 
 ## 4. Branch off trunk — worktree optional
 
-Name: `^(feat|fix|docs|chore|refactor|test|perf)/[a-z0-9._-]+$`, ending in the
-issue number(s): `feat/onboard-redesign-23`, or a group `fix/import-fixes-115-114-113`.
+Name it per `CONVENTIONS.md` §4 — pattern, and the issue number(s) at the end.
 **Always branch off `<trunk>`, never off another feature branch.**
+
+**Why the naming rule is load-bearing downstream** (what §4 doesn't say): code-wrap's
+B1b harvests the issue set for the squash message from exactly two places — the
+**branch name** and the **commit bodies** — cross-checked against the claim registry.
+An issue that appears in neither the branch name nor your claims is one code-wrap
+will never find. It gets no `Closes #N`, so it sits open indefinitely with its code
+already merged — the failure §4 cites at 26/30 issues, reached by a different route.
+Naming the branch correctly *now* is what makes the wrap correct later.
+
+Mechanical detail for group branches: **the numbers must be at the end.** B1b anchors
+extraction to the **trailing** digit group precisely because a naive sweep is wrong —
+it reads `feat/oauth2-login-88` as issues 2 and 88. Put every number in one trailing
+run (`fix/import-fixes-115-114-113`) and claim all of them in step 3; those are the
+same set, and B1b treats a number in one but not the other as a finding to chase.
 
 **Plain branch** (the default — claiming and branching work fine without a worktree):
 
@@ -118,8 +198,10 @@ git worktree add -b <type>/<slug>-$N ../<slug>-$N origin/<trunk>
 
 ## 5. Report
 
-- Issue URL (`gh issue view $N --json url -q .url`) or the notes-file path.
-- Branch name, and the worktree path if you made one.
+- Issue URL (`gh issue view $N --json url -q .url`) or the notes-file path, and
+  whether you **reopened** a closed Issue rather than creating one.
+- Branch name, and the worktree path if you made one. If the step-3 check found an
+  existing branch or worktree for this issue, say so and say what you did about it.
 - What you loaded from the Issue and your plan (checklist groups, file split if
   fanning out to sub-agents).
 - Remind: close the session with **code-wrap** to ship and distill knowledge back
