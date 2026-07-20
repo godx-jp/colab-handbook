@@ -435,6 +435,11 @@ stating, because both are deliberate:
   every release and train everyone to ignore the report.
 - **An unstamped copy is never rewritten**, by any flag. Unknown lineage means we cannot know
   what replacing it would destroy; it is reported, and a human re-copies deliberately.
+- **Provenance is decided by content, never by filename.** A copy is recognised by text only
+  these templates contain — the step names they coined — not by the vocabulary of the stack they
+  build. A file that merely shares a template's name is reported as `unrelated`, explicitly *not*
+  as something to re-copy. This is a data-safety rule, not a tidiness one: the advice attached to
+  "looks copied" is `--force`, so misattributing a repo's own workflow means overwriting it.
 
 ### The fleet registry is private
 

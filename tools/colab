@@ -1818,7 +1818,10 @@ function inspectRepo(entry, ctx) {
   }
   // Skip self. A stamp means "copied from version X"; this repo IS X, and its own ci.yml is
   // purpose-written rather than copied — treating it as an adopter is a guaranteed false positive.
-  if (abs === ctx.handbookRoot) {
+  // Identity is by git common dir, not by path string: this CLI resolves its root from its own
+  // file, so running it out of a worktree gives a different spelling of the same repo than the
+  // fleet registry holds. The string test missed that and reported the handbook as its own adopter.
+  if (stamp.isHandbookItself(abs, ctx.handbookRoot)) {
     return { label, path: abs, kind: 'handbook', artifacts: [], note: 'the handbook itself — skipped' };
   }
 
@@ -1844,12 +1847,19 @@ function inspectRepo(entry, ctx) {
         templateName: st.name, stampVersion: st.version, localText: text, comparable: true,
       });
       artifacts.push({ file: rel, template: st.name, applicable: c.state === 'behind', ...c });
-    } else if (stamp.looksLikeHandbookWorkflow(text, wf.replace(/\.ya?ml$/, ''), ctx.tmplNames)) {
-      artifacts.push({ file: rel, template: null, state: 'unstamped', from: null, to: ctx.hb.version,
-        applicable: false,
-        reason: 'looks copied from the handbook but carries no stamp — lineage unknown, so replacing it could destroy unknown edits; re-copy with `colab template <name> --force`' });
+    } else {
+      // No stamp: ask what the CONTENT says, not what the filename says. `unstamped` claims a
+      // handbook lineage and points at a real template; `unrelated` is the file whose name
+      // collides with a template it never came from — reported here precisely BECAUSE this is
+      // the command whose --force would overwrite it. Anything else stays silent: somebody's
+      // own workflow is none of our business.
+      const prov = stamp.workflowProvenance(text, wf.replace(/\.ya?ml$/, ''), ctx.tmplNames);
+      const finding = stamp.unstampedFinding(prov);
+      if (finding) {
+        artifacts.push({ file: rel, template: prov.template, state: finding.state,
+          from: null, to: ctx.hb.version, applicable: false, reason: finding.reason });
+      }
     }
-    // No stamp and no fingerprint = not ours. Silence is correct: this is somebody's own workflow.
   }
 
   // --- the CLAUDE conventions block ---
@@ -1927,8 +1937,12 @@ Each stamped artifact is classified:
               pristine as of its own stamp -> safe to regenerate. Only these are written.
   diverged    your copy does not match the template as of ITS OWN stamp: it was hand-edited.
               Copy-and-own makes that legitimate, so it is REPORTED AND NEVER WRITTEN.
-  unstamped   lineage unknown, so replacing it could destroy edits nobody can see.
-              Re-copy deliberately with \`colab template <name> --force\`.
+  unstamped   the CONTENT matches text only our templates contain, but there is no stamp:
+              lineage unknown, so replacing it could destroy edits nobody can see. The row
+              names the template the evidence points to — re-copy that one, deliberately.
+  unrelated   its NAME matches a template but its content carries nothing of that template.
+              A shared filename is a coincidence, not a lineage: this file is the repo's own
+              and must NOT be re-copied over. Reported so nobody --forces it by mistake.
   n-a         cannot be assessed, always with a stated reason (an owner/name slug has no
               working tree here; a stamp from a tag this checkout lacks; an unknown template).
 
@@ -1998,7 +2012,7 @@ function cmdUpdate(argv) {
     repos: repos.length,
     artifacts: all.length,
     current: count('current'), behind: count('behind'), diverged: count('diverged'),
-    unstamped: count('unstamped'), na: count('n-a'),
+    unstamped: count('unstamped'), unrelated: count('unrelated'), na: count('n-a'),
     // Repos with no assessable artifact at all are counted SEPARATELY from artifact-level n-a:
     // they are repos, not artifacts, and folding them into the artifact tally would make the
     // arithmetic on that line stop adding up.
@@ -2034,7 +2048,9 @@ function cmdUpdate(argv) {
       continue;
     }
     for (const a of r.artifacts) {
-      if (opts.quiet && a.state === 'current') continue;
+      // `unrelated` is a "do not touch this" note, not a finding — it has no action, so it stays
+      // out of the quiet view alongside `current`.
+      if (opts.quiet && (a.state === 'current' || a.state === 'unrelated')) continue;
       const move = a.from ? `${a.from} → ${a.to}` : `→ ${a.to}`;
       const mark = a.written ? 'updated' : a.state;
       const detail = a.writeError ? `WRITE FAILED: ${a.writeError}` : `${move}  ${a.reason}`;
@@ -2045,9 +2061,10 @@ function cmdUpdate(argv) {
   else print('Nothing to report — every stamped artifact is current.');
 
   print('');
-  print(`${summary.repos} repo(s), ${summary.artifacts} stamped artifact(s): ` +
+  print(`${summary.repos} repo(s), ${summary.artifacts} handbook artifact(s): ` +
     `${summary.current} current, ${summary.behind} behind, ${summary.diverged} diverged, ` +
-    `${summary.unstamped} unstamped, ${summary.na} n-a.`);
+    `${summary.unstamped} unstamped, ${summary.na} n-a` +
+    (summary.unrelated ? `, ${summary.unrelated} unrelated (name clash only — not ours).` : '.'));
   if (summary.skippedRepos) {
     print(`${summary.skippedRepos} repo(s) had nothing to assess (nothing adopted, an audit-only slug, a missing path, or the handbook itself).`);
   }
@@ -2069,7 +2086,11 @@ function cmdUpdate(argv) {
 
   if (summary.diverged || summary.unstamped) {
     print(`${summary.diverged} diverged + ${summary.unstamped} unstamped need a human — never written by this command.`);
-    print('  Review the diff, take what you want, then: colab template <name> --force');
+    print('  Review the diff, take what you want, then re-copy the template NAMED IN THAT ROW.');
+    print('  Where a row names none, its lineage is unproven — establish it before stamping one.');
+  }
+  if (summary.unrelated) {
+    print(`${summary.unrelated} unrelated file(s) share a template's name without its content — leave them alone.`);
   }
 
   return summary.behind > 0 ? 1 : 0;

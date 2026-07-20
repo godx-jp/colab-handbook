@@ -54,7 +54,7 @@ const require = createRequire(import.meta.url);
 const stamp = require("../tools/lib/stamp.js");
 const {
   handbookInfo, templateNames, templateChangedSince, cmpParts, cmpSemver,
-  parseWorkflowStamp, parseClaudeStamp, looksLikeHandbookWorkflow, looksLikeHandbookClaude,
+  parseWorkflowStamp, parseClaudeStamp, workflowProvenance, unstampedFinding, looksLikeHandbookClaude,
 } = stamp;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -217,7 +217,7 @@ function satisfiesConstraint(version, constraint) {
 
 // All of the above now lives in tools/lib/stamp.js, imported at the top of this file:
 // gitIn, handbookInfo, templateNames, cmpSemver, templateChangedSince, parseWorkflowStamp,
-// parseClaudeStamp, WORKFLOW_FINGERPRINTS, looksLikeHandbookWorkflow, looksLikeHandbookClaude.
+// parseClaudeStamp, WORKFLOW_FINGERPRINTS, workflowProvenance, unstampedFinding, looksLikeHandbookClaude.
 // They take the handbook root explicitly (this file passes HANDBOOK_ROOT) because `colab update`
 // locates the handbook differently.
 
@@ -254,8 +254,15 @@ function checkStamps(src, hb, tmplNames, fail, warn) {
     const stamp = parseWorkflowStamp(text);
     if (stamp) {
       compareStamp(`${wf}`, stamp.name, stamp.version, [`templates/${stamp.name}.yml`, `templates/${stamp.name}.yaml`]);
-    } else if (looksLikeHandbookWorkflow(text, stem, tmplNames)) {
-      warn(`${wf} unstamped — looks copied from the handbook but cannot track template drift; re-copy via colab template`);
+    } else {
+      // Content decides, never the filename — a workflow that merely SHARES a template's name
+      // was not copied from it, and saying otherwise pushes people toward asserting a lineage
+      // they never had (the advice being `--force`, that is a data-loss bug once a template of
+      // that name exists). `unstampedFinding` is shared with `colab update` so the two tools
+      // cannot drift on this. The `unrelated` finding is deliberately NOT raised here: it has no
+      // action, and the audit reports drift, not reassurance.
+      const finding = unstampedFinding(workflowProvenance(text, stem, tmplNames));
+      if (finding && finding.state === 'unstamped') warn(`${wf} unstamped — ${finding.reason}`);
     }
   }
 
@@ -502,24 +509,16 @@ function makeSource(target) {
 // Remote (owner/name) targets are out of scope: recognising "self" through the API would
 // require the name match this deliberately avoids.
 
-function gitCommonDir(root) {
-  try {
-    const out = execFileSync("git", ["-C", root, "rev-parse", "--git-common-dir"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-    return out ? resolve(root, out) : null;
-  } catch {
-    return null; // not a git checkout, or git unavailable
-  }
-}
-
+// The predicate itself now lives in tools/lib/stamp.js, shared with `colab update`. It was
+// duplicated, and the copies had already drifted: this one compared git common dirs (worktree-safe)
+// while the CLI's compared path strings, so the same handbook was exempt here and audited as its
+// own consumer there. Only this target-shaped wrapper — kind, `~`, existence — stays local.
 function isHandbookItself(target) {
   if (target.kind !== "local") return false;
   const raw = target.path.startsWith("~") ? join(process.env.HOME || "", target.path.slice(1)) : target.path;
   const root = resolve(raw);
   if (!existsSync(root)) return false;
-  if (root === HANDBOOK_ROOT) return true;
-  const a = gitCommonDir(root);
-  const b = gitCommonDir(HANDBOOK_ROOT);
-  return a !== null && b !== null && a === b;
+  return stamp.isHandbookItself(root, HANDBOOK_ROOT);
 }
 
 // ------------------------------------------------------------------------- checks

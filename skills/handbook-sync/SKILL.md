@@ -50,6 +50,7 @@ node "$COLAB_HANDBOOK/audit/audit.mjs" --local .   # conformance beyond stamps
 | `behind` | template genuinely changed since your stamp | §2 — refresh or graft |
 | `diverged` | you hand-edited it since copying | §3 — graft only |
 | `unstamped` | lineage unknown | §4 — establish it first |
+| `unrelated` | its name matches a template, its content does not | nothing — it is this repo's own file |
 | `n-a` | cannot assess, with a stated reason | read the reason; often a missing tag |
 
 **`behind` does not mean "your file is old".** It means the *template* moved. If the
@@ -98,6 +99,11 @@ diff <(git -C "$COLAB_HANDBOOK" show <some-tag>:templates/<name>) <your-file>
 Then either graft as in §3 and **hand-add the stamp line**, or — only if the copy
 turns out to be genuinely untouched — `colab template <name> --force` and let it
 stamp. Adding a stamp asserts provenance; do not assert one you have not checked.
+
+The row tells you which `<name>` the evidence points to. If it names none, the tool
+proved the file is *a* copy but not *of what* — find that out before stamping
+anything. And if the state is `unrelated`, stop: the file only shares a template's
+name. Re-copying over it destroys work that never came from the handbook.
 
 ## 5. The CLAUDE conventions block — always a graft
 

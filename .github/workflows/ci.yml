@@ -45,5 +45,10 @@ jobs:
           node --check tools/colab
           for f in tools/lib/*.js audit/audit.mjs; do node --check "$f"; done
           sh -n install.sh
+      # The stamp heuristic decides whether a repo's file is "ours". A false positive there ends in
+      # advice to overwrite that file, so it is the one piece of logic here with unit tests.
+      - name: Unit tests
+        run: node --test tools/lib/*.test.js
+
       - name: Audit the handbook against its own conventions
         run: node audit/audit.mjs --local .

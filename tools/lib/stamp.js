@@ -54,6 +54,54 @@ function handbookInfo(root) {
   return { root, hasGit: true, untagged: false, version: d.out };
 }
 
+/**
+ * The handbook's shared git directory — the one identity that survives worktrees. Every worktree
+ * of a repo reports the SAME `--git-common-dir`, while their working-tree paths all differ.
+ */
+function gitCommonDir(root) {
+  const r = gitIn(root, ['rev-parse', '--git-common-dir']);
+  if (!r.ok || !r.out) return null;
+  return realPath(require('path').resolve(root, r.out));
+}
+
+/**
+ * Resolve symlinks before comparing paths, falling back to the input when the path does not exist.
+ *
+ * Not optional pedantry: git answers `--git-common-dir` RELATIVELY from a main checkout (`.git`)
+ * but ABSOLUTELY, and already symlink-resolved, from a worktree. So the two sides of the comparison
+ * arrive in different forms, and any handbook checkout reached through a symlinked path (`/tmp` on
+ * macOS, a symlinked home, a network mount) produced two different strings for one directory —
+ * making the repo fail to recognise itself.
+ */
+function realPath(p) {
+  try { return require('fs').realpathSync(p); } catch (_) { return p; }
+}
+
+/**
+ * Is `repoPath` the handbook itself? Both tools must answer this identically, so it is answered
+ * ONCE, here — the same reason stamp reading lives here.
+ *
+ * NOT a path-string comparison, and that is the whole point. `colab update` used to test
+ * `abs === handbookRoot`, which silently answers "no" whenever the CLI runs from a git WORKTREE of
+ * the handbook: the CLI locates its root by walking up from its own file (giving the worktree),
+ * while the fleet registry names the main checkout. Same repo, two spellings, and the handbook was
+ * audited as its own consumer — reported `unstamped`, with advice to stamp its own CLAUDE.md as a
+ * copy of a version of itself. Comparing git common dirs is immune to that: worktree, symlink or
+ * a differently-spelled path all resolve to one identity.
+ *
+ * Remote (owner/name) targets are out of scope: recognising "self" through the API would need the
+ * name match this deliberately avoids.
+ */
+function isHandbookItself(repoPath, handbookRoot) {
+  const { resolve } = require('path');
+  if (!repoPath || !handbookRoot) return false;
+  const root = realPath(resolve(repoPath));
+  if (root === realPath(resolve(handbookRoot))) return true;
+  const a = gitCommonDir(root);
+  const b = gitCommonDir(handbookRoot);
+  return a !== null && b !== null && a === b;
+}
+
 /** Template stems present in the handbook (e.g. "ci-node", "ci-laravel", "release-tag"). */
 function templateNames(root) {
   const { readdirSync } = require('fs');
@@ -127,22 +175,126 @@ function parseClaudeStamp(text) {
 }
 
 /**
- * Content fingerprints that mark a workflow/CLAUDE file as a handbook derivative even when someone
- * renamed the file or pasted the block without the stamp. Precise on purpose: better to miss an
- * unstamped copy than to nag an unrelated ci.yml.
+ * Content fingerprints that mark a workflow as a handbook derivative even when someone renamed the
+ * file or dropped the stamp.
+ *
+ * THE ADMISSION TEST, and it is the whole design: *could this string appear in a file nobody copied
+ * from us?* If yes, it is not a fingerprint — it is the STACK'S VOCABULARY, and matching on it
+ * accuses every repo that happens to use that stack. We shipped two such strings and both misfired
+ * on real repos:
+ *
+ *   - `wayfinder:generate` — a framework command, not our text. ANY workflow doing build-time
+ *     codegen on that framework contains it, whatever its origin. It flagged three hand-written
+ *     deploy workflows that had never been near a template.
+ *   - `gitleaks/gitleaks/releases/download` — the upstream release URL. It identifies gitleaks,
+ *     not us. Two hand-written CI files on this fleet contain it (including this handbook's own),
+ *     copied from each other rather than from `templates/`.
+ *
+ * What survives is text WE COINED: the step names in our templates. No upstream tool, framework or
+ * generator emits "Resolve toolchain versions"; a file containing it was typed by us or copied from
+ * something that was. Each entry is therefore matched as a STEP NAME (`- name: <marker>`), not as a
+ * loose substring — so prose that merely mentions the phrase (a comment, a README, this file) does
+ * not trip it.
+ *
+ * `template` attributes the evidence, which is what lets the advice name a real template instead of
+ * a `<name>` placeholder the reader has to guess. `null` means the marker is shared by several
+ * templates: it still proves derivation, but not FROM WHICH — and the advice must then say so
+ * rather than pick one.
+ *
+ * Precise on purpose: better to miss an unstamped copy than to nag a file we cannot attribute.
  */
 const WORKFLOW_FINGERPRINTS = [
-  'gitleaks/gitleaks/releases/download', // our exact pinned-binary install
-  'wayfinder:generate',                  // ci-laravel bootstrap
-  'Build grouped release summary',       // release-tag
-  'Resolve Node version',                // ci-node toolchain step
-  'Resolve toolchain versions',          // ci-laravel toolchain step
+  // Header lines — verbatim template prose, and self-attributing.
+  { marker: 'CI (Node) — TEMPLATE. Copy me into your repo', kind: 'text', template: 'ci-node' },
+  { marker: 'CI (Laravel) — TEMPLATE. Copy me into your repo', kind: 'text', template: 'ci-laravel' },
+  { marker: 'CI (Python) — TEMPLATE. Copy me into your repo', kind: 'text', template: 'ci-python' },
+  { marker: 'Release (tag) — TEMPLATE. Copy me into your repo', kind: 'text', template: 'release-tag' },
+  // The header convention itself, unattributed: this catches a copy of any template ADDED LATER
+  // without anyone remembering to extend this list — provided the new template keeps the house
+  // header. A template that omits it is invisible here, which is worth knowing when writing one.
+  { marker: '— TEMPLATE. Copy me into your repo', kind: 'text', template: null },
+  // Step names we coined, one per template.
+  { marker: 'Resolve Node version', kind: 'step', template: 'ci-node' },
+  { marker: 'Detect optional scripts', kind: 'step', template: 'ci-node' },
+  { marker: 'Resolve toolchain versions', kind: 'step', template: 'ci-laravel' },
+  { marker: 'Prepare throwaway env for build-time codegen (wayfinder)', kind: 'step', template: 'ci-laravel' },
+  { marker: 'Resolve Python version', kind: 'step', template: 'ci-python' },
+  { marker: 'Detect optional tooling', kind: 'step', template: 'ci-python' },
+  { marker: 'Build grouped release summary', kind: 'step', template: 'release-tag' },
+  { marker: 'Resolve tag and previous tag', kind: 'step', template: 'release-tag' },
+  // Shared by all three ci-* templates: proves derivation, cannot say from which. Note the exact
+  // parenthetical — hand-written installers on this fleet say "(pinned binary)", which is why the
+  // step NAME discriminates where the URL inside the step does not.
+  { marker: 'Install gitleaks (pinned release binary)', kind: 'step', template: null },
 ];
 
+function reEscape(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Does one fingerprint match? Step markers must appear as an actual `- name:` step, not as prose. */
+function fingerprintHits(text, fp) {
+  if (fp.kind === 'text') return text.includes(fp.marker);
+  return new RegExp(`^\\s*-\\s*name:\\s*["']?${reEscape(fp.marker)}["']?\\s*$`, 'm').test(text);
+}
+
+/**
+ * Where did an UNSTAMPED workflow come from? Returns { origin, template, evidence }:
+ *
+ *   derived    content evidence says it is a handbook copy. `template` names it when the evidence
+ *              attributes one, else null (derivation proven, source not).
+ *   name-only  the FILENAME matches a template but the content carries none of it. This is the
+ *              dangerous case, and it is why a name match is no longer sufficient on its own: the
+ *              moment `templates/<x>.yml` is added for some `x` that repos already have as their
+ *              own hand-written workflow, a name-only match would advise `--force` and OVERWRITE
+ *              a file that never came from us. A shared name is a coincidence, not a lineage.
+ *   none       neither. Somebody's own workflow — say nothing about it, ever.
+ */
+function workflowProvenance(text, stem, tmplNames) {
+  const hits = text ? WORKFLOW_FINGERPRINTS.filter((fp) => fingerprintHits(text, fp)) : [];
+  if (hits.length) {
+    const named = [...new Set(hits.map((h) => h.template).filter(Boolean))];
+    // One attributed template wins; several (or none) fall back to the filename, and only if that
+    // is a real template name. Never guess.
+    const template = named.length === 1 ? named[0] : (tmplNames.has(stem) ? stem : null);
+    // Cite only the most specific form of each match: the generic header rule always fires
+    // alongside the attributed one, and quoting both back at the reader reads like two findings.
+    const markers = hits.map((h) => h.marker);
+    const evidence = markers.filter((m) => !markers.some((o) => o !== m && o.includes(m)));
+    return { origin: 'derived', template, evidence };
+  }
+  if (tmplNames.has(stem)) return { origin: 'name-only', template: stem, evidence: [] };
+  return { origin: 'none', template: null, evidence: [] };
+}
+
+/**
+ * The single source of the advice both tools print, so the two can never drift apart on the one
+ * thing that matters here: whether to suggest asserting provenance.
+ * Returns null when there is nothing honest to say.
+ */
+function unstampedFinding(prov) {
+  if (prov.origin === 'derived') {
+    const why = `matched handbook template text (${prov.evidence.map((e) => `"${e}"`).join(', ')})`;
+    const how = prov.template
+      ? `re-copy deliberately with \`colab template ${prov.template} --force\``
+      : 'identify which template it came from before re-copying — the evidence proves it is a copy but not of which template';
+    return {
+      state: 'unstamped',
+      reason: `${why} but carries no stamp — lineage unknown, so replacing it could destroy unknown edits; ${how}`,
+    };
+  }
+  if (prov.origin === 'name-only') {
+    return {
+      state: 'unrelated',
+      reason: `shares a name with templates/${prov.template} but contains none of that template's text — treated as this repo's own file. A matching NAME is not lineage: do NOT \`colab template ${prov.template} --force\`, it would overwrite work that never came from here.`,
+    };
+  }
+  return null;
+}
+
+/** Boolean view, kept for callers that only ask "is this ours?". A shared NAME alone is not. */
 function looksLikeHandbookWorkflow(text, stem, tmplNames) {
-  if (tmplNames.has(stem)) return true;
-  if (!text) return false;
-  return WORKFLOW_FINGERPRINTS.some((s) => text.includes(s));
+  return workflowProvenance(text, stem, tmplNames).origin === 'derived';
 }
 
 /** A CLAUDE.md that pasted the conventions block (this line is unique to the block template). */
@@ -241,8 +393,10 @@ function classifyStamped(opts) {
 
 module.exports = {
   CLAUDE_BLOCK_TEMPLATE, WORKFLOW_FINGERPRINTS,
-  gitIn, handbookInfo, templateNames, templateFiles, templateChangedSince, templateAt,
+  gitIn, gitCommonDir, isHandbookItself,
+  handbookInfo, templateNames, templateFiles, templateChangedSince, templateAt,
   stampLine, parseWorkflowStamp, parseClaudeStamp,
+  fingerprintHits, workflowProvenance, unstampedFinding,
   looksLikeHandbookWorkflow, looksLikeHandbookClaude,
   cmpParts, cmpSemver, sameContent, classifyStamped,
 };

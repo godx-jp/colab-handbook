@@ -454,7 +454,8 @@ handbook's own history — **the classification never compares version strings a
 | `current` | the stamp is the handbook's version, **or** `git log <stamp>..HEAD -- templates/<name>` is empty — the template genuinely has not moved | — |
 | `behind` | the stamp is older, the template really changed, **and** the copy still matches `git show <stamp>:templates/<name>` — i.e. pristine | **rewritten** |
 | `diverged` | the copy does *not* match the template as of **its own stamp**: hand-edited | **never written** |
-| `unstamped` | lineage unknown, so replacing it could destroy edits nobody can see | **never written** |
+| `unstamped` | its **content** carries text only our templates contain, but there is no stamp: lineage unknown, so replacing it could destroy edits nobody can see. The row names the template the evidence points to | **never written** |
+| `unrelated` | its **name** matches a template but its content carries none of it — the repo's own file, reported only so nobody re-copies over it | **never written** |
 | `n-a` | not assessable, always with a stated reason (an `owner/name` slug has no working tree here; a stamp from a tag this checkout lacks; an unknown template name) | — |
 
 Getting `diverged` right is the crux, and it is why the tool reads the template **at the old
@@ -466,6 +467,12 @@ every out-of-date copy "hand-edited" and make the safe/unsafe distinction meanin
 - **Never commits, stages or pushes.** Every repo has its own tier and trunk rules; committing
   into a Tier A repo's `dev` would have this tool violate the handbook it enforces. It writes
   files into the working tree and stops — review with `git diff`, commit through that repo's flow.
+- **Never treats a filename as provenance.** "Copied from us" is decided by content that only our
+  templates contain — step names we coined, not the vocabulary of the stack. A file that merely
+  shares a template's *name* is `unrelated`, and the report says so instead of suggesting a
+  re-copy: advising `--force` on a file we cannot attribute would overwrite work that never came
+  from here. (Both misfires we shipped were stack vocabulary — a framework's codegen command and a
+  third-party tool's download URL.)
 - **Never rewrites a `diverged` copy**, even with `--apply`. Copy-and-own (§7) makes local edits
   legitimate; a tool that silently overwrote them would destroy the principle it serves.
 - **Never rewrites the CLAUDE conventions block.** That block is a *fragment* pasted into a
