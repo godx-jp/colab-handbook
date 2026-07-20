@@ -450,6 +450,20 @@ function makeSource(target) {
           return null;
         }
       },
+      // A LINKED worktree is on a feature branch by design — that is the whole point of
+      // one. Only the main checkout owes the on-trunk invariant, so the caller skips the
+      // check here. Detection: git-dir sits under .git/worktrees/<name> in a linked tree,
+      // while git-common-dir always points at the real .git.
+      isLinkedWorktree: () => {
+        try {
+          const g = (a) => execFileSync("git", ["-C", root, "rev-parse", a], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+          const dir = resolve(root, g("--git-dir"));
+          const common = resolve(root, g("--git-common-dir"));
+          return dir !== common;
+        } catch {
+          return false;
+        }
+      },
     };
   }
   return {
@@ -460,6 +474,7 @@ function makeSource(target) {
     listDir: (p) => listRemoteDir(target.slug, p),
     branches: () => listRemoteBranches(target.slug),
     currentBranch: () => null,
+    isLinkedWorktree: () => false,
   };
 }
 
@@ -601,6 +616,19 @@ function auditRepo(target, ctx) {
     warn(`cannot list branches (not a git checkout, or gh unavailable) — trunk "${trunk}" unverified`);
   } else if (trunk && branches && !branches.includes(trunk)) {
     fail(`declared trunk "${trunk}" does not exist (branches: ${branches.slice(0, 6).join(", ")}${branches.length > 6 ? ", …" : ""})`);
+  }
+
+  // ---- the main checkout is on trunk at rest -------------------------------
+  // Other things read a repo's working tree — a dev server, a symlink, a LaunchAgent —
+  // and none of them know a session branched it. We branched one repo's main checkout
+  // for a chore; it ran always-on from that tree, so the live app served unmerged
+  // feature-branch code until a human noticed by eye. Sessions belong in a worktree;
+  // a checkout parked on a feature branch is the failure, not the work.
+  // Remote (owner/name) targets have no checkout, so currentBranch() is null there —
+  // stay silent rather than invent a violation, as with `branches === null` above.
+  const head = src.currentBranch();
+  if (trunk && head && head !== "HEAD" && head !== trunk && !src.isLinkedWorktree()) {
+    fail(`main checkout is on "${head}", not trunk "${trunk}" — anything reading this working tree (dev server, symlink, LaunchAgent) is serving that branch. Move the work to a worktree and return the checkout to ${trunk}`);
   }
 
   // ---- branch naming -------------------------------------------------------

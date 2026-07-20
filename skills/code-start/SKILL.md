@@ -1,6 +1,6 @@
 ---
 name: code-start
-description: "Open a coding session the cheap way: learn the repo's tier/trunk from .github/project.yml, load the feature's context from its GitHub Issue instead of re-reading the codebase, claim the issue so parallel sessions don't collide, then branch off trunk (worktree optional). Trigger phrases: 'start coding', 'start a session', 'open a coding session', 'begin work on issue', 'pick up issue', 'claim an issue', 'new worktree', 'set up a session'. Pairs with code-wrap at the end of the session."
+description: "Open a coding session the cheap way: learn the repo's tier/trunk from .github/project.yml, load the feature's context from its GitHub Issue instead of re-reading the codebase, claim the issue so parallel sessions don't collide, then branch off trunk in a worktree — the main checkout stays on trunk at rest, because dev servers, symlinks and LaunchAgents read that working tree and none of them know you branched it. Trigger phrases: 'start coding', 'start a session', 'open a coding session', 'begin work on issue', 'pick up issue', 'claim an issue', 'new worktree', 'set up a session'. Pairs with code-wrap at the end of the session."
 ---
 
 # code-start — open a session: read marker → load Issue → claim → branch
@@ -176,7 +176,7 @@ colab worktrees                            # if colab is installed — is a work
 
 This check is the deliberate price of unconditional release, not an oversight in it.
 
-## 4. Branch off trunk — worktree optional
+## 4. Branch off trunk — worktree by default
 
 Name it per `CONVENTIONS.md` §4 — pattern, and the issue number(s) at the end.
 **Always branch off `<trunk>`, never off another feature branch.**
@@ -195,21 +195,42 @@ it reads `feat/oauth2-login-88` as issues 2 and 88. Put every number in one trai
 run (`fix/import-fixes-115-114-113`) and claim all of them in step 3; those are the
 same set, and B1b treats a number in one but not the other as a finding to chase.
 
-**Plain branch** (the default — claiming and branching work fine without a worktree):
+### The invariant: the main checkout is on trunk at rest
 
-```sh
-git fetch origin <trunk>
-git checkout -b <type>/<slug>-$N origin/<trunk>
-```
+**Always. No exceptions.** Other things read that working tree — a dev server, a
+symlink, a LaunchAgent — and none of them know you branched it.
 
-**Worktree** (optional — only if the machine wants isolation, e.g. many parallel
-sessions or a live trunk dev server you must not disturb):
+Measured: a session branched a repo's main checkout to do a chore. That repo ran
+always-on from it, so **the live app served unmerged feature-branch code** until a
+human noticed by eye. The condition was documented here as "only if … a live trunk
+dev server you must not disturb", and the agent still took the default — because a
+conditional rule is one agents skip.
+
+**Worktree — the default.** It honours the invariant by construction:
 
 ```sh
 colab worktree new <type>/<slug>-$N --issues $N --ports 1    # if colab is installed …
 # … else fall back to plain git:
 git worktree add -b <type>/<slug>-$N ../<slug>-$N origin/<trunk>
 ```
+
+**Plain branch — allowed, but only with a commitment.** Fine on a repo nothing reads
+from and where a worktree is more setup than the work deserves. If you take it, you
+own returning the checkout to trunk before you wrap; code-wrap verifies it.
+
+```sh
+git fetch origin <trunk>
+git checkout -b <type>/<slug>-$N origin/<trunk>
+```
+
+**Verify before you start working**, whichever path you took:
+
+```sh
+git -C <repo-root> branch --show-current    # must print <trunk>
+```
+
+If that prints a feature branch, you are in the failure this rule exists to prevent —
+stop and move the work to a worktree.
 
 - Ports listed in any repo's `project.yml` `ports:` are **reserved** for that
   repo's trunk dev server — never reuse them for a worktree, even while the trunk

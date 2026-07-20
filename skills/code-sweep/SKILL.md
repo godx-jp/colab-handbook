@@ -127,4 +127,7 @@ kept silently is the 8-of-9 statistic repeating.
   did not finish.
 - `colab worktrees` (scoped) shows only worktrees you deliberately kept, each with a
   reason in the report.
+- **The main checkout is on trunk** — `git branch --show-current`. A sweep that ends
+  with the checkout parked on a feature branch has left the repo in the state it was
+  meant to clear.
 - Nothing was forced past uncommitted work.

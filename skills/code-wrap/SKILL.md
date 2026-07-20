@@ -299,6 +299,10 @@ not perform it.
 - Every one of those issues has an evidence comment — **including the ones `Closes #N`
   auto-closed**, which attach nothing on their own.
 - If Phase A only: trunk is unchanged (no session commit in `git log <trunk>`).
+- **The main checkout is back on trunk** — `git -C <repo-root> branch --show-current`
+  must print `<trunk>`. If you branched in place rather than using a worktree, this is
+  the step that pays that debt: a checkout left on a feature branch means anything
+  reading that tree (dev server, symlink, LaunchAgent) is serving unmerged code.
 - After Phase B: `git log --oneline -5 <trunk>` shows the squash-merge; **every** claim
   released (unconditionally, finished or not); worktree removed — or kept with the reason
   written in your report and its claims released by hand.

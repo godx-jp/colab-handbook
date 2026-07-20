@@ -92,9 +92,17 @@ case, and `colab promote` requires a human there exactly as it does on
 merges into `dev`, which does not deploy; the deploying step (promotion) stays
 human, as on every tier.
 
-## Worktrees — optional
+## Worktrees — the default, because the main checkout stays on trunk
 
-Claiming and branching work fine without a worktree. If the machine has the
+**The main checkout is on trunk at rest. Always.** Other things read that working
+tree — a dev server, a symlink, a LaunchAgent — and none of them know you
+branched it. We branched a repo's main checkout for a chore; it ran always-on
+from that tree, so the live app served unmerged feature-branch code until a
+human noticed by eye.
+
+A worktree honours that by construction, so it is the default. A plain branch
+is allowed on a repo nothing reads from — but then **you** own returning the
+checkout to trunk before you wrap, and code-wrap checks. If the machine has the
 `colab` CLI (`tools/`), prefer it:
 
 ```sh
