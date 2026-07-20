@@ -67,7 +67,7 @@ const COLAB_HOME = process.env.COLAB_HOME || join(homedir(), ".colab");
 
 function parseArgs(argv) {
   // config === null means "resolve from the precedence chain"; a string means explicit.
-  const opts = { config: null, locals: [], slugs: [], json: false, quiet: false };
+  const opts = { config: null, locals: [], slugs: [], json: false, quiet: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--json") opts.json = true;
@@ -81,8 +81,11 @@ function parseArgs(argv) {
       if (!p) die("--config needs a path");
       opts.config = p;
     } else if (a === "--help" || a === "-h") {
-      console.log(readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").filter((l) => l.startsWith("//")).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
-      process.exit(0);
+      // Signal, don't print-and-exit. The help text is ~12 KB — larger than a
+      // pipe buffer — so exiting here truncated it for any reader that is not
+      // a terminal. See the note above process.exitCode in main.
+      opts.help = true;
+      return opts;
     } else if (a.startsWith("-")) die(`unknown flag: ${a}`);
     else opts.slugs.push(a); // bare argument = slug or path
   }
@@ -103,6 +106,11 @@ function resolveConfig(opts) {
 }
 
 function die(msg) {
+  // Deliberately keeps process.exit(): die() is a control-flow terminator called
+  // from mid-loop and mid-function, where returning would let the caller carry
+  // on with invalid state. Exiting is safe here because it writes a single short
+  // line to stderr — always well under a pipe buffer, and stderr is a separate
+  // buffer from the JSON on stdout, so it cannot be the thing that gets cut.
   console.error(`audit: ${msg}`);
   process.exit(2);
 }
@@ -1054,30 +1062,70 @@ function report(results, opts, ctx) {
   console.log(`${results.length} repo(s): ${results.length - failed - warned} clean, ${warned} with advisories, ${failed} with problems.`);
 }
 
-// --------------------------------------------------------------------------- main
-
-const opts = parseArgs(process.argv.slice(2));
-const targets = loadTargets(opts);
-if (!targets.length) die("nothing to audit — add entries to the repo list or pass --local <path>");
-
-const ctx = { handbook: handbookInfo(HANDBOOK_ROOT), templateNames: templateNames(HANDBOOK_ROOT) };
-
-const results = [];
-for (const t of targets) {
-  try {
-    results.push(auditRepo(t, ctx));
-  } catch (err) {
-    // Degrade gracefully: one broken repo must never take the whole sweep down.
-    results.push({
-      repo: t.label,
-      kind: t.kind,
-      tier: null,
-      ok: false,
-      clean: false,
-      findings: [{ level: "fail", text: `audit crashed: ${err.message.split("\n")[0]}` }],
-    });
-  }
+// The usage block is this file's own leading comment, rendered on demand.
+function helpText() {
+  return readFileSync(fileURLToPath(import.meta.url), "utf8")
+    .split("\n")
+    .filter((l) => l.startsWith("//"))
+    .map((l) => l.replace(/^\/\/ ?/, ""))
+    .join("\n");
 }
 
-report(results, opts, ctx);
-process.exit(results.every((r) => r.ok) ? 0 : 1);
+// Returns the exit code rather than taking it — see the note in main.
+function runAudit(opts) {
+  const targets = loadTargets(opts);
+  if (!targets.length) die("nothing to audit — add entries to the repo list or pass --local <path>");
+
+  const ctx = { handbook: handbookInfo(HANDBOOK_ROOT), templateNames: templateNames(HANDBOOK_ROOT) };
+
+  const results = [];
+  for (const t of targets) {
+    try {
+      results.push(auditRepo(t, ctx));
+    } catch (err) {
+      // Degrade gracefully: one broken repo must never take the whole sweep down.
+      results.push({
+        repo: t.label,
+        kind: t.kind,
+        tier: null,
+        ok: false,
+        clean: false,
+        findings: [{ level: "fail", text: `audit crashed: ${err.message.split("\n")[0]}` }],
+      });
+    }
+  }
+
+  report(results, opts, ctx);
+  return results.every((r) => r.ok) ? 0 : 1;
+}
+
+// --------------------------------------------------------------------------- main
+
+/*
+ * Both branches below SET process.exitCode and let Node exit on its own once stdout
+ * has drained. process.exit() would not wait: writes to a pipe are asynchronous, so
+ * exiting straight after console.log() discards whatever is still buffered, handing
+ * the reader a truncated payload *with a success-looking exit code*. Nothing in the
+ * contract signals the failure, so a consumer parses garbage or silently sees less.
+ *
+ * Two things made this expensive to diagnose, both worth remembering:
+ *   - `| wc -c` does NOT reproduce it. A shell consumer drains greedily and wins the
+ *     race, reporting the full byte count. Only a reader that buffers stdout
+ *     (execFile/spawn — i.e. every tool that consumes --json) sees the cut.
+ *   - The threshold is the platform's pipe buffer: ~8 KB on macOS, 64 KB on Linux.
+ *     So it surfaces per-machine, and only once the report grows past it. Findings
+ *     inflate the payload faster than repo count does.
+ *
+ * The exit-code contract is unchanged: 0 clean, 1 findings, 2 usage error.
+ * (Block-comment syntax deliberately: helpText scrapes line comments, and this note
+ * is for maintainers, not users.)
+ */
+
+const opts = parseArgs(process.argv.slice(2));
+
+if (opts.help) {
+  console.log(helpText());
+  process.exitCode = 0;
+} else {
+  process.exitCode = runAudit(opts);
+}
