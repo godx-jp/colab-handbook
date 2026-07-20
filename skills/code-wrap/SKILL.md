@@ -36,17 +36,52 @@ gh issue comment $N -b "**<YYYY-MM-DD>** — did X, decided Y, left Z open."
   not a copy of the diff. The code is already in git.
 - No GitHub remote? Write the same into the session notes file from code-start.
 
-### A2. Update repo docs the work made stale
+### A2. Update repo docs the work made stale — in `docs/`, not in `CLAUDE.md`
 
 The Issue is the feature's log; **docs in the repo are the living knowledge** the
 next person reads without digging through Issues. If this session changed any of
 these, update the doc **in the same session** (don't leave "will update later" in
-a comment while the file stays wrong):
+a comment while the file stays wrong). All three destinations are in `docs/`:
 
 - Domain model changed (new entity/table, renamed concept, new flow) → the
   architecture doc.
 - Infra/ops changed (deploy, env, DNS, service account, runbook) → the deploy doc.
-- A long-lived gotcha (bites again, not tied to one feature) → the contributing/gotchas doc.
+- A long-lived gotcha (bites again, not tied to one feature) → the contributing/gotchas
+  doc. **Missing? Create it** (`docs/gotchas.md`) rather than appending to whichever
+  file is already in your context — which is always `CLAUDE.md`.
+
+#### `CLAUDE.md` is a router, not an archive
+
+It holds conventions, tier/trunk, ports, run commands, and **pointers** to the docs
+that carry the depth. It is also the one file loaded in full into **every** session
+before any work starts, which makes it the worst place in the repo for append-only
+accretion — and currently the place accretion lands.
+
+Measured across six repos: **~30 lines added per session, and not one commit ever
+made one smaller.** The furthest along went 66 → 452 lines (39 KB, ~10-12k tokens)
+in two days; every session in it — including one that only touched CSS — pays that
+before doing anything, which is the opposite of code-start's whole premise.
+
+A better destination existing is not enough: the repos that already had a
+contributing/gotchas doc grew at exactly the same rate, because nothing pointed
+there. So the counter-pressure has to be here:
+
+- **If the knowledge belongs in `docs/`, the `CLAUDE.md` change is a pointer, not a
+  copy.** Duplicating is worse than misfiling — whichever copy rots first, the other
+  keeps being read. We found a restart procedure living in both, and three other
+  rules living *only* in `CLAUDE.md`, so no after-the-fact routing rule can sort
+  them: "ops → the deploy doc" silently loses a rule, "gotchas → `CLAUDE.md`"
+  returns a second drifting copy.
+- **Prefer editing an existing line to adding one.** If nothing already in
+  `CLAUDE.md` has become wrong, the correct diff to it is often no diff at all.
+- **This is not licence to distill less.** The content is worth keeping — location
+  and unboundedness are what's wrong. Move it; never drop it.
+
+**Touched `CLAUDE.md`? Re-check its pointer section against `ls docs/`.** An index
+that omits half the docs is worse than no index, because a reader trusts it and
+stops looking. Measured: one repo's pointer section lists a session-notes file and
+the README while omitting four docs totalling 120 KB — this step grew the body for
+14 commits and never once maintained the index.
 
 Never write a secret into docs — only *where it lives* (a GitHub Secret, `.env`
 on the server, a password manager). Docs are deliverable paths; commit them in A3.
@@ -293,6 +328,8 @@ not perform it.
 ## Verify complete
 
 - `gh issue view $N`: checklist ticked, Decisions/Gotchas updated, session comment added.
+- Durable knowledge landed in `docs/`, and `git diff --stat -- CLAUDE.md` shows a pointer
+  or an edit — not a transplanted section. If it grew by ~30 lines, A2 was read backwards.
 - Every issue the branch carried (B1b's harvested set) is either closed with evidence,
   split into a new issue for the leftover, or left open with a written reason. No number
   left dangling.
