@@ -1990,7 +1990,7 @@ function inspectRepo(entry, ctx) {
   return { label, path: abs, kind: 'local', artifacts, note };
 }
 
-/** Two path segments read better than one in a report: `futurelastic/everyday`. */
+/** Two path segments read better than one in a report: `company/project`. */
 function entryLabel(entry) {
   if (isSlug(entry)) return entry;
   const r = entry.replace(/\/+$/, '');
@@ -2019,7 +2019,7 @@ Sweep this machine's fleet registry and report which repos' stamped handbook art
 fallen behind — then, with --apply, refresh the ones that are safe to refresh.
 
   <repo> ...   limit the sweep (match an absolute path, or a trailing path segment such as
-               "everyday" or "futurelastic/everyday"). Default: every registered repo.
+               "my-repo" or "company/project"). Default: every registered repo.
   --apply      WRITE the refreshable copies. Without it nothing on disk is touched.
   --quiet, -q  only show repos with something to say
   --json       machine-readable
@@ -2069,7 +2069,7 @@ function cmdUpdate(argv) {
     throw new UserError(`No repos registered (${registryPath}) — add one with: colab register [<path>]`);
   }
 
-  // Positional filters: an absolute path, or any trailing path segment ("everyday").
+  // Positional filters: an absolute path, or any trailing path segment ("my-repo").
   const filters = opts._;
   const selected = filters.length
     ? entries.filter((e) => filters.some((f) => {

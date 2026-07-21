@@ -1,7 +1,7 @@
 # Engineering Conventions
 
 How we manage branches, releases, and in-flight work across every repo we own — in
-`godx-jp` and in personal or other orgs alike.
+our orgs and in personal accounts alike.
 
 Written for **both humans and AI coding agents**. If you are an agent starting a session,
 read this file and the repo's `.github/project.yml` before touching anything.
@@ -397,8 +397,8 @@ by a job inside each repo. The [`audit/`](audit/) tool reads repos across every 
 including local-only repos with no GitHub presence — and reports drift in one run:
 
 ```
-futurelastic/shoots-automation   tier A   ⚠ node: engines=22 but ci.yml pins 20
-futurelastic/everyday            tier B   ⚠ missing .github/project.yml
+example-org/service-api          tier A   ⚠ node: engines=22 but ci.yml pins 20
+example-org/mobile-app           tier B   ⚠ missing .github/project.yml
 ```
 
 Run it on a schedule. It reports; only genuine findings fail the exit code.

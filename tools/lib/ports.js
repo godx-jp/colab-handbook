@@ -61,7 +61,7 @@ function repoWorktreePorts(repoRoot) {
 /**
  * Parse a lenient reserved-ports file: whitespace-separated port numbers per line, `#` starts a
  * comment, any non-numeric token is ignored. A missing/unreadable file yields []. This is the
- * pre-handbook `~/Future/.claude/ports.reserved` shape — machine-local, referenced via
+ * pre-handbook `~/code/.claude/ports.reserved` shape — machine-local, referenced via
  * config.reservedFiles, so the handbook itself stays generic.
  */
 function parseReservedFile(filePath) {
@@ -92,7 +92,7 @@ function reservedSet(config, extraRepos = []) {
   for (const port of config.extraReserved || []) {
     if (!map.has(Number(port))) map.set(Number(port), 'config.extraReserved');
   }
-  // Machine-local reserved-port files (e.g. the pre-handbook ~/Future/.claude/ports.reserved) —
+  // Machine-local reserved-port files (e.g. a pre-handbook ~/code/.claude/ports.reserved) —
   // ports of repos NOT registered with colab, aggregated so they can't be handed to a worktree.
   for (const f of config.reservedFiles || []) {
     for (const port of parseReservedFile(f)) {

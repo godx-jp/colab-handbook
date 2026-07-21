@@ -15,7 +15,7 @@ Starting points you **copy into your own repo**. That is the entire model.
 | File | Copy to | For | Notes |
 |---|---|---|---|
 | `ci-node.yml` | `.github/workflows/ci.yml` | Pure Node repos: Vite SPA, node libs, Astro static, **Capacitor apps** | Resolves Node version from `project.yml` → `.nvmrc`/`engines` → **fails**. Never a default. |
-| `ci-laravel.yml` | `.github/workflows/ci.yml` | Laravel + Inertia + Vite fullstack (Omnify) | Same resolution for **both** PHP and Node. Includes the sqlite bootstrap + explicit wayfinder step. |
+| `ci-laravel.yml` | `.github/workflows/ci.yml` | Laravel + Inertia + Vite fullstack (with route/type codegen) | Same resolution for **both** PHP and Node. Includes the sqlite bootstrap + explicit wayfinder step. |
 | `ci-python.yml` | `.github/workflows/ci.yml` | Python: FastAPI/Flask services, CLIs, libraries | Resolves Python from `project.yml` → `.python-version`/`requires-python` → **fails**. `requirements.txt` does not count. **Hybrid** Python+Node repo: copy this, then paste `ci-node.yml`'s `build:` job alongside — see the template header. |
 | `release-tag.yml` | `.github/workflows/release.yml` | Any repo cutting `v*.*.*` releases | Triggers on tag push. Publishes a grouped GitHub Release. No toolchain, no deploy. |
 | `deploy-xserver.yml` | `.github/workflows/deploy-xserver.yml` | PHP-framework + Vite apps shipped to **shared hosting over SSH** (no root, no Docker): build on a runner, rsync, migrate on the server | Derived from three independently-written copies. Resolves Node the same way the CI templates do — all three hardcoded it, and one shipped on a different major than its CI built on. Migrates **production**; keeps a **mandatory** smoke test. Does **not** change your tier. |

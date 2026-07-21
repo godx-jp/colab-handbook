@@ -2,8 +2,8 @@
 // colab-handbook convention audit.
 //
 // This is NOT in-repo CI. It is a CLI you run locally (or on a schedule) that audits
-// MANY repositories across MULTIPLE owners at once — godx-jp, vo2vo, tiximax-net,
-// rika-entertainment, betoya-jp — plus local-only repos that have no GitHub presence
+// MANY repositories across MULTIPLE owners at once — five of them, GitHub orgs and
+// personal accounts alike — plus local-only repos that have no GitHub presence
 // at all. That breadth is the point: the failure mode it exists to catch is drift
 // BETWEEN repos, which no single repo's CI can ever see.
 //
@@ -30,7 +30,7 @@
 //
 // Usage:
 //   node audit.mjs                       # audit everything in the resolved repo list
-//   node audit.mjs --local ~/Future/foo  # audit one local path, ad hoc
+//   node audit.mjs --local ~/code/foo    # audit one local path, ad hoc
 //   node audit.mjs --config other.txt    # a different repo list
 //   node audit.mjs --json                # machine-readable
 //   node audit.mjs --quiet               # only repos with findings
@@ -553,7 +553,7 @@ const VALID_DEPLOY = new Set(["tag", "manual", "push-main", "none"]);
 // is where the mechanism fits, so the finding now has somewhere to point rather than only
 // telling repos what they are not.
 // NOTE: `stack` is deliberately NOT validated against a closed set. The old enum had
-// no value for a Capacitor mobile app and forced everyday to be mislabelled, so the
+// no value for a Capacitor mobile app and forced one of ours to be mislabelled, so the
 // enum was doing harm. It is now free-form documentation.
 
 function auditRepo(target, ctx) {
@@ -712,7 +712,7 @@ function auditRepo(target, ctx) {
   // exempt from its own rules — every check above runs on it unchanged — it is exempt
   // only from being audited as its own consumer.
   //
-  // Note this is narrower than it may look: rika-entertainment/preflight-hub emits the
+  // Note this is narrower than it may look: one of our Python+Node hybrids emits the
   // SAME two advisory lines, legitimately (its ci.yml really is an unstamped copy).
   // Identical text, opposite meanings — nothing here may generalise to that row.
   if (!isSelf) checkStamps(src, ctx.handbook, ctx.templateNames, fail, warn);
@@ -748,7 +748,7 @@ function checkRunbook(src, runbook, fail, warn) {
   else warn(`runbook "${runbook}" not found via the API — either it is missing, or the read failed (permissions/branch); verify in a checkout`);
 }
 
-// The bug this catches (found in the wild in shoots/hr-double/corebooks): a repo moved
+// The bug this catches (found in the wild in three of our Tier A repos): a repo moved
 // its trunk (main -> dev) but its CI workflows' push triggers still named the OLD
 // branches, so every merge to the real trunk ran ZERO CI — silently — while the B1
 // gate ("check trunk CI is green") checked runs that could never exist.
@@ -1010,7 +1010,7 @@ function loadTargets(opts) {
   return targets;
 }
 
-// Two path segments read better than one in a report: `futurelastic/everyday`.
+// Two path segments read better than one in a report: `company/project`.
 function labelForPath(p) {
   const r = resolve(p.startsWith("~") ? join(process.env.HOME || "", p.slice(1)) : p);
   const parent = basename(dirname(r));

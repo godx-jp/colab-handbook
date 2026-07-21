@@ -269,7 +269,7 @@ concurrent sessions don't lose writes.
 {
   "repos": ["/abs/path/repoA", "/abs/path/repoB"],
   "extraReserved": [8765],
-  "reservedFiles": ["~/Future/.claude/ports.reserved"],
+  "reservedFiles": ["~/code/.claude/ports.reserved"],
   "claimTTLHours": 24,
   "portRange": "5200-5999",
   "worktreeSubdir": ".worktrees"
@@ -459,7 +459,7 @@ repo paths is not something to publish). So the sweep runs *from* the machine ho
 
 ```sh
 colab update                 # report on every registered repo (read-only)
-colab update everyday        # limit to one repo (abs path, or a trailing path segment)
+colab update my-repo         # limit to one repo (abs path, or a trailing path segment)
 colab update --apply         # write the refreshable copies
 colab update --quiet --json  # for a scheduled run
 ```

@@ -1,7 +1,7 @@
 # audit
 
 An external convention auditor. It sweeps **many repos across multiple owners**
-(godx-jp, vo2vo, tiximax-net, rika-entertainment, betoya-jp) plus local-only repos
+(five in our case — a mix of GitHub orgs and personal accounts) plus local-only repos
 with no GitHub presence, and reports where each drifts from the handbook.
 
 This used to be an in-repo CI job (`validate-conventions.yml`). It is not any more: a
@@ -27,7 +27,7 @@ node audit.mjs                          # audit the resolved repo list (see belo
 node audit.mjs --quiet                  # only repos with findings
 node audit.mjs --json                   # machine-readable, for a dashboard/cron
 node audit.mjs --local ~/code/my-repo   # one local path, ad hoc (repeatable)
-node audit.mjs godx-jp/hr-double        # one remote slug, ad hoc
+node audit.mjs my-org/my-repo           # one remote slug, ad hoc
 node audit.mjs --config other-list.txt  # a different repo list
 ```
 
@@ -63,8 +63,8 @@ the handbook's current version, so a scheduled run is self-documenting.
   trunk**. Merges land on the trunk as pushes; if the CI workflows' `on.push.branches`
   still name the *old* trunk after a `main → dev` move, every merge runs zero CI while
   the B1 gate ("check trunk CI is green") checks runs that can never exist (this bit
-  shoots-automation, hr-double, and corebooks for real). **⚠ finding** when no CI-type
-  workflow gates push to the trunk — the message lists what the workflows *do* gate
+  three of our Tier A repos for real). **⚠ finding** when no CI-type workflow gates
+  push to the trunk — the message lists what the workflows *do* gate
   (`trunk "dev" is not CI-gated … (ci.yml gates: main, master)`).
   - Deploy/release workflows are **not** CI gates and are excluded — by filename
     (`deploy*`/`release*`) and by trigger shape (a **tags-only** or

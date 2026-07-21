@@ -277,10 +277,10 @@ Tier A (live product):
 ```yaml
 tier: A
 trunk: dev
-production: https://shoots.tempofast.com
+production: https://app.example.com
 deploy: tag
 stack: laravel-inertia
-ports: [7468, 7469]
+ports: [8080, 8081]
 php: 8.4
 ```
 

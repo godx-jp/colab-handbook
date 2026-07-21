@@ -8,7 +8,7 @@
 #
 # EDIT POINTS are marked `# EDIT:` — walk them once after copying.
 #
-# For: Laravel + Inertia + React + Vite fullstack apps with Omnify codegen.
+# For: Laravel + Inertia + React + Vite fullstack apps with a route/type codegen step.
 #
 # Two things here are NOT optional, and are the whole reason this is separate from
 # ci-node.yml:
