@@ -136,6 +136,17 @@ edits GitHub — a cleanup cron may be pruning another person's dead session on 
 it must not speak on their behalf on the Issue. A stale GitHub `in-progress` label is instead healed
 by the `claims --sync --prune` reconcile path (which acts on *your own* assigned issues).
 
+It also **never kills a process.** `doctor` reports **ghost ports** — something is LISTENING on a
+port inside the allocation window that the registry considers free — and stops at reporting, by the
+same rule `worktree rm` follows: only a cwd inside a known worktree proves ownership, and a ghost
+port by definition has no registry entry to prove anything. Killing by port would, in exactly the
+case the check exists for (a stale registry), kill an unrelated process legitimately holding it. So
+it joins the two books, names the disagreement, and leaves the verdict to you.
+
+A long-running service that legitimately lives in the window (an emulator, a local database) is not
+drift; declare it in `extraReserved` and it stops reporting *and* stops being allocatable. A ghost
+whose `cwd` no longer exists is the real orphan — that one wants killing.
+
 It also **never deletes a git ref**. `doctor` lists branches whose content is already in trunk —
 `git branch --merged` cannot find them after a squash — and stops there, even under `--prune`,
 printing the commands instead. Every other prune touches only colab's own state file; deleting refs
@@ -404,7 +415,7 @@ Run `colab <cmd> --help` for full detail.
 | `port free <port> \| --worktree N \| --claim I` | free ports |
 | `ports [--json]` | list allocated ports + the reserved set |
 | `worktree new <branch> [--issues N,M] [--ports N \| --at p1,..] [--name X] [--trunk T] [--session S] [--session-name S] [--repo P]` | create a worktree (optional) |
-| `worktree rm <name> [--force] [--repo P]` | remove a worktree; release its group; free its ports |
+| `worktree rm <name> [--force] [--repo P]` | remove a worktree; release its group; free its ports. Refuses on uncommitted tracked work **or** processes the worktree owns (cwd inside it); `--force` overrides both, terminating the owned processes. Ports still bound afterwards are reported as such, never as freed |
 | `worktree tag <name> --session S [--session-name S]` | **repair** session identity on an existing worktree **and its claims** (see *Session identity*) |
 | `worktrees [--json]` | list worktrees (status + on-disk liveness) |
 | `ship [--worktree N \| --branch B] [--message M] [--keep-worktree] [--delete-branch] [--dry]` | code-wrap **Phase B**: squash-merge a session branch → trunk. The branch is **kept** unless `--delete-branch`. Gated by repo autonomy (see *Phase B autonomy ladder*) |

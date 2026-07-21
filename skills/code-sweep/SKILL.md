@@ -78,6 +78,12 @@ colab worktree rm <name>       # releases its claims and frees its ports
 git branch -D <branch>         # -D: squash left no merge relation
 ```
 
+A sweep is exactly when a session's dev server is still running, so expect
+`worktree rm` to refuse with a list of processes the worktree owns. Stop them and
+re-run, or `--force` to have it terminate them — it kills only what the worktree
+owns by cwd. Do **not** reclassify such a candidate as `blocked`: it is a live
+process, not unfinished work.
+
 ## 4. Run the wraps — one at a time, re-checking between
 
 For each **wrap** candidate, in order:

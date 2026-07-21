@@ -192,3 +192,45 @@ test('full message layout: subject, Closes, bullets, body, trailers', () => {
     'Co-Authored-By: A <a@example.com>',
   ].join('\n'));
 });
+
+// --- issue #25.2: the --message path must SPLICE Closes, never concatenate ---
+//
+// `colab ship --message "<msg>"` used to build `${message}${closes}`, appending " — Closes #N" to
+// whatever the message ended with. For any message carrying a trailer block that welds text onto
+// the LAST TRAILER'S VALUE. GitHub still auto-closes, so it fails silently — and the resulting
+// commit is immutable. One is already on trunk with a corrupted Claude-Session URL.
+
+test('spliceCloses puts Closes under the subject, leaving a trailer block intact', () => {
+  const msg = [
+    'fix(tools): the thing',
+    '',
+    'Why it exists.',
+    '',
+    'Co-Authored-By: A <a@example.com>',
+    'Claude-Session: https://claude.ai/code/session_01ABC',
+  ].join('\n');
+  assert.strictEqual(squash.spliceCloses(msg, [25]), [
+    'fix(tools): the thing',
+    '',
+    'Closes #25',
+    '',
+    'Why it exists.',
+    '',
+    'Co-Authored-By: A <a@example.com>',
+    'Claude-Session: https://claude.ai/code/session_01ABC',
+  ].join('\n'));
+});
+
+test('spliceCloses never appends to the final trailer (the #25 regression, exactly)', () => {
+  const msg = 'fix: x\n\nClaude-Session: https://claude.ai/code/session_01BLZ';
+  const out = squash.spliceCloses(msg, [17]);
+  assert.ok(!/session_01BLZ — Closes/.test(out), 'Closes was welded onto the session URL');
+  assert.ok(out.endsWith('Claude-Session: https://claude.ai/code/session_01BLZ'),
+    'the trailer block must still be the last paragraph, uncorrupted');
+});
+
+test('spliceCloses skips issues the message already closes, and handles a subject-only message', () => {
+  assert.strictEqual(squash.spliceCloses('fix: x\n\nCloses #7', [7]), 'fix: x\n\nCloses #7');
+  assert.strictEqual(squash.spliceCloses('fix: x', [7, 8]), 'fix: x\n\nCloses #7, Closes #8');
+  assert.strictEqual(squash.spliceCloses('fix: x', []), 'fix: x');
+});

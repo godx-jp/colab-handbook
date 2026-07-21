@@ -29,6 +29,32 @@ function repoRoot(cwd) {
   return r.ok ? r.stdout : null;
 }
 
+/**
+ * The MAIN working tree's root, even when `cwd` is inside a linked worktree.
+ *
+ * `repoRoot` answers "which tree am I standing in", which is a different question and the wrong
+ * one for anything keyed by repo identity. Claims, ports and worktree records are all stored
+ * under the main repo path, so resolving from inside a worktree used to miss every one of them:
+ * `colab ship` composed its squash message with an EMPTY issue list and never emitted `Closes #N`,
+ * silently, while the issue stayed open with its code merged.
+ *
+ * `--git-common-dir` is the shared `.git` for every worktree of a repo, so its parent is the main
+ * tree. Falls back to `repoRoot` whenever the layout is not the ordinary one (bare repos, a
+ * `.git` file that is not named `.git`) rather than guessing.
+ */
+function mainRepoRoot(cwd) {
+  let dir = null;
+  // --path-format needs git >= 2.31; fall back to resolving the relative answer ourselves.
+  const abs = git(['rev-parse', '--path-format=absolute', '--git-common-dir'], cwd);
+  if (abs.ok && abs.stdout) dir = abs.stdout;
+  else {
+    const rel = git(['rev-parse', '--git-common-dir'], cwd);
+    if (rel.ok && rel.stdout) dir = path.resolve(cwd || process.cwd(), rel.stdout);
+  }
+  if (dir && path.basename(dir) === '.git') return path.dirname(dir);
+  return repoRoot(cwd);
+}
+
 /** origin remote URL, or null. */
 function originUrl(repo) {
   const r = git(['remote', 'get-url', 'origin'], repo);
@@ -135,7 +161,7 @@ function ghAssignedIssues(repo) {
 }
 
 module.exports = {
-  run, git, repoRoot, originUrl, detectTrunk, worktreeList, dirtyTracked,
+  run, git, repoRoot, mainRepoRoot, originUrl, detectTrunk, worktreeList, dirtyTracked,
   ghAvailable, ghIssueEdit, ghAssignedIssues,
   ghCurrentLogin, ghIssueView, ghIssueComment, ghRunLatest,
 };

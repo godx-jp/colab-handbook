@@ -17,6 +17,7 @@ const git = require('./lib/git');
 const ports = require('./lib/ports');
 const stamp = require('./lib/stamp');
 const squash = require('./lib/squash');
+const procs = require('./lib/procs');
 const {
   HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
   parseArgs, table, shortRepo,
@@ -26,23 +27,31 @@ const {
 // shared resolution helpers
 // ---------------------------------------------------------------------------
 
-/** Absolute repo root from --repo or cwd; throws UserError if none. */
+/**
+ * Absolute MAIN repo root from --repo or cwd; throws UserError if none.
+ *
+ * Always the main working tree, never a linked worktree — claims, ports and worktree records are
+ * keyed by the main repo path, so resolving to a worktree makes every one of those lookups miss.
+ * Running a command from inside the worktree it operates on is the obvious thing to do, and it
+ * used to silently produce `(none claimed)`. This normalises both entry points, so `--repo <a
+ * worktree path>` is corrected too.
+ */
 function resolveRepo(opts) {
   let r = opts.repo;
   if (r) {
     r = path.resolve(r);
     if (!fs.existsSync(r)) throw new UserError(`--repo path does not exist: ${opts.repo}`);
-    const root = git.repoRoot(r);
+    const root = git.mainRepoRoot(r);
     return root || r; // allow a non-git path (local-only claims still work)
   }
-  const root = git.repoRoot(process.cwd());
+  const root = git.mainRepoRoot(process.cwd());
   if (!root) throw new UserError('Not inside a git repo — pass --repo <path>');
   return root;
 }
 
 /** All repo roots colab should aggregate reserved ports from: config + current repo (if any). */
 function knownRepos(config) {
-  const cur = git.repoRoot(process.cwd());
+  const cur = git.mainRepoRoot(process.cwd());
   const extra = cur ? [cur] : [];
   // include repos referenced by state worktrees too
   const st = state.loadState();
@@ -1040,6 +1049,27 @@ function cmdWorktreeRm(argv) {
     }
   }
 
+  // safety: refuse if the worktree still OWNS running processes (cwd inside it).
+  // Same shape as the uncommitted-work gate above, and deliberately in the CLI rather than in the
+  // skills: code-wrap B4 and code-sweep §3 both tear worktrees down on separate code paths, so a
+  // skill-level fix would have to be written twice into two files already drifting apart.
+  const owned = wt.path && fs.existsSync(wt.path) ? procs.processesInDir(wt.path) : [];
+  if (owned.length && !opts.force) {
+    warn(`Worktree "${name}" still owns ${owned.length} running process(es):`);
+    for (const p of owned) {
+      warn(`  pid ${p.pid}${p.ports.length ? '  port ' + p.ports.join(',') : '  (no listener)'}  ${p.command}`);
+    }
+    throw new UserError(
+      'Removing the worktree would orphan them — they keep serving from a deleted checkout, ' +
+      'and the freed ports would be a lie. Stop them, or pass --force to terminate them.');
+  }
+  const killed = [];
+  for (const p of owned) {
+    const gone = procs.terminate(p.pid);
+    killed.push({ ...p, gone });
+    if (!gone) warn(`pid ${p.pid} survived SIGKILL — port ${p.ports.join(',') || '?'} may stay bound`);
+  }
+
   const attachedIssues = Object.values(st0.claims).filter((c) => c.worktree === name).map((c) => normIssueNum(c.issue));
 
   // pre-remove hook (abort on failure unless --force)
@@ -1075,7 +1105,19 @@ function cmdWorktreeRm(argv) {
 
   print(`✓ Removed worktree "${name}"`);
   print(`  released ${removed.claims} claim(s)${attachedIssues.length ? ' (' + attachedIssues.map((n) => '#' + n).join(' ') + ')' : ''}${gh ? '' : ' (local-only)'}`);
-  print(`  freed ports: ${removed.freedPorts.join(', ') || '—'}`);
+  if (killed.length) print(`  stopped ${killed.filter((k) => k.gone).length}/${killed.length} owned process(es): ${killed.map((k) => k.pid).join(', ')}`);
+
+  // "freed" must mean freed. Reporting a port as free while something still answers on it is what
+  // turned a leaked process into a clean bill of health, and it poisons the registry in both
+  // directions: the next session is handed the port and hits EADDRINUSE, or slides silently to
+  // another one. Verify each port, and name the ones that are still bound.
+  const stillBound = removed.freedPorts.filter((p) => procs.portIsBound(Number(p)));
+  const trulyFreed = removed.freedPorts.filter((p) => !stillBound.includes(p));
+  print(`  freed ports: ${trulyFreed.join(', ') || '—'}`);
+  if (stillBound.length) {
+    warn(`ports still BOUND after teardown: ${stillBound.join(', ')} — released in the registry but something is listening.`);
+    warn(`  find it with: lsof -iTCP:${stillBound[0]} -sTCP:LISTEN -P`);
+  }
   return 0;
 }
 
@@ -1265,7 +1307,7 @@ function cmdDoctor(argv) {
   const ttl = opts.ttl ? parseFloat(opts.ttl) : config.claimTTLHours;
 
   const report = { deadWorktrees: [], orphanClaims: [], staleClaims: [], orphanPorts: [], prunedPorts: [],
-    mergedFlips: [], mergedSweep: [], mergedDirty: [], mergedHookFail: [], shippedBranches: [], pruned: !!opts.prune };
+    mergedFlips: [], mergedSweep: [], mergedDirty: [], mergedHookFail: [], shippedBranches: [], ghostPorts: [], pruned: !!opts.prune };
 
   const apply = (fn) => opts.prune ? state.mutate(fn) : fn(state.loadState());
 
@@ -1366,6 +1408,25 @@ function cmdDoctor(argv) {
     report.shippedBranches = shippedBranches(repos, st4);
   }
 
+  // 8. ghost ports: something is LISTENING on a port the registry considers free.
+  //    Join two books and report the disagreement — never pick a winner, and never kill by port
+  //    (only cwd proves ownership; see lib/procs.js). Scoped to the allocation window and minus
+  //    the reserved trunk ports, which are SUPPOSED to be bound.
+  {
+    const st5 = state.loadState();
+    const [lo, hi] = ports.parseRange(config.portRange || '5200-5999');
+    const reserved = new Set(ports.reservedSet(config, knownRepos(config)).keys());
+    const allocated = new Set(Object.keys(st5.ports).map(Number));
+    const seen = new Set();
+    for (const l of procs.listeners()) {
+      if (!(l.port >= lo && l.port <= hi)) continue;
+      if (allocated.has(l.port) || reserved.has(l.port) || seen.has(l.port)) continue;
+      seen.add(l.port);
+      const cwd = procs.cwdOf(l.pid);
+      report.ghostPorts.push({ port: l.port, pid: l.pid, command: procs.commandOf(l.pid), cwd, cwdGone: !!cwd && !fs.existsSync(cwd) });
+    }
+  }
+
   if (opts.json) { print(JSON.stringify(report, null, 2)); return 0; }
 
   const verb = opts.prune ? 'Pruned' : 'Found';
@@ -1429,6 +1490,23 @@ function cmdDoctor(argv) {
     print(`    git -C <repo> branch -D ${ex.branch}${ex.remote ? `  &&  git -C <repo> push origin --delete ${ex.branch}` : ''}`);
     print('  NOT exhaustive: a branch whose work trunk later rewrote can conflict against trunk');
     print('  instead of matching it, and is omitted here rather than risk calling unmerged work spent.');
+  }
+  if (report.ghostPorts.length) {
+    issues += report.ghostPorts.length;
+    print('');
+    print(`Ghost ports (${report.ghostPorts.length}) — LISTENING, but the registry says free:`);
+    for (const g of report.ghostPorts) {
+      print(`  ${g.port}  pid ${g.pid}  ${g.command}`);
+      if (g.cwd) print(`        cwd ${g.cwd}${g.cwdGone ? '   ← DELETED (orphan of a torn-down worktree)' : ''}`);
+    }
+    print('  The next allocation can hand one of these out, and the session then hits EADDRINUSE');
+    print('  — or a non-strict dev server slides to another port and the registry is wrong twice.');
+    print('  doctor never kills by port (only cwd proves ownership). Inspect, then stop it yourself:');
+    print(`    lsof -iTCP:${report.ghostPorts[0].port} -sTCP:LISTEN -P   &&   kill ${report.ghostPorts[0].pid}`);
+    print('  A LEGITIMATE long-running service in the window (an emulator, a database) is not drift —');
+    print('  declare it so it stops reporting: add its port to `extraReserved` in ~/.colab/config.json,');
+    print('  which also stops colab handing it to a worktree. A "cwd DELETED" line above is the real');
+    print('  orphan and wants killing, not reserving.');
   }
   return 0;
 }
@@ -2558,9 +2636,10 @@ function cmdShip(argv) {
   }
   let commitMsg;
   if (opts.message) {
-    // --message overrides everything (Closes trailer still appended so the issues auto-close).
-    const closes = sess.issues.length ? ` — ${sess.issues.map((n) => 'Closes #' + n).join(', ')}` : '';
-    commitMsg = `${opts.message}${closes}`;
+    // --message overrides the subject/body, but Closes is spliced in as its own paragraph — never
+    // concatenated. Appending it welded ` — Closes #N` onto whatever the message ended with, which
+    // for any message carrying a trailer block corrupted the last trailer's value.
+    commitMsg = squash.spliceCloses(opts.message, sess.issues);
   } else {
     // Preserve the branch's crafted commit (subject + footers); insert Closes above the footers.
     commitMsg = buildSquashMessage(repoAbs, trunk, sess.branch, sess.issues);

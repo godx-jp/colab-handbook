@@ -170,19 +170,36 @@ function composeSquashMessage(commits, issues = []) {
     assembled += (TRAILER_RE.test(lastLine) ? '\n' : '\n\n') + extraTrailers.join('\n');
   }
 
+  return spliceCloses(assembled, issues);
+}
+
+/**
+ * Insert `Closes #N` as its own paragraph directly under the subject, skipping any number the
+ * message already closes.
+ *
+ * Never append: a message whose last paragraph is a trailer block (`Co-Authored-By:`,
+ * `Claude-Session:`) is the normal case, and gluing ` — Closes #N` onto the end corrupts the final
+ * trailer's VALUE. GitHub still auto-closes, so nothing fails loudly — but a `Claude-Session:` URL
+ * with text welded to it no longer resolves, and the commit is immutable once pushed.
+ *
+ * Exported so every caller composes the same way. The composed path always did this correctly; the
+ * `--message` override concatenated instead, which is exactly the drift a shared helper prevents.
+ */
+function spliceCloses(message, issues = []) {
   const missing = (issues || [])
     .map((n) => String(n).replace(/^#/, ''))
-    .filter((n) => n && !new RegExp(`[Cc]loses #${n}\\b`).test(assembled));
-  if (!missing.length) return assembled;
+    .filter((n) => n && !new RegExp(`[Cc]loses #${n}\\b`).test(message));
+  if (!missing.length) return message;
 
   const closesLine = missing.map((n) => `Closes #${n}`).join(', ');
-  const nl = assembled.indexOf('\n');
-  const head = nl === -1 ? assembled : assembled.slice(0, nl);
-  const rest = nl === -1 ? '' : assembled.slice(nl + 1).replace(/^\n+/, '');
+  const nl = message.indexOf('\n');
+  const head = nl === -1 ? message : message.slice(0, nl);
+  const rest = nl === -1 ? '' : message.slice(nl + 1).replace(/^\n+/, '');
   return rest ? `${head}\n\n${closesLine}\n\n${rest}` : `${head}\n\n${closesLine}`;
 }
 
 module.exports = {
   TYPE_WEIGHT, BREAKING_BONUS, TRAILER_RE,
   isSyncNoise, parseSubject, commitWeight, pickSubjectIndex, harvestTrailers, composeSquashMessage,
+  spliceCloses,
 };

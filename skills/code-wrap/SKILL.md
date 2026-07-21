@@ -298,6 +298,14 @@ git worktree remove <path>  # … else raw git
 `colab worktree rm` runs the repo's `.colab/hooks/pre-remove` (e.g. dropping a
 cloned DB) and refuses if there's uncommitted tracked work.
 
+**It also refuses when the worktree still owns running processes** — anything
+whose cwd is inside it, typically the dev server you started. That is not an
+obstacle to route around: remove the tree underneath a live server and it keeps
+listening on a port the registry now calls free, serving a checkout that no
+longer exists. Stop the server and re-run, or pass `--force` to have `colab`
+terminate what it owns. Ownership is decided by cwd, never by port, so `--force`
+cannot reach an unrelated process that merely holds the same port.
+
 **Keep it only for a named reason,** and write the reason in your report — never
 leave one standing silently:
 
