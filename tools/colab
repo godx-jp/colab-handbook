@@ -1902,6 +1902,46 @@ function handbookPaths() {
   return { root, templatesDir: path.join(root, 'templates') };
 }
 
+/** Where `install.sh --tools` freezes its stamped copy of this CLI (COLAB_HOME-aware). */
+function frozenDir() { return path.join(state.COLAB_DIR, 'bin'); }
+function frozenBin() { return path.join(frozenDir(), 'colab'); }
+
+/** The stamp sidecar beside a frozen copy, or null. Same convention as a workflow stamp. */
+function readFrozenStamp(dir) {
+  try {
+    return stamp.parseWorkflowStamp(fs.readFileSync(path.join(dir, stamp.FROZEN_STAMP_FILE), 'utf8'));
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Which colab is running: the frozen snapshot, or the working tree it was symlinked from?
+ *
+ * Worth printing rather than assuming, because the two answer differently to the same question by
+ * design — the symlinked one follows whatever branch the handbook clone has checked out, the frozen
+ * one does not. A service that was meant to be on the frozen path and silently is not looks
+ * identical from the outside until a checkout changes its behaviour; `--version` makes it visible.
+ */
+function selfProvenance() {
+  const st = readFrozenStamp(__dirname);
+  if (st && st.name === stamp.FROZEN_STAMP_NAME) {
+    return { frozen: true, version: st.version, source: __dirname, branch: null };
+  }
+  const { root } = handbookPaths();
+  const hb = stamp.handbookInfo(root);
+  const br = stamp.gitIn(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  return { frozen: false, version: hb.version, source: root, branch: br.ok && br.out ? br.out : null };
+}
+
+function cmdVersion() {
+  const self = selfProvenance();
+  const where = self.frozen
+    ? `frozen copy: ${self.source}`
+    : `working tree: ${self.source}${self.branch ? `, branch ${self.branch}` : ''}`;
+  return print(`colab 1.0.0 — colab-handbook ${self.version} (${where})`);
+}
+
 /** Current handbook version = nearest tag; 'v0' before the first tag exists. */
 function handbookVersion(root) {
   const d = git.git(['describe', '--tags', '--abbrev=0'], root);
@@ -2121,6 +2161,30 @@ function inspectRepo(entry, ctx) {
   return { label, path: abs, kind: 'local', artifacts, note };
 }
 
+/**
+ * Assess this machine's frozen CLI copy — reported alongside the fleet because it is the same
+ * question ("is a stamped copy behind the handbook?") about the one artifact that is NOT in any
+ * repo. It is also the one whose staleness nobody would otherwise notice: a service keeps running
+ * the old CLI perfectly happily, which is exactly what it was frozen to do.
+ *
+ * Reported only, never written, even with --apply: refreshing it re-copies the whole toolchain a
+ * live service is currently executing. That is install.sh's job and a human's decision.
+ */
+function inspectFrozen(ctx) {
+  const bin = frozenBin();
+  if (!fs.existsSync(bin)) {
+    return {
+      path: bin, installed: false, state: 'absent', from: null, to: ctx.hb.version,
+      reason: 'no frozen copy on this machine — an always-on service would have to resolve the CLI through a working tree, and a checkout would then change its behaviour. Install one: ./install.sh --tools',
+    };
+  }
+  const st = readFrozenStamp(frozenDir());
+  const c = stamp.classifyFrozen({
+    root: ctx.handbookRoot, hb: ctx.hb, stampVersion: st ? st.version : null,
+  });
+  return { path: bin, installed: true, ...c };
+}
+
 /** Two path segments read better than one in a report: `company/project`. */
 function entryLabel(entry) {
   if (isSlug(entry)) return entry;
@@ -2172,6 +2236,13 @@ Each stamped artifact is classified:
   n-a         cannot be assessed, always with a stated reason (an owner/name slug has no
               working tree here; a stamp from a tag this checkout lacks; an unknown template).
 
+It also reports THIS MACHINE's frozen CLI copy (<COLAB_HOME>/bin/colab, written by
+./install.sh --tools), classified the same way: current when the CLI has not changed since its
+stamp, behind when it has. Always-on services call that copy precisely so a checkout cannot move
+them, which means nothing will ever tell you it is old unless something asks — this is that
+something. It is REPORTED, NEVER WRITTEN, even with --apply: re-freezing swaps the toolchain a
+live service is executing, so it stays a deliberate act (re-run install.sh).
+
 What this command will NOT do, by design:
   • It never commits, stages or pushes. Every repo has its own tier and trunk rules; committing
     for you would make this tool violate the handbook it enforces. It writes files and stops —
@@ -2181,7 +2252,8 @@ What this command will NOT do, by design:
     fill, so it is reported for a hand re-paste.
   • It skips the handbook repo itself.
 
-Exit code: 0 when nothing is behind, 1 when anything is behind (scriptable), 2 on usage error.
+Exit code: 0 when nothing is behind, 1 when anything is behind — the frozen copy included,
+since a stale CLI is as much a thing to act on as a stale workflow. 2 on usage error.
 `;
 
 function cmdUpdate(argv) {
@@ -2190,9 +2262,20 @@ function cmdUpdate(argv) {
   });
   if (opts.help) return print(HELP_UPDATE);
 
+  // Run from the frozen copy this command has no handbook history to compare anything against —
+  // its "root" is <COLAB_HOME>, which is not a git repo. Untagged-handbook output would technically
+  // be honest and completely misleading: it reads as "the handbook has no tags".
+  const self = selfProvenance();
+  if (self.frozen) {
+    throw new UserError(
+      `this is the frozen copy (${self.source}), which carries no handbook history to compare against.\n` +
+      '  Run `colab update` from the handbook working tree — the frozen copy is for services, not for sweeps.');
+  }
+
   const { root, templatesDir } = handbookPaths();
   const hb = stamp.handbookInfo(root);
   const ctx = { handbookRoot: root, templatesDir, hb, tmplNames: stamp.templateNames(root) };
+  const frozen = inspectFrozen(ctx);
 
   const registryPath = reposTxtPath();
   const entries = reposTxtEntries(readReposTxt());
@@ -2253,14 +2336,21 @@ function cmdUpdate(argv) {
       handbook: { version: hb.version, untagged: hb.untagged, root },
       registry: registryPath,
       applied: !!opts.apply,
-      repos, written, failed, summary,
+      repos, written, failed, frozen, summary,
     }, null, 2));
-    return summary.behind > 0 ? 1 : 0;
+    return summary.behind > 0 || frozen.state === 'behind' ? 1 : 0;
   }
 
   // --- report ------------------------------------------------------------
   print(`registry:  ${registryPath}`);
   print(`handbook:  ${hb.version}${hb.untagged ? ' (untagged — stamp comparison inactive)' : ''}`);
+  // The frozen CLI first: it is one line, it is about THIS machine rather than the fleet, and it
+  // is the only row here that a reader cannot discover any other way.
+  if (!(opts.quiet && frozen.state === 'current')) {
+    const move = frozen.from ? `${frozen.from} → ${frozen.to}  ` : '';
+    print(`frozen:    ${frozen.state}  ${move}${frozen.reason}`);
+    if (frozen.installed) print(`           ${frozen.path}`);
+  }
   print('');
   if (hb.untagged) {
     warn('the handbook has no tags — there is no version line to compare against. Tag it, then re-run.');
@@ -2318,8 +2408,14 @@ function cmdUpdate(argv) {
   if (summary.unrelated) {
     print(`${summary.unrelated} unrelated file(s) share a template's name without its content — leave them alone.`);
   }
+  if (frozen.state === 'behind') {
+    print('');
+    print(`The frozen CLI at ${frozen.path} is ${frozen.from}, the handbook is ${frozen.to}.`);
+    print('  Re-freeze deliberately, from the handbook clone:  ./install.sh --tools');
+    print('  --apply never touches it: it is the toolchain your always-on services are running.');
+  }
 
-  return summary.behind > 0 ? 1 : 0;
+  return summary.behind > 0 || frozen.state === 'behind' ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -3244,6 +3340,12 @@ Commands:
 
 State is machine-local at ~/.colab/ (override with COLAB_HOME). Run any command with
 --help for details. Exit code is 0 on success, non-zero on failure.
+
+Two installs of this CLI, deliberately: ~/.local/bin/colab is a symlink and follows whatever
+branch the handbook clone has checked out (for your sessions), while ~/.colab/bin/colab is a
+stamped COPY that does not move on its own — ALWAYS-ON SERVICES call that one. Re-freeze it by
+re-running install.sh; \`colab update\` reports it when it is behind. \`colab --version\` says
+which of the two you are talking to.
 `;
 
 function print(s) { process.stdout.write(s.endsWith('\n') ? s : s + '\n'); return 0; }
@@ -3271,7 +3373,7 @@ function main(argv) {
     case 'config': return cmdConfig(rest);
     case undefined:
     case '-h': case '--help': case 'help': return print(HELP_ROOT);
-    case '--version': case 'version': return print('colab 1.0.0');
+    case '--version': case 'version': return cmdVersion();
     default:
       warn(`Unknown command: ${cmd}`);
       print(HELP_ROOT);

@@ -5,7 +5,8 @@
 #
 #   ./install.sh          install the skills into ~/.claude/skills/ (user level —
 #                         available in every repo you open).
-#   ./install.sh --tools  ALSO symlink tools/colab onto your PATH (~/.local/bin/colab).
+#   ./install.sh --tools  ALSO symlink tools/colab onto your PATH (~/.local/bin/colab)
+#                         AND freeze a stamped copy of the CLI at ~/.colab/bin/colab.
 #   ./install.sh --hooks  ALSO enable this clone's gitleaks pre-commit hook
 #                         (runs scripts/install-hooks.sh; per-machine, not synced).
 #   ./install.sh --fleet  ALSO seed ~/.colab/repos.txt from audit/repos.txt —
@@ -23,11 +24,20 @@
 #
 # KNOW WHAT A SYMLINK INSTALL MEANS: every link points into THIS WORKING TREE, not
 # at a copied snapshot. Checking this repo out onto a branch therefore changes the
-# skills — and, with --tools, the CLI — for every session on the machine, instantly
-# and invisibly. That is the point (edit and it is live) and the hazard (a half-
-# finished branch left checked out is a half-finished toolchain for everyone). Work
-# on this repo in a WORKTREE and leave the main checkout on trunk, which is what the
-# handbook asks of every other repo for the same reason.
+# skills — and, with --tools, the CLI on your PATH — for every session on the machine,
+# instantly and invisibly. That is the point (edit and it is live) and the hazard (a
+# half-finished branch left checked out is a half-finished toolchain for everyone).
+# Work on this repo in a WORKTREE and leave the main checkout on trunk, which is what
+# the handbook asks of every other repo for the same reason.
+#
+# THE ONE EXCEPTION IS THE FROZEN COPY. Following the working tree is right for a human
+# session and wrong for a process that outlives it: an always-on service started months
+# ago must not change behaviour because somebody checked out an unrelated branch. So
+# --tools ALSO writes a snapshot COPY to ~/.colab/bin/ (honouring COLAB_HOME), stamped
+# with the handbook version it came from. Point every always-on service — launch agents,
+# daemons, headless runners — at ~/.colab/bin/colab, never at ~/.local/bin/colab.
+# Refreshing it is then a deliberate act: re-run install.sh. `colab update` reports it
+# when the CLI has moved on since that stamp.
 set -eo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,6 +48,9 @@ TOOL_DEST="$HOME/.local/bin/colab"
 COLAB_DIR="${COLAB_HOME:-$HOME/.colab}"
 FLEET_SRC="$DIR/audit/repos.txt"
 FLEET_DEST="$COLAB_DIR/repos.txt"
+FROZEN_DIR="$COLAB_DIR/bin"
+FROZEN_BIN="$FROZEN_DIR/colab"
+FROZEN_STAMP="$FROZEN_DIR/STAMP"
 
 WITH_TOOLS=0; WITH_HOOKS=0; WITH_FLEET=0; DRY=0
 for a in "$@"; do
@@ -158,6 +171,64 @@ link_dir() {
   ln -s "$src" "$dest"; echo "  🔗 link: $name → $src"
 }
 
+# freeze — snapshot the CLI into <COLAB_HOME>/bin, stamped with the handbook version.
+#
+# The version comes from lib/stamp.js (handbookInfo), NOT from a `git describe` written out again
+# here. Two implementations of "which version is this" is precisely the drift this handbook exists
+# to kill, and the second one always ends up disagreeing about "behind" at the worst moment.
+freeze_cli() {
+  echo "frozen CLI → $FROZEN_BIN"
+
+  if ! have node; then
+    warn "node not found — cannot read the handbook version, so nothing was frozen."
+    echo "            Install node and re-run: always-on services need $FROZEN_BIN."
+    return
+  fi
+
+  local ver
+  ver="$(node -e 'const s=require(process.argv[1]);process.stdout.write(s.handbookInfo(process.argv[2]).version)' \
+    "$DIR/tools/lib/stamp.js" "$DIR" 2>/dev/null || true)"
+  if [ -z "$ver" ]; then
+    warn "could not determine the handbook version — nothing was frozen."
+    return
+  fi
+  if [ "$ver" = "v0" ]; then
+    warn "handbook has no tags yet — freezing @ v0. Tag it, then re-run to stamp a real version."
+  fi
+
+  # Never clobber something we did not write. Our copy always has a STAMP beside it, so a colab in
+  # this directory WITHOUT one was put there by hand (or is a symlink somebody pointed elsewhere —
+  # which would defeat the whole point of a frozen copy, silently).
+  if [ -e "$FROZEN_BIN" ] && [ ! -e "$FROZEN_STAMP" ]; then
+    echo "  ⚠ skip: $FROZEN_BIN exists with no STAMP beside it → left untouched (not ours)"
+    echo "          to adopt the frozen install: rm -rf '$FROZEN_DIR' && re-run install.sh --tools"
+    return
+  fi
+
+  if [ "$DRY" = 1 ]; then
+    echo "  [dry] copy: tools/colab + tools/lib/ → $FROZEN_DIR"
+    echo "  [dry] stamp: # colab-handbook: colab-bin @ $ver → $FROZEN_STAMP"
+    return
+  fi
+
+  # Wholesale replace, so a re-run is a true refresh and a file deleted upstream does not linger.
+  # Scoped removals rather than `rm -rf $FROZEN_DIR`: COLAB_HOME is user-supplied.
+  mkdir -p "$FROZEN_DIR"
+  rm -rf "$FROZEN_DIR/lib"
+  cp "$TOOL_SRC" "$FROZEN_BIN"
+  chmod +x "$FROZEN_BIN"
+  cp -R "$DIR/tools/lib" "$FROZEN_DIR/lib"
+  # Tests are for the working tree; the frozen copy is a runtime, and its fixtures reference repo
+  # paths that do not exist here.
+  rm -f "$FROZEN_DIR"/lib/*.test.js
+  cp "$DIR/tools/package.json" "$FROZEN_DIR/package.json"
+  printf '# colab-handbook: colab-bin @ %s\n' "$ver" > "$FROZEN_STAMP"
+  echo "  ❄ froze: colab @ $ver (copy — does NOT follow this clone's branch)"
+  echo "  always-on services must call this path, not ~/.local/bin/colab:"
+  echo "      $FROZEN_BIN"
+  echo "  refreshing it is deliberate — re-run install.sh; \`colab update\` reports when it is behind."
+}
+
 echo "== colab-handbook install ($([ "$DRY" = 1 ] && echo dry-run || echo apply)) =="
 
 preflight
@@ -199,8 +270,9 @@ if [ "$WITH_TOOLS" = 1 ]; then
       echo
       ;;
   esac
+  freeze_cli
 else
-  echo "tools: skipped (pass --tools to symlink colab onto your PATH)"
+  echo "tools: skipped (pass --tools to symlink colab onto your PATH + freeze a copy for services)"
 fi
 
 # --- optional: git hooks in THIS clone ---
@@ -259,6 +331,11 @@ else
     elif [ -e "$TOOL_DEST" ]; then
       warn "colab is installed at $TOOL_DEST but not on your PATH yet (see above)."
     fi
+    if [ -x "$FROZEN_BIN" ]; then
+      # Run the frozen copy, not the symlink: this proves the snapshot itself executes with the
+      # libraries beside it, which is the only thing a service will ever depend on.
+      echo "  ✓ frozen $("$FROZEN_BIN" --version 2>/dev/null || echo 'copy present but did not run')"
+    fi
   fi
 fi
 
@@ -267,6 +344,14 @@ echo "next"
 echo "  colab --help                    # what the CLI can do (needs --tools)"
 echo "  node audit/audit.mjs            # conformance report for your fleet"
 echo "  open CONVENTIONS.md             # the rules — ~15 minutes, the only normative file"
+if [ "$WITH_TOOLS" = 1 ]; then
+  echo
+  echo "  two colabs, on purpose:"
+  echo "    $TOOL_DEST — a symlink. Follows this clone's checked-out branch. For YOUR sessions."
+  echo "    $FROZEN_BIN — a stamped copy. Never moves on its own."
+  echo "  ALWAYS-ON SERVICES (launch agents, daemons, headless runners) MUST call the frozen path."
+  echo "  Refresh it deliberately: re-run install.sh. \`colab update\` reports it when it is behind."
+fi
 [ "$WARNED" = 1 ] && echo
 [ "$WARNED" = 1 ] && echo "  (some checks warned above — the install still ran; fix them when convenient)"
 

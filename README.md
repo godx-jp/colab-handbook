@@ -108,18 +108,36 @@ you want.
 | Flag | What it does |
 |---|---|
 | *(none)* | Symlink `skills/` into `~/.claude/skills/`, so they are available in every repo you open. |
-| `--tools` | Symlink the `colab` CLI to `~/.local/bin/colab`, and check that directory is really on your `PATH` — printing the exact line to add if it is not. |
+| `--tools` | Two installs of one CLI: a **symlink** at `~/.local/bin/colab` for your sessions (checking that directory is really on your `PATH`, and printing the exact line to add if not), plus a stamped **frozen copy** at `~/.colab/bin/colab` for always-on services — see below. |
 | `--hooks` | Point this clone's git at `.githooks/` (gitleaks pre-commit). `core.hooksPath` lives in `.git/config`, so it is per-clone, per-machine, and never travels with the repo. |
 | `--fleet` | Seed `~/.colab/repos.txt` from `audit/repos.txt`, only if it is absent. That list stays machine-local on purpose: it names your private repos, and this repo is public. |
 | `--all` | `--tools --hooks --fleet`. |
 | `--dry` | Print what would happen, change nothing. Combines with all of the above. |
 
+**Always-on services must call `~/.colab/bin/colab`.** The symlinked CLI follows
+whatever branch this clone has checked out — deliberate for a human session, and
+wrong for anything that outlives one. A daemon, a launch agent or a headless
+runner started months ago would silently change behaviour because somebody
+checked out an unrelated branch, and nothing would report it: the process keeps
+working, differently. So `--tools` also writes a **copy** to `~/.colab/bin/`
+(honouring `COLAB_HOME`), stamped with the handbook version it was taken from.
+That copy never moves on its own.
+
+Refreshing it is therefore an act, never a side effect: re-run `./install.sh
+--tools`. `colab update` tells you when it is due — it classifies the frozen copy
+exactly as it classifies a repo's template copy, so a release that changed no CLI
+code does not nag you. It never rewrites the copy, not even with `--apply`: that
+is the toolchain your running services are executing. `colab --version` says
+which of the two you are talking to.
+
 **3. Verify, and point the audit at your repos.**
 
 ```sh
 colab --help                 # not found? fix your PATH — step 2 prints the exact line
+colab --version              # which colab is this: the working tree, or the frozen copy?
 $EDITOR ~/.colab/repos.txt   # replace the examples with your own repos
 node audit/audit.mjs         # a conformance report across the whole fleet
+colab update                 # stamped copies that fell behind — the frozen CLI included
 ```
 
 Then read [`CONVENTIONS.md`](CONVENTIONS.md): ~15 minutes, and the only

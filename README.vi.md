@@ -108,18 +108,36 @@ nếu bạn thật sự chỉ cần bấy nhiêu.
 | Flag | Làm gì |
 |---|---|
 | *(không có)* | Symlink `skills/` vào `~/.claude/skills/`, để mở repo nào cũng có. |
-| `--tools` | Symlink CLI `colab` vào `~/.local/bin/colab`, và kiểm tra thư mục đó có thật sự nằm trong `PATH` không — thiếu thì in ra đúng dòng cần thêm. |
+| `--tools` | Cài một CLI theo hai cách: một **symlink** ở `~/.local/bin/colab` cho các phiên làm việc của bạn (có kiểm tra thư mục đó thật sự nằm trong `PATH` không, thiếu thì in ra đúng dòng cần thêm), cộng một **bản đóng băng** có đóng dấu ở `~/.colab/bin/colab` cho các service luôn-bật — xem ngay dưới. |
 | `--hooks` | Trỏ git của clone này vào `.githooks/` (pre-commit chạy gitleaks). `core.hooksPath` nằm trong `.git/config` nên là cấu hình per-clone, per-máy, không đi theo repo. |
 | `--fleet` | Tạo `~/.colab/repos.txt` từ `audit/repos.txt`, chỉ khi file chưa tồn tại. Danh sách đó cố tình nằm ngoài repo: nó ghi tên các repo private của bạn, còn repo này thì public. |
 | `--all` | `--tools --hooks --fleet`. |
 | `--dry` | In ra sẽ làm gì, không thay đổi gì. Ghép được với mọi flag trên. |
 
+**Service luôn-bật phải gọi `~/.colab/bin/colab`.** Bản CLI symlink chạy theo
+đúng nhánh mà clone này đang checkout — với một phiên làm việc của con người thì
+đó là chủ đích, nhưng với thứ sống lâu hơn một phiên thì đó là sai. Một daemon,
+một launch agent hay một runner headless bật từ mấy tháng trước sẽ âm thầm đổi
+hành vi chỉ vì ai đó checkout một nhánh chẳng liên quan, mà không có gì báo cả:
+tiến trình vẫn chạy, chỉ là chạy khác đi. Nên `--tools` còn ghi thêm một **bản
+copy** vào `~/.colab/bin/` (có tôn trọng `COLAB_HOME`), đóng dấu version handbook
+mà nó được lấy ra. Bản copy đó không bao giờ tự thay đổi.
+
+Vì vậy làm mới nó là một hành động chủ ý, không phải hệ quả phụ: chạy lại
+`./install.sh --tools`. `colab update` sẽ cho biết khi nào đến lúc — nó phân loại
+bản đóng băng đúng như cách phân loại bản copy template của một repo, nên một bản
+phát hành không đụng gì tới code CLI sẽ không càm ràm bạn. Nó không bao giờ ghi
+đè bản copy, kể cả với `--apply`: đó là bộ công cụ mà các service đang chạy của
+bạn đang thực thi. `colab --version` cho biết bạn đang nói chuyện với bản nào.
+
 **3. Kiểm lại, rồi chỉ cho audit biết phải soi repo nào.**
 
 ```sh
 colab --help                 # không thấy lệnh? sửa PATH — bước 2 in sẵn dòng cần thêm
+colab --version              # colab nào đây: bản working tree hay bản đóng băng?
 $EDITOR ~/.colab/repos.txt   # thay các dòng ví dụ bằng repo của bạn
 node audit/audit.mjs         # báo cáo conformance cho toàn bộ fleet
+colab update                 # các bản copy có đóng dấu đã tụt lại — kể cả CLI đóng băng
 ```
 
 Xong thì đọc [`CONVENTIONS.md`](CONVENTIONS.md): mất ~15 phút, và là file chuẩn

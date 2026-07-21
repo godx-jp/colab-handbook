@@ -296,3 +296,145 @@ test('no fingerprint is a bare stack/tool name', () => {
     }
   }
 });
+
+// --- the frozen CLI copy ----------------------------------------------------
+//
+// `install.sh --tools` copies the CLI to <COLAB_HOME>/bin so an always-on service never resolves it
+// through a working tree. That copy is the one stamped artifact nobody looks at: the service keeps
+// running the old CLI perfectly happily, which is what freezing it was FOR. So the only thing that
+// will ever say it is old is classifyFrozen, and it must say so on exactly the right git facts.
+
+/** A throwaway handbook: a git repo with tools/ files, tags on demand. */
+function tempHandbook(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'colab-hb-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const git = (...args) => execFileSync('git', args, { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] });
+  const write = (rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.writeFileSync(path.join(root, rel), text);
+  };
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.email', 'test@example.invalid');
+  git('config', 'user.name', 'test');
+  write('tools/colab', '#!/usr/bin/env node\n');
+  write('tools/lib/state.js', 'module.exports = {};\n');
+  write('README.md', 'docs\n');
+  git('add', '-A'); git('commit', '-qm', 'init');
+  const commit = (rel, text, msg) => { write(rel, text); git('add', '-A'); git('commit', '-qm', msg); };
+  return { root, git, commit, hb: () => stamp.handbookInfo(root) };
+}
+
+test('a frozen copy stamped at the current version is current', (t) => {
+  const h = tempHandbook(t);
+  h.git('tag', 'v1.0.0');
+  const c = stamp.classifyFrozen({ root: h.root, hb: h.hb(), stampVersion: 'v1.0.0' });
+  assert.strictEqual(c.state, 'current');
+});
+
+test('a handbook release that touched no CLI code does not make a frozen copy behind', (t) => {
+  // The whole reason this asks git rather than comparing version strings: otherwise every release
+  // marks every machine stale, and people learn to ignore the line.
+  const h = tempHandbook(t);
+  h.git('tag', 'v1.0.0');
+  h.commit('README.md', 'docs, revised\n', 'docs: prose only');
+  h.git('tag', 'v1.1.0');
+  const c = stamp.classifyFrozen({ root: h.root, hb: h.hb(), stampVersion: 'v1.0.0' });
+  assert.strictEqual(c.state, 'current');
+  assert.match(c.reason, /unchanged since v1\.0\.0/);
+});
+
+test('a change to the CLI script makes a frozen copy behind', (t) => {
+  const h = tempHandbook(t);
+  h.git('tag', 'v1.0.0');
+  h.commit('tools/colab', '#!/usr/bin/env node\n// new\n', 'feat: cli');
+  h.git('tag', 'v1.1.0');
+  const c = stamp.classifyFrozen({ root: h.root, hb: h.hb(), stampVersion: 'v1.0.0' });
+  assert.strictEqual(c.state, 'behind');
+  assert.strictEqual(c.from, 'v1.0.0');
+  assert.strictEqual(c.to, 'v1.1.0');
+});
+
+test('a change under tools/lib counts too — the frozen copy is the whole toolchain', (t) => {
+  // lib/ is copied alongside the script; a fix that lives entirely in a library would otherwise
+  // report "current" while every service on the machine still runs the bug.
+  const h = tempHandbook(t);
+  h.git('tag', 'v1.0.0');
+  h.commit('tools/lib/state.js', 'module.exports = { fixed: true };\n', 'fix: state');
+  h.git('tag', 'v1.1.0');
+  assert.strictEqual(stamp.classifyFrozen({ root: h.root, hb: h.hb(), stampVersion: 'v1.0.0' }).state, 'behind');
+});
+
+test('a frozen copy with no stamp is n-a, never behind and never current', (t) => {
+  const h = tempHandbook(t);
+  h.git('tag', 'v1.0.0');
+  const c = stamp.classifyFrozen({ root: h.root, hb: h.hb(), stampVersion: null });
+  assert.strictEqual(c.state, 'n-a');
+  assert.match(c.reason, /STAMP/);
+});
+
+test('a stamp naming a tag this checkout lacks is n-a, not behind', (t) => {
+  // Fetch your tags; do not guess. Guessing "behind" here would advise re-freezing on no evidence.
+  const h = tempHandbook(t);
+  h.git('tag', 'v1.0.0');
+  const c = stamp.classifyFrozen({ root: h.root, hb: h.hb(), stampVersion: 'v9.9.9-nope' });
+  assert.strictEqual(c.state, 'n-a');
+});
+
+test('a stamp NEWER than the handbook is n-a — that machine froze from ahead of here', (t) => {
+  const h = tempHandbook(t);
+  h.git('tag', 'v1.0.0');
+  h.commit('tools/colab', '#!/usr/bin/env node\n// x\n', 'feat: cli');
+  h.git('tag', 'v2.0.0');
+  h.git('checkout', '-q', 'v1.0.0');
+  const c = stamp.classifyFrozen({ root: h.root, hb: stamp.handbookInfo(h.root), stampVersion: 'v2.0.0' });
+  assert.strictEqual(c.state, 'n-a');
+  assert.match(c.reason, /NEWER/);
+});
+
+test('an untagged handbook deactivates the comparison, as it does for templates', (t) => {
+  const h = tempHandbook(t);
+  const c = stamp.classifyFrozen({ root: h.root, hb: h.hb(), stampVersion: 'v1.0.0' });
+  assert.strictEqual(c.state, 'n-a');
+  assert.match(c.reason, /untagged/);
+});
+
+// --- end to end through the real CLI ----------------------------------------
+
+/** Run `colab update --json` against a throwaway COLAB_HOME. Returns the parsed report. */
+function updateWithHome(t, setup) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'colab-frozen-home-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(home, 'repos.txt'), `${REPO_ROOT}\n`);
+  if (setup) setup(home);
+  const r = spawnSync(process.execPath, [path.join(REPO_ROOT, 'tools', 'colab'), 'update', '--json'],
+    { env: { ...process.env, COLAB_HOME: home }, encoding: 'utf8' });
+  return { report: JSON.parse(r.stdout), status: r.status, home };
+}
+
+test('`colab update` reports a machine with no frozen copy as absent, not as an error', (t) => {
+  const { report } = updateWithHome(t, null);
+  assert.strictEqual(report.frozen.installed, false);
+  assert.strictEqual(report.frozen.state, 'absent');
+  assert.match(report.frozen.reason, /install\.sh --tools/);
+});
+
+test('`colab update` reads the frozen stamp from COLAB_HOME, not from a hardcoded ~/.colab', (t) => {
+  // If this ever regresses, every test on a developer machine silently starts asserting against
+  // the real frozen copy that live sessions are using.
+  const { report } = updateWithHome(t, (home) => {
+    const bin = path.join(home, 'bin');
+    fs.mkdirSync(bin, { recursive: true });
+    fs.copyFileSync(path.join(REPO_ROOT, 'tools', 'colab'), path.join(bin, 'colab'));
+    fs.writeFileSync(path.join(bin, stamp.FROZEN_STAMP_FILE),
+      stamp.stampLine(stamp.FROZEN_STAMP_NAME, stamp.handbookInfo(REPO_ROOT).version));
+  });
+  assert.strictEqual(report.frozen.installed, true);
+  assert.ok(report.frozen.path.includes(report.registry.replace(/\/repos\.txt$/, '')),
+    'the reported path must sit under the COLAB_HOME the registry came from');
+  // Deliberately asserts WHERE the stamp was read from, never what state it classified to.
+  // State belongs to the fixture tests above, which control the git history they compare
+  // against. This one runs against the live repo, so any state assertion here reads as
+  // `behind` for every commit that touches tools/ between two tags — including the commit
+  // that added this test. Version equality was never the classifier: see the pair at
+  // 'a handbook release that touched no CLI code…' and 'a change to the CLI script…'.
+});

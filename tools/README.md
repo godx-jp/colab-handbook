@@ -26,6 +26,15 @@ colab --help
 
 Node >= 18. No build step, no `npm install`.
 
+`../install.sh --tools` does this and one more thing: it also writes a **frozen copy** of the CLI
+(`colab` + `lib/`) to `~/.colab/bin/`, stamped `# colab-handbook: colab-bin @ <version>`. The two
+installs differ on purpose. A symlink resolves through the handbook's **working tree**, so it
+follows whatever branch is checked out there — right for a human session, wrong for anything that
+outlives one: an always-on service would change behaviour because of an unrelated checkout, keep
+running, and report nothing. **Always-on services (launch agents, daemons, headless runners) call
+`~/.colab/bin/colab`.** Re-freezing is deliberate — re-run `install.sh`; `colab update` reports the
+copy when the CLI has moved on since its stamp, and `colab --version` names which install answered.
+
 ## Quick start
 
 ```sh
@@ -532,7 +541,22 @@ every out-of-date copy "hand-edited" and make the safe/unsafe distinction meanin
 A refreshed file is byte-identical to what `colab template <name> --force` would have written —
 `update` is that command applied only where it can prove the copy was untouched.
 
-Exit code is **1 when anything is `behind`** (so a scheduled run can alert), 0 otherwise.
+**The frozen CLI is reported alongside the fleet**, as one line before the table. Same question
+(is a stamped copy behind?), same git read (`git log <stamp>..HEAD -- tools/colab tools/lib`) — so
+a release that changed no CLI code does not mark the machine stale. It is the one stamped artifact
+that lives in no repo, and the one whose staleness nothing else would ever surface: a service goes
+on running the old CLI quite happily, which is what freezing it was for. States are `current`,
+`behind`, `n-a` and `absent` (no frozen copy installed at all). There is no `diverged`: a template
+copy is copy-and-own and its edits must be protected, while the frozen copy is a cache of this
+repo's own tool that `install.sh` overwrites wholesale.
+
+It is **reported, never written** — not even with `--apply`. Re-freezing swaps the toolchain a
+live service is executing, so it stays a human act (`./install.sh --tools`). Run `colab update`
+*from* the frozen copy and it refuses: that copy has no handbook history to compare against, and
+an "untagged handbook" report would have been technically true and completely misleading.
+
+Exit code is **1 when anything is `behind`** — the frozen copy included — so a scheduled run
+alerts on a stale CLI exactly as it does on a stale workflow. 0 otherwise.
 
 ### Register (fleet registries)
 

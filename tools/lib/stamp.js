@@ -24,6 +24,23 @@ const { execFileSync } = require('child_process');
 // placeholders the adopter fills in — see CLAUDE_BLOCK below.
 const CLAUDE_BLOCK_TEMPLATE = 'templates/repo-CLAUDE-block.md';
 
+// The FROZEN CLI copy: `install.sh --tools` copies `tools/colab` + `tools/lib/` into
+// `<COLAB_HOME>/bin/` and writes the stamp beside it, so a long-lived process never resolves the
+// CLI through a working tree. The symlink install (`~/.local/bin/colab`) is deliberately the
+// opposite — a human session should follow whatever branch the handbook clone has checked out —
+// but an always-on service must not change behaviour because somebody checked out an unrelated
+// branch. Refreshing the frozen copy is therefore an act (re-run install.sh), never a side effect.
+//
+// The stamp is a SIDECAR file rather than a line prepended into the script: `colab` is executable
+// with a shebang on line 1, and the sidecar keeps the copied bytes identical to the source.
+// It uses the ordinary workflow stamp convention (`# colab-handbook: <name> @ <version>`) and is
+// read with parseWorkflowStamp, so there is one stamp format on the machine, not two.
+const FROZEN_STAMP_NAME = 'colab-bin';
+const FROZEN_STAMP_FILE = 'STAMP';
+// What the frozen copy is made of, as repo-relative paths — the same role `templateFiles()` plays
+// for a template, and fed to the same `git log <stamp>..HEAD -- <paths>` question.
+const FROZEN_SOURCES = ['tools/colab', 'tools/lib'];
+
 // ---------------------------------------------------------------------------
 // git access to the handbook checkout
 // ---------------------------------------------------------------------------
@@ -399,8 +416,50 @@ function classifyStamped(opts) {
   return { state: 'diverged', reason: `hand-edited since it was copied @ ${stampVersion} — copy-and-own, review by hand`, from: stampVersion, to: hb.version };
 }
 
+/**
+ * Classify the frozen CLI copy: { state, reason, from, to }, with state one of
+ * current / behind / n-a.
+ *
+ * Deliberately the SAME question as classifyStamped asks of a template copy — "did the thing you
+ * copied actually change between your stamp and HEAD?", answered by `git log`, not by comparing
+ * version strings — so a handbook release that touched no CLI code does not tell every machine its
+ * frozen copy is stale. The version comparison and the git read are the ones above; nothing about
+ * "behind" is decided twice.
+ *
+ * No `diverged` state, and that is the one real difference from a template copy. A template is
+ * copy-and-own: the adopter is entitled to edit it, so an edit must be detected and protected. The
+ * frozen CLI is a CACHE of this repo's own tool — nobody owns it, install.sh overwrites it wholesale
+ * on every run, and a hand-edited one is a machine to fix, not an edit to preserve.
+ */
+function classifyFrozen(opts) {
+  const { root, hb, stampVersion } = opts;
+
+  if (hb.untagged || !hb.hasGit) {
+    return { state: 'n-a', reason: 'handbook is untagged — stamp comparison inactive', from: stampVersion || null, to: hb.version };
+  }
+  if (!stampVersion) {
+    return { state: 'n-a', reason: `no ${FROZEN_STAMP_FILE} beside the frozen copy — lineage unknown, re-run install.sh --tools`, from: null, to: hb.version };
+  }
+  if (cmpSemver(stampVersion, hb.version) > 0) {
+    return { state: 'n-a', reason: `stamp is NEWER than handbook ${hb.version} — this machine froze from a checkout ahead of here`, from: stampVersion, to: hb.version };
+  }
+
+  const { verifiable, changed } = templateChangedSince(root, FROZEN_SOURCES, stampVersion);
+  if (!verifiable) {
+    return { state: 'n-a', reason: `stamped @ ${stampVersion}, a version not in this handbook checkout — fetch tags, or re-freeze`, from: stampVersion, to: hb.version };
+  }
+  if (!changed) {
+    const why = cmpSemver(stampVersion, hb.version) === 0
+      ? 'frozen at the current handbook version'
+      : `CLI unchanged since ${stampVersion}`;
+    return { state: 'current', reason: why, from: stampVersion, to: hb.version };
+  }
+  return { state: 'behind', reason: `the CLI changed since ${stampVersion} — re-run install.sh --tools to re-freeze`, from: stampVersion, to: hb.version };
+}
+
 module.exports = {
   CLAUDE_BLOCK_TEMPLATE, WORKFLOW_FINGERPRINTS,
+  FROZEN_STAMP_NAME, FROZEN_STAMP_FILE, FROZEN_SOURCES, classifyFrozen,
   gitIn, gitCommonDir, isHandbookItself,
   handbookInfo, templateNames, templateFiles, templateChangedSince, templateAt,
   stampLine, parseWorkflowStamp, parseClaudeStamp,
