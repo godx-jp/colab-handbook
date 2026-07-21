@@ -136,6 +136,24 @@ edits GitHub — a cleanup cron may be pruning another person's dead session on 
 it must not speak on their behalf on the Issue. A stale GitHub `in-progress` label is instead healed
 by the `claims --sync --prune` reconcile path (which acts on *your own* assigned issues).
 
+It also **never deletes a git ref**. `doctor` lists branches whose content is already in trunk —
+`git branch --merged` cannot find them after a squash — and stops there, even under `--prune`,
+printing the commands instead. Every other prune touches only colab's own state file; deleting refs
+across every repo a shared machine happens to know about is categorically different.
+
+Because `ship` **keeps** branches by default, that list is the primary cleanup path and is *expected
+to be non-empty*: one branch lands on it per shipped session. It therefore prints **after** the
+health verdict and is **not** counted as drift — `All healthy — nothing to prune.` and a list of
+shipped branches together is the normal steady state, not a contradiction. Work through it when
+convenient.
+
+Two exclusions, both deliberate. Branches checked out in a worktree are skipped: a live session's
+branch is not spent, and a freshly-cut empty branch is "contained" by construction. And a branch
+whose work trunk has since **rewritten** will *conflict* against trunk rather than match it, so it
+is omitted rather than reported — being wrong in that direction would mean telling someone unmerged
+work was finished. **The list is honest, not exhaustive**; a periodic human sweep is still worth
+doing. Issue #17's own cleanup hit exactly this case.
+
 ## Session identity (which conversation)
 
 Every claim and worktree can record a **two-part Claude session identity**:
@@ -389,9 +407,9 @@ Run `colab <cmd> --help` for full detail.
 | `worktree rm <name> [--force] [--repo P]` | remove a worktree; release its group; free its ports |
 | `worktree tag <name> --session S [--session-name S]` | **repair** session identity on an existing worktree **and its claims** (see *Session identity*) |
 | `worktrees [--json]` | list worktrees (status + on-disk liveness) |
-| `ship [--worktree N \| --branch B] [--message M] [--keep-worktree] [--dry]` | code-wrap **Phase B**: squash-merge a session branch → trunk. Gated by repo autonomy (see *Phase B autonomy ladder*) |
+| `ship [--worktree N \| --branch B] [--message M] [--keep-worktree] [--delete-branch] [--dry]` | code-wrap **Phase B**: squash-merge a session branch → trunk. The branch is **kept** unless `--delete-branch`. Gated by repo autonomy (see *Phase B autonomy ladder*) |
 | `promote [--repo P] [--message M] [--dry]` | **promotion** trunk → main (`--no-ff`). Gated by `deploy` + `promotion`; never tags/deploys directly (see *Promotion*) |
-| `doctor [--prune] [--ttl H] [--json]` | heal dead worktrees / orphan + stale claims / orphan ports; flip + sweep **merged** worktrees (see *Worktree lifecycle*) |
+| `doctor [--prune] [--ttl H] [--json]` | heal dead worktrees / orphan + stale claims / orphan ports; flip + sweep **merged** worktrees (see *Worktree lifecycle*); **list** shipped branches awaiting deletion (never deletes them) |
 | `release-notes [<range>] [--repo P] [--out F] [--headline "..."]` | grouped Markdown release summary from git history (see below) |
 | `template [<name>] [--dest F] [--repo P] [--force]` | copy a handbook workflow template into a repo, **stamped** with the handbook version (see below) |
 | `update [<repo>...] [--apply] [--json] [--quiet]` | sweep the fleet registry for stamped copies that fell behind a changed template; `--apply` refreshes the **pristine** ones. Never commits; never touches a hand-edited copy (see below) |
@@ -562,12 +580,57 @@ Each step is checked; any failure aborts **before the push**, so trunk is never 
 | c. B0 sync | merge trunk **into** the branch | conflict in a **non-generated** file → abort (hand-merge); generated-only conflict → the repo's `.colab/hooks/pre-ship` regenerates, else abort |
 | d. B1 squash | re-verify CI green, then squash-merge branch → trunk | CI no longer green / squash fails |
 | e. B2 push | push trunk with `COLAB_SHIP=1` in the env | push rejected (commit stays local, unpushed) |
-| f. B3 teardown | `colab worktree rm` (releases claims + ports + `✅` comments) unless `--keep-worktree` | — |
+| f. B3 teardown | `colab worktree rm` (releases claims + ports + `✅` comments) unless `--keep-worktree`. The **branch is kept**; `--delete-branch` removes it local + remote | branch deletion is best-effort — a failure warns, it never fails a ship that already pushed |
 | g/h. B4 + summary | verify each issue auto-closed; post `🚢 Shipped to <trunk> by colab ship — <sha>` | non-closing issues are reported, not fatal |
 
-The squash commit message is `--message` (or `"<type>: <branch slug>"`) with a
-`— Closes #N, #M, …` trailer built from **every** issue the branch claims in `state.json` (a group
-branch closes all its siblings). A **generated** file is one matching `package-lock.json`,
+#### The squash commit message
+
+With `--message`, the subject is yours and a `— Closes #N, …` trailer is appended. Without it, the
+message is composed (`tools/lib/squash.js`, unit-tested):
+
+- **Subject** — the branch's **highest-weight** commit: breaking > `feat` > `fix` > `perf` >
+  `refactor` > `docs` > `test` > `chore`, ties going to the **oldest** (the commit that established
+  what the branch is for). Not the newest commit. That was the old rule, and it was wrong in exactly
+  the common case: on a well-run branch the newest commit is the docs pass, so features shipped
+  titled `docs:` and — because release notes group on the prefix (§4) — vanished from the changelog
+  without anything failing. If no commit carries a recognised prefix there is nothing to weigh, and
+  it falls back to the newest.
+- **Body** — `Closes #N` for **every** issue the branch claims in `state.json` (a group branch
+  closes all its siblings), then the other commit subjects as bullets with `chore(sync)` merge-noise
+  dropped, then the chosen commit's body, then `Co-Authored-By:` / `Claude-Session:` trailers
+  harvested from **every** commit on the branch and de-duplicated.
+
+`--dry` prints the subject it would use — the last moment a wrong one can be caught, since a bad
+subject fails silently and cannot be corrected once it is inside a published tag.
+
+#### Why B3 keeps the branch
+
+**The branch survives a ship. `--delete-branch` opts into removing it.**
+
+An agent deleting refs from a **shared remote** is the wrong default however well-verified the
+deletion is: reporting is safe and reversible, deleting is neither. Nobody is harmed by a branch
+that outlives its merge; someone can be harmed by a ref that vanishes from under them. So `ship`
+keeps it and `colab doctor` lists what has accumulated.
+
+The cost is accepted deliberately, and it is real: **shipped branches pile up, one per session.**
+A squash merge leaves **no ancestry**, so `git branch --merged <trunk>` will never list them — the
+standard cleanup check is structurally blind, not merely unrun. That is exactly why `doctor`'s list
+is the *primary* mechanism here rather than a safety net, and why it prints below the health verdict
+as routine maintenance instead of as drift.
+
+`--delete-branch` does it when you want it: local and remote, **after** B2 has pushed trunk (the
+content is durable before the ref goes), with `branch -D` since `-d` refuses a squashed branch for
+the same missing-ancestry reason. Best-effort — a failure warns rather than failing a ship that
+already succeeded. Passing it with `--keep-worktree` is refused with a warning, because git will not
+delete a branch that is still checked out.
+
+This premise has been wrong twice, in opposite directions — first a comment claiming a deletion that
+never happened, then a deletion the operator did not want. It is now a decision with a flag and a
+docstring behind it rather than an assumption. [`code-wrap`](../skills/code-wrap/SKILL.md) B3 and
+[`code-sweep`](../skills/code-sweep/SKILL.md) §3 tell humans to delete these by hand; under this
+default that guidance is **load-bearing**, not redundant.
+
+A **generated** file is one matching `package-lock.json`,
 `pnpm-lock.yaml`, `yarn.lock`, `composer.lock`, `Cargo.lock`, `go.sum`, `dist/`, `build/`,
 `public/build/`, `.astro/`, **plus** the repo's `.github/project.yml` `generated: [...]` globs.
 

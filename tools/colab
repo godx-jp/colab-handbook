@@ -16,6 +16,7 @@ const state = require('./lib/state');
 const git = require('./lib/git');
 const ports = require('./lib/ports');
 const stamp = require('./lib/stamp');
+const squash = require('./lib/squash');
 const {
   HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
   parseArgs, table, shortRepo,
@@ -1178,6 +1179,13 @@ Health-check the machine-local state and heal drift.
     --prune tears them down fully (pre-remove hook, git worktree remove, free ports) — but refuses
     ones with uncommitted TRACKED changes, reporting them instead. \`running\` worktrees are NEVER
     swept.
+  - Branches whose content is already in trunk are listed as ROUTINE MAINTENANCE, after the health
+    verdict and never counted as drift: \`ship\` keeps the branch by default, so one accumulates per
+    shipped session by design. doctor never deletes a ref — not even with --prune — it prints the
+    commands. \`git branch --merged\` cannot find these (a squash leaves no ancestry), so nothing
+    else will. Branches checked out in a worktree are excluded (a live session's branch is not
+    spent), and so are branches that CONFLICT against trunk rather than matching it — the list is
+    honest rather than exhaustive.
 
 This exists because claims made without a worktree were never auto-healed before, and a
 real repo accumulated 17 stale same-day claims. Run \`colab doctor\` regularly; \`--prune\`
@@ -1188,6 +1196,66 @@ in a cleanup cron.
   --json    machine-readable report
 `;
 
+const EMPTY_SET = new Set();
+
+/**
+ * Local branches whose content is already in trunk — the routine cleanup list.
+ *
+ * This is the PRIMARY mechanism, not a backstop. `ship` keeps the branch by default (deleting refs
+ * from a shared remote is not an agent's call), so a shipped branch accumulates per session by
+ * design and this list is expected to be non-empty. `git branch --merged <trunk>` cannot find any
+ * of them: sessions squash-merge, which leaves the branch tip outside trunk's ancestry, so the
+ * standard cleanup check reports clean forever. We reuse branchContainedInTrunk (a merge-tree
+ * content test) which is correct across squashes, and skip anything checked out in a worktree — a
+ * live session's branch is not spent, and an empty branch freshly cut from trunk is "contained" by
+ * construction.
+ *
+ * KNOWN HOLE, stated because a cleanup list that quietly under-reports is worse than none: a branch
+ * whose work trunk has since REWRITTEN conflicts against trunk rather than matching it, so
+ * branchContainedInTrunk answers "not contained" and it never appears here. That is the safe
+ * direction to be wrong in — the alternative is telling someone unmerged work is spent — but it
+ * means this list is honest, not exhaustive, and a periodic human sweep is still warranted. We hit
+ * exactly this case cleaning up after issue #17.
+ *
+ * REPORT ONLY, even under --prune. doctor's other prunes touch only colab's own state file;
+ * deleting refs across every repo a shared machine happens to know about is categorically different.
+ */
+function shippedBranches(repos, st) {
+  const out = [];
+  // repo -> its live session branches. A NESTED map, not a composite string key: a flat key needs
+  // a separator, and the only separator that cannot collide with a path or a ref name is NUL --
+  // which, typed raw, silently turned this file into 'binary data' (grep found nothing without
+  // -a, while node --check and git diff stayed happy). Nesting needs no separator at all, so the
+  // whole class of bug is gone rather than escaped around.
+  const liveByRepo = new Map();
+  for (const w of Object.values(st.worktrees)) {
+    if (!liveByRepo.has(w.repo)) liveByRepo.set(w.repo, new Set());
+    liveByRepo.get(w.repo).add(w.branch);
+  }
+  for (const repo of repos) {
+    if (!repo || !fs.existsSync(repo) || !git.repoRoot(repo)) continue;
+    const trunk = resolveTrunk(repo, projectDoc(repo));
+    if (!trunk) continue;
+    // Branches checked out anywhere in this repo (main checkout + every worktree) are off limits.
+    const checkedOut = new Set(
+      git.git(['worktree', 'list', '--porcelain'], repo).stdout.split('\n')
+        .filter((l) => l.startsWith('branch '))
+        .map((l) => l.slice('branch '.length).replace(/^refs\/heads\//, '')),
+    );
+    const refs = git.git(['for-each-ref', '--format=%(refname:short)', 'refs/heads/'], repo);
+    if (!refs.ok) continue;
+    for (const branch of refs.stdout.split('\n').filter(Boolean)) {
+      if (branch === trunk || branch === 'main') continue;
+      if (checkedOut.has(branch)) continue;
+      if ((liveByRepo.get(repo) || EMPTY_SET).has(branch)) continue;
+      if (!branchContainedInTrunk(repo, branch).contained) continue;
+      const onRemote = git.git(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`], repo).ok;
+      out.push({ repo: shortRepo(repo), repoAbs: repo, branch, trunk, remote: onRemote });
+    }
+  }
+  return out;
+}
+
 function cmdDoctor(argv) {
   const opts = parseArgs(argv, {
     values: { '--ttl': 'ttl' }, flags: { '--prune': 'prune', '--json': 'json', '-h': 'help', '--help': 'help' },
@@ -1197,7 +1265,7 @@ function cmdDoctor(argv) {
   const ttl = opts.ttl ? parseFloat(opts.ttl) : config.claimTTLHours;
 
   const report = { deadWorktrees: [], orphanClaims: [], staleClaims: [], orphanPorts: [], prunedPorts: [],
-    mergedFlips: [], mergedSweep: [], mergedDirty: [], mergedHookFail: [], pruned: !!opts.prune };
+    mergedFlips: [], mergedSweep: [], mergedDirty: [], mergedHookFail: [], shippedBranches: [], pruned: !!opts.prune };
 
   const apply = (fn) => opts.prune ? state.mutate(fn) : fn(state.loadState());
 
@@ -1291,6 +1359,13 @@ function cmdDoctor(argv) {
     }
   }
 
+  // 7. shipped-but-undeleted branches. Report-only in every mode (see shippedBranches).
+  {
+    const st4 = state.loadState();
+    const repos = [...new Set([...(config.repos || []), ...knownRepos(config)].map((r) => path.resolve(r)))];
+    report.shippedBranches = shippedBranches(repos, st4);
+  }
+
   if (opts.json) { print(JSON.stringify(report, null, 2)); return 0; }
 
   const verb = opts.prune ? 'Pruned' : 'Found';
@@ -1332,9 +1407,29 @@ function cmdDoctor(argv) {
     print(`Left ${report.mergedHookFail.length} merged worktree(s) — pre-remove hook vetoed teardown: ${report.mergedHookFail.join(' ')}`);
   }
   if (opts.prune && report.prunedPorts.length) print(`Freed ports: ${[...new Set(report.prunedPorts)].sort((a, b) => a - b).join(', ')}`);
+  // Deliberately NOT part of the health verdict below. `ship` keeps branches by default, so one
+  // accumulates per shipped session BY DESIGN — this is a routine maintenance list a human works
+  // through when they feel like it, not drift, and not a sign anything went wrong.
   const nothing = issues === 0 && report.staleClaims.length === 0 && report.orphanPorts.length === 0 &&
     report.mergedFlips.length === 0 && report.mergedSweep.length === 0 && report.mergedDirty.length === 0;
   if (nothing) print('All healthy — nothing to prune.');
+
+  // Printed AFTER the health verdict, on purpose: these are not drift. `ship` keeps the branch by
+  // default, so this list grows by one per shipped session and is expected to be non-empty.
+  if (report.shippedBranches.length) {
+    print('');
+    print(`Shipped branches you can delete when convenient (${report.shippedBranches.length}) — content is already in trunk:`);
+    for (const b of report.shippedBranches) {
+      print(`  ${b.branch} [${b.repo}] → in ${b.trunk}${b.remote ? ' · also on origin' : ''}`);
+    }
+    print('  Routine, not drift: `ship` keeps branches by default, so one lands here per session.');
+    print('  Listed here because `git branch --merged` cannot see them — a squash leaves no ancestry.');
+    print('  doctor never deletes a ref, --prune included. To remove one:');
+    const ex = report.shippedBranches[0];
+    print(`    git -C <repo> branch -D ${ex.branch}${ex.remote ? `  &&  git -C <repo> push origin --delete ${ex.branch}` : ''}`);
+    print('  NOT exhaustive: a branch whose work trunk later rewrote can conflict against trunk');
+    print('  instead of matching it, and is omitted here rather than risk calling unmerged work spent.');
+  }
   return 0;
 }
 
@@ -2181,46 +2276,41 @@ function newMigrations(mainRoot, trunk, branch) {
 }
 
 /**
- * Build the default squash-commit message when --message is absent, PRESERVING the branch's crafted
- * commit. We use the newest NON-merge commit on the branch (i.e. the crafted HEAD — a B0 merge commit
- * is skipped) as the squash subject + body verbatim, so the scoped subject and the Co-Authored-By /
- * Claude-Session footers survive the squash (the branch is deleted at B3, so this is the only record).
+ * Read the branch's non-merge commits (newest-first) as {subject, body} records.
  *
- * Then, ABOVE the original body (before the footers, blank-line separated):
- *   - a `Closes #N, Closes #M` line for every claimed issue not ALREADY present in the message
- *     (GitHub parses Closes anywhere; subjects stay short so it goes in the body, never the subject);
- *   - for a multi-commit branch, the earlier commit subjects as a bulleted list (newest first,
- *     skipping `chore(sync)` merge-noise).
+ * Split out from message composition on purpose: this half touches git, the other half is pure and
+ * lives in lib/squash.js where CI can unit-test it. `tools/colab` has no test harness, which is how
+ * the "newest commit titles the squash" bug survived long enough to reach a published tag.
  */
-function buildSquashMessage(mainRoot, trunk, branch, issues) {
+function branchCommits(mainRoot, trunk, branch) {
   const logShas = git.git(['log', `${trunk}..${branch}`, '--no-merges', '--format=%H'], mainRoot);
   const shas = logShas.ok ? logShas.stdout.split('\n').filter(Boolean) : [];
-  const headSha = shas[0] || git.git(['rev-parse', branch], mainRoot).stdout; // fallback: branch tip
-  const full = git.git(['log', '-1', '--format=%B', headSha], mainRoot).stdout;
-
-  const nl = full.indexOf('\n');
-  const subject = (nl === -1 ? full : full.slice(0, nl)).replace(/\s+$/, '');
-  const origBody = (nl === -1 ? '' : full.slice(nl + 1)).replace(/^\n+/, '').replace(/\s+$/, '');
-
-  // Closes for issues not already referenced anywhere in the crafted message.
-  const missing = issues.filter((n) => !new RegExp(`[Cc]loses #${n}\\b`).test(full));
-  const closesLine = missing.length ? missing.map((n) => `Closes #${n}`).join(', ') : '';
-
-  // Earlier commit subjects (newest first), skipping sync-merge noise.
-  const bullets = shas.slice(1)
-    .map((s) => git.git(['log', '-1', '--format=%s', s], mainRoot).stdout)
-    .filter((s) => s && !/^chore\(sync\)/.test(s))
-    .map((s) => `- ${s}`);
-
-  const blocks = [];
-  if (closesLine) blocks.push(closesLine);
-  if (bullets.length) blocks.push(bullets.join('\n'));
-  if (origBody) blocks.push(origBody);
-  const body = blocks.join('\n\n');
-  return body ? `${subject}\n\n${body}` : subject;
+  const list = shas.length ? shas : [git.git(['rev-parse', branch], mainRoot).stdout].filter(Boolean);
+  return list.map((sha) => {
+    const full = git.git(['log', '-1', '--format=%B', sha], mainRoot).stdout;
+    const nl = full.indexOf('\n');
+    return {
+      sha,
+      subject: (nl === -1 ? full : full.slice(0, nl)).replace(/\s+$/, ''),
+      body: (nl === -1 ? '' : full.slice(nl + 1)).replace(/^\n+/, '').replace(/\s+$/, ''),
+    };
+  });
 }
 
-const HELP_SHIP = `colab ship [--repo <path>] [--worktree <name> | --branch <br>] [--message "<msg>"] [--keep-worktree] [--dry]
+/**
+ * Default squash-commit message when --message is absent.
+ *
+ * The subject comes from the branch's HIGHEST-WEIGHT commit, not its newest one — see lib/squash.js
+ * for why (short version: the newest commit on a well-run branch is the docs pass, so features
+ * shipped titled `docs:` and vanished from the changelog). The body keeps the design that was never
+ * at fault: `Closes #N` per claimed issue, the other subjects as bullets, `chore(sync)` filtered,
+ * Co-Authored-By / Claude-Session trailers preserved.
+ */
+function buildSquashMessage(mainRoot, trunk, branch, issues) {
+  return squash.composeSquashMessage(branchCommits(mainRoot, trunk, branch), issues);
+}
+
+const HELP_SHIP = `colab ship [--repo <path>] [--worktree <name> | --branch <br>] [--message "<msg>"] [--keep-worktree] [--delete-branch] [--dry]
 
 The ONE sanctioned door for code-wrap Phase B: squash-merge a session branch into TRUNK. Autonomy is
 granted by the repo's .github/project.yml (\`autonomy: auto-trunk\`) — NOT by any flag. Without that
@@ -2234,8 +2324,25 @@ Sequence (each step gated; any failure aborts before the push — trunk is never
                         generated-only conflict → repo's .colab/hooks/pre-ship regenerates, else abort
   d. B1 squash          re-check CI green, then squash-merge branch → trunk (Closes every claimed issue)
   e. B2 push            push trunk (COLAB_SHIP=1 in env so a pre-push-guard lets it through)
-  f. B3 teardown        colab worktree rm (releases claims + ports + ✅ comments) unless --keep-worktree
+  f. B3 teardown        colab worktree rm (releases claims + ports + ✅ comments) unless --keep-worktree.
+                        The BRANCH IS KEPT — pass --delete-branch to remove it (local + remote).
   g. B4 verify + h.     confirm each issue auto-closed; post "🚢 Shipped to <trunk>" per issue
+
+The default squash subject is the branch's HIGHEST-WEIGHT commit (breaking > feat > fix > perf >
+refactor > docs > test > chore, ties to the oldest) — NOT its newest commit, which on a well-run
+branch is the docs pass and used to retitle whole features as \`docs:\`, hiding them from the
+release notes. The body is unchanged: Closes per issue, other subjects as bullets, footers kept.
+
+B3 KEEPS the branch by default. Deleting refs from a shared remote is not something this command
+does unasked, however certain it is that the content landed: reporting is safe and reversible,
+deleting is neither. The accepted cost is that shipped branches accumulate — and because a squash
+leaves no ancestry, \`git branch --merged\` can never list them, so \`colab doctor\` is where you
+find them. Treat that list as routine maintenance, not as an alarm.
+
+\`--delete-branch\` opts in: local + remote, only AFTER trunk is pushed, with \`branch -D\` (a
+squashed branch is not "merged" as far as git is concerned). Best-effort — a failure warns rather
+than failing a ship that already succeeded. Passing it together with --keep-worktree is refused
+with a warning, because git will not delete a branch that is still checked out.
 
 Options:
   --repo <path>       repo root (default: git root of cwd)
@@ -2243,8 +2350,60 @@ Options:
   --branch <br>       ship by branch name (its worktree, if any, is found in state)
   --message "<msg>"   subject for the squash commit (Closes trailer is always appended)
   --keep-worktree     do not remove the worktree after shipping
+  --delete-branch     delete the branch (local + remote) after shipping — off by default
   --dry               print the plan + precondition table and change NOTHING
 `;
+
+/**
+ * B3 (second half): what happens to the branch whose content has just landed on trunk.
+ *
+ * THE DEFAULT IS TO KEEP IT. Deleting requires an explicit `--delete-branch`.
+ *
+ * This premise has now been wrong twice in opposite directions, so state it exactly. Originally a
+ * comment in buildSquashMessage justified preserving the newest commit verbatim by claiming "the
+ * branch is deleted at B3" — nothing in the CLI deleted anything, so the branch always survived.
+ * That was then fixed by making B3 delete. The operator reversed it: an agent removing refs from a
+ * SHARED REMOTE is the wrong default however well-verified the deletion is, because reporting is
+ * safe and reversible while deleting is neither. So the branch survives again — but now by
+ * decision, documented, with an opt-in, instead of by an unimplemented comment.
+ *
+ * The consequence is accepted deliberately: shipped branches accumulate. `git branch --merged
+ * <trunk>` cannot find them (a squash leaves no ancestry, which is also why deletion needs `-D`
+ * rather than `-d`), so `colab doctor` reporting them is the mitigation, not a backstop.
+ *
+ * When deletion IS requested: it runs only after B2 pushed trunk, so the content is durable on the
+ * remote before the ref goes. It refuses to touch trunk or `main` under any circumstances, and
+ * every failure is a warning — a protected branch or a missing remote must not fail a ship that
+ * already succeeded.
+ */
+function handleShippedBranch(repoAbs, trunk, branch, { deleteBranch = false, worktreeKept = false } = {}) {
+  if (!branch) return;
+  if (!deleteBranch) {
+    print(`  keeping branch ${branch} (default; --delete-branch to remove it, or \`colab doctor\` to list what has accumulated)`);
+    return;
+  }
+  if (branch === trunk || branch === 'main') { // belt-and-braces; cmdShip already refuses trunk
+    warn(`refusing to delete "${branch}" — it is the trunk or main`);
+    return;
+  }
+  if (worktreeKept) {
+    // Both flags passed. git will not delete a checked-out branch, so honour the safer one and say
+    // why, rather than attempting a delete that is guaranteed to fail.
+    warn(`--delete-branch ignored for ${branch}: its worktree was kept (--keep-worktree), so the branch is still checked out`);
+    return;
+  }
+  const del = git.git(['branch', '-D', branch], repoAbs);
+  if (del.ok) print(`  deleted local branch ${branch}`);
+  else warn(`could not delete local branch ${branch}: ${del.stderr.split('\n')[0] || 'unknown error'}`);
+
+  // Remote: only if it is actually there. Checked against the local remote-tracking ref rather than
+  // the network, so an offline ship still finishes instead of hanging on ls-remote.
+  const onRemote = git.git(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`], repoAbs).ok;
+  if (!onRemote) return;
+  const rdel = git.run('git', ['push', 'origin', '--delete', branch], { cwd: repoAbs, env: { ...process.env, COLAB_SHIP: '1' } });
+  if (rdel.ok) print(`  deleted origin/${branch}`);
+  else warn(`could not delete origin/${branch}: ${rdel.stderr.split('\n')[0] || 'unknown error'} — delete it by hand`);
+}
 
 /** Resolve the session (branch, worktree name/path, claimed issue numbers) from --worktree/--branch. */
 function resolveShipSession(st, repoAbs, opts) {
@@ -2275,7 +2434,7 @@ function resolveShipSession(st, repoAbs, opts) {
 function cmdShip(argv) {
   const opts = parseArgs(argv, {
     values: { '--repo': 'repo', '--worktree': 'worktree', '--branch': 'branch', '--message': 'message' },
-    flags: { '--keep-worktree': 'keepWorktree', '--dry': 'dry', '-h': 'help', '--help': 'help' },
+    flags: { '--keep-worktree': 'keepWorktree', '--delete-branch': 'deleteBranch', '--dry': 'dry', '-h': 'help', '--help': 'help' },
   });
   if (opts.help) return print(HELP_SHIP);
   const repoAbs = resolveRepo(opts);
@@ -2331,7 +2490,15 @@ function cmdShip(argv) {
   if (opts.dry) {
     print(preOk ? '→ READY: preconditions pass. Re-run without --dry to ship.' : '→ NOT READY: fix the ✗ rows above.');
     print('  Plan: B0 sync trunk→branch · B1 squash-merge → ' + trunk + ' · B2 push · B3 ' +
-      (opts.keepWorktree ? 'keep worktree' : 'worktree rm') + ' · B4 verify closed · post 🚢 summary');
+      (opts.keepWorktree ? 'keep worktree' : 'worktree rm') + ' + ' +
+      (opts.deleteBranch && !opts.keepWorktree ? 'delete branch (local+remote)' : 'keep branch') +
+      ' · B4 verify closed · post 🚢 summary');
+    // Show the subject the squash WOULD get. The whole point of issue #17 was that a wrong subject
+    // is silent — nothing fails, CI is green, and it is only visible once it is in a published tag.
+    // A dry run is the last moment it can be caught, so it must be on screen there.
+    print('  Squash subject: ' + (opts.message
+      ? `${opts.message} [--message]`
+      : buildSquashMessage(repoAbs, trunk, sess.branch, sess.issues).split('\n')[0]));
     return preOk ? 0 : 1;
   }
   if (!preOk) { process.stderr.write('✗ Aborting: one or more preconditions failed (see ✗ above). Nothing was pushed.\n'); return 1; }
@@ -2432,6 +2599,7 @@ function cmdShip(argv) {
   cleanupEphemeral();
 
   // ---- (f) B3: teardown the worktree (releases claims + ports + ✅ comments) ----
+  const worktreeKept = !!(sess.name && opts.keepWorktree);
   if (sess.name && !opts.keepWorktree) {
     print(`B3: removing worktree ${sess.name} …`);
     try { cmdWorktreeRm([sess.name, '--repo', repoAbs, '--force']); }
@@ -2439,6 +2607,10 @@ function cmdShip(argv) {
   } else if (sess.name) {
     print(`B3: keeping worktree ${sess.name} (--keep-worktree)`);
   }
+
+  // B3 (cont.) — the shipped branch. Kept by default; --delete-branch opts in. MUST come after the
+  // worktree removal above: git refuses to delete a branch checked out in a worktree.
+  handleShippedBranch(repoAbs, trunk, sess.branch, { deleteBranch: opts.deleteBranch, worktreeKept });
 
   // ---- (g/h) B4 verify auto-close + post 🚢 summary per issue ----
   if (gh) {

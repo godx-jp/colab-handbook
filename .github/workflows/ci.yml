@@ -45,6 +45,11 @@ jobs:
           node --check tools/colab
           for f in tools/lib/*.js audit/audit.mjs; do node --check "$f"; done
           sh -n install.sh
+      # A syntax check reads bytes; it does not read like a human. Two raw NULs once made the CLI
+      # read as "binary data" to file(1) and invisible to grep without -a, while node --check, the
+      # tests, git diff and the audit all stayed green. Cheap byte scan, catches the whole class.
+      - name: No stray control bytes in tracked text files
+        run: node scripts/check-text-bytes.mjs
       # The stamp heuristic decides whether a repo's file is "ours". A false positive there ends in
       # advice to overwrite that file, so it is the one piece of logic here with unit tests.
       - name: Unit tests
