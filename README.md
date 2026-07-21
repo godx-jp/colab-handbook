@@ -1,88 +1,93 @@
+***English*** · [Tiếng Việt](README.vi.md)
+
 # colab-handbook
 
-Bộ quy ước và công cụ nhỏ để vận hành nhiều repo — nhiều phiên code song song,
-người thật lẫn AI agent — mà không giẫm chân nhau.
+A small set of conventions and tools for running many repos — many coding
+sessions in parallel, humans and AI agents alike — without stepping on each
+other.
 
-**Nếu bạn là AI agent, dừng ở đây và đọc [`CLAUDE.md`](CLAUDE.md).**
-File này dành cho con người.
+**If you are an AI agent, stop here and read [`CLAUDE.md`](CLAUDE.md).**
+This file is for humans.
 
-*(Tài liệu chuẩn tắc — [`CONVENTIONS.md`](CONVENTIONS.md) — viết bằng tiếng Anh
-để agent và tool đọc được; README này là cửa vào tiếng Việt cho anh em dev.)*
+*(The normative document — [`CONVENTIONS.md`](CONVENTIONS.md) — is written in
+English so agents and tooling can read it. This is the English front door; the
+Vietnamese one is [`README.vi.md`](README.vi.md). Both are only gateways, not
+normative — when the two disagree, **both are wrong** until they agree with
+`CONVENTIONS.md` again.)*
 
-## Đây là cái gì
+## What this is
 
-Một cuốn **handbook, không phải framework**. Nó quyết định **kết quả** — code
-merge vào đâu, release là gì, báo "tôi đang làm việc này" bằng cách nào — và cố
-tình để **cách hiện thực** (phiên bản Node, test runner, file CI của bạn) cho
-từng repo tự quyết.
+A **handbook, not a framework**. It decides **outcomes** — where code merges,
+what a release is, how you announce "I am working on this" — and deliberately
+leaves the **implementation** (your Node version, your test runner, your CI
+file) to each repo.
 
-Mọi thứ trong đây được chưng cất từ việc vận hành ~25 repo thật, trong đó có
-nhiều app production được bảo trì gần như hoàn toàn bởi AI agent chạy song song
-trên nhiều worktree. Mục anti-pattern không phải lý thuyết: từng mục là chuyện
-đã xảy ra thật, kèm sẹo để chứng minh.
+Everything here was distilled from running ~25 real repos, several of them
+production apps maintained almost entirely by AI agents working in parallel
+across many worktrees. The anti-pattern list is not theory: every entry is
+something that actually happened, with the scar to prove it.
 
-## Mô hình trong 30 giây
+## The model in 30 seconds
 
-Hai câu hỏi quyết định tất cả: **repo này có deploy production không — và nếu
-có, cái gì chặn giữa merge và người dùng?**
+Two questions decide everything: **does this repo deploy to production — and if
+so, what stands between a merge and the users?**
 
-- **Không → Tier B.** Một nhánh duy nhất: `main`. Không ship gì, tag tùy chọn.
-  Đa số repo nằm đây. **0 cổng.**
-- **Có, và chính lần promote là deploy → Tier C.** Code merge vào `dev` (CI
-  nhanh), promote `dev` → `main` — và cú push `main` đó *chính là* deploy.
-  Không có tag. **1 cổng.** Hợp với site đang chạy thật nhưng nhẹ đô, nơi nghi
-  thức tag chẳng ai giữ.
-- **Có, và một tag mới deploy → Tier A.** Code merge vào `dev` (CI nhanh),
-  thăng cấp lên `main` (chạy full test suite), và một tag `v*.*.*` — chỉ tag —
-  mới deploy. **2 cổng.**
+- **No → Tier B.** A single branch: `main`. Nothing ships, tags optional.
+  Most repos live here. **0 gates.**
+- **Yes, and the promotion itself is the deploy → Tier C.** Code merges into
+  `dev` (fast CI), you promote `dev` → `main` — and that push to `main` *is*
+  the deploy. No tag. **1 gate.** Right for sites that are genuinely live but
+  lightweight, where nobody would keep up a tagging ritual.
+- **Yes, and only a tag deploys → Tier A.** Code merges into `dev` (fast CI),
+  gets promoted to `main` (full test suite runs), and a `v*.*.*` tag — only the
+  tag — deploys. **2 gates.**
 
-**A/B/C là nhãn, không phải điểm số.** Đọc lướt dễ tưởng C "tệ hơn" B, nhưng B
-không có production nào cả. Chữ cái mô tả *hình dạng* pipeline, không phải mức
-độ nghiêm túc — chọn cái đúng với sự thật của repo mình.
+**A/B/C are labels, not scores.** Skim too fast and C looks "worse" than B, but
+B has no production at all. The letter describes the *shape* of the pipeline,
+not how seriously anyone takes it — pick the one that matches your repo's truth.
 
-Mỗi repo khai báo mình thuộc tier nào trong `.github/project.yml`, nên không ai
-phải đoán. Issue được **claim** bằng assignee + label `in-progress` trước khi
-bắt tay vào làm, nên các phiên song song không bao giờ đụng nhau trên cùng một
-việc.
+Every repo declares its tier in `.github/project.yml`, so nobody has to guess.
+Issues are **claimed** with an assignee plus the `in-progress` label before work
+starts, so parallel sessions never collide on the same task.
 
-Toàn bộ luật: [`CONVENTIONS.md`](CONVENTIONS.md). Đọc mất ~15 phút và là file
-**chuẩn tắc duy nhất** — mọi thứ còn lại trong repo chỉ phục vụ nó.
+The full rules: [`CONVENTIONS.md`](CONVENTIONS.md). It takes ~15 minutes to read
+and is the **single normative file** — everything else in the repo serves it.
 
-## Cấu trúc repo
+## Repo layout
 
-| Đường dẫn | Là gì |
+| Path | What it is |
 |---|---|
-| [`CONVENTIONS.md`](CONVENTIONS.md) | Luật. Chuẩn tắc, nguồn sự thật duy nhất (EN). |
-| [`CLAUDE.md`](CLAUDE.md) | Cửa vào cho AI agent — bản chưng cất vận hành (EN). |
-| [`project.schema.md`](project.schema.md) | Tham chiếu field của `.github/project.yml`. |
-| [`templates/`](templates/) | Điểm khởi đầu **copy-về-là-của-bạn**: CI, release, block `CLAUDE.md` cho repo adopt. **Không có gì được gọi từ xa** — copy, sửa, sở hữu. |
-| [`tools/`](tools/) | `colab` — một CLI nhỏ cho claim issue, cấp port, và quản lý worktree (tùy chọn). State JSON, không dependency. |
-| [`audit/`](audit/) | Trình kiểm tra conformance từ bên ngoài. Đọc mọi repo của bạn — mọi owner, kể cả repo local-only — và báo drift trong một lần chạy. Chỉ cảnh báo, không bao giờ chặn. |
-| [`skills/`](skills/) | Flow phiên làm việc portable: `code-triage` (chọn việc tiếp theo) → `code-start` (mở phiên) → `code-wrap` (ship + chưng cất), cộng `code-sweep` (dọn sạch mọi việc ĐÃ XONG trong một repo, chạy code-wrap từng cái) và `handbook-sync` (kéo MỘT repo lên bản handbook mới nhất, chạy từ trong repo đó). Cài thành skill Claude Code qua `install.sh`. |
+| [`CONVENTIONS.md`](CONVENTIONS.md) | The rules. Normative, the single source of truth (EN). |
+| [`CLAUDE.md`](CLAUDE.md) | The entry point for AI agents — the operational distillation (EN). |
+| [`project.schema.md`](project.schema.md) | Field reference for `.github/project.yml`. |
+| [`templates/`](templates/) | **Copy-and-own** starting points: CI, release, the `CLAUDE.md` block for adopting repos. **Nothing is called remotely** — copy it, edit it, own it. |
+| [`tools/`](tools/) | `colab` — a small CLI for claiming issues, allocating ports, and managing worktrees (optional). JSON state, zero dependencies. |
+| [`audit/`](audit/) | An external conformance checker. Reads all your repos — every owner, including local-only ones — and reports drift in a single run. Advisory only, never blocking. |
+| [`skills/`](skills/) | Portable session flow: `code-triage` (pick the next task) → `code-start` (open a session) → `code-wrap` (ship + distill), plus `code-sweep` (clear out everything ALREADY DONE in one repo, running code-wrap on each) and `handbook-sync` (bring ONE repo up to the latest handbook, run from inside it). Install them as Claude Code skills via `install.sh`. |
 
-## Adopt vào một repo
+## Adopting it into a repo
 
-Bản rút gọn — checklist đầy đủ ở
+The short version — the full checklist is
 [`CONVENTIONS.md` §9](CONVENTIONS.md#9-adopting-this):
 
-1. Xác định tier một cách trung thực (có production **hôm nay** không, chứ
-   không phải "sắp có").
-2. Thêm `.github/project.yml`.
-3. `gh label create in-progress` — label claim chưa tồn tại sẵn đâu.
-4. Dán [`templates/repo-CLAUDE-block.md`](templates/repo-CLAUDE-block.md) vào
-   `CLAUDE.md` của repo — đây là cách duy nhất để agent phát hiện ra bộ quy ước
-   này.
-5. Đảm bảo CI đạt hai kết quả bắt buộc: quét secret và build, với phiên bản
-   toolchain **resolve từ manifest của chính repo** — không bao giờ hardcode.
-   Copy template nếu thấy tiện.
+1. Determine the tier honestly (is there production **today**, not "soon").
+2. Add `.github/project.yml`.
+3. `gh label create in-progress` — the claim label does not exist by default.
+4. Paste [`templates/repo-CLAUDE-block.md`](templates/repo-CLAUDE-block.md)
+   into the repo's `CLAUDE.md` — this is the only way agents discover these
+   conventions.
+5. Make sure CI produces the two required outcomes: a secret scan and a build,
+   with toolchain versions **resolved from the repo's own manifest** — never
+   hardcoded. Copy a template if it helps.
 
-Nhánh có sẵn từ trước được **giữ nguyên** (grandfathered). Đừng đổi tên gì cả.
+Pre-existing branches are **grandfathered**. Do not rename anything.
 
-## Vì sao ép buộc ít vậy
+## Why so little enforcement
 
-Các repo private của chúng ta nằm trên gói GitHub không có branch protection —
-không thể cấm push vào `main`. Nên handbook này không giả vờ ép buộc; nó làm
-cho việc **tuân thủ rẻ và việc kiểm tra rẻ**. Audit tool báo drift; quy ước
-giải thích *vì sao* từng luật tồn tại để bạn tự phán đoán khi nào đáng phá luật.
-Khi phá, hãy sửa tài liệu trong cùng PR — một tài liệu mô tả một repo không tồn
-tại là thứ tệ nhất trong nghề này.
+Our private repos sit on a GitHub plan without branch protection — pushes to
+`main` cannot be forbidden. So this handbook does not pretend to enforce; it
+makes **compliance cheap and checking cheap**. The audit tool reports drift; the
+conventions explain *why* each rule exists, so you can judge for yourself when
+breaking one is worth it. When you do break one, fix the documentation in the
+same PR — a document describing a repo that does not exist is the worst thing in
+this business.
