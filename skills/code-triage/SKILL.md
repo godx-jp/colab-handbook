@@ -1,6 +1,6 @@
 ---
 name: code-triage
-description: "Decide what to work on next in ONE repo. Takes every open Issue, discards the ones already shipped and the ones someone else holds, groups what must move together (issues touching the same files MUST share a branch), orders what remains by blast radius, and says which groups can be started RIGHT NOW — including whether the repo's trunk CI is alive enough to merge into. Outputs claim + branch commands that feed straight into code-start. Trigger phrases: 'what should I work on', 'triage the issues', 'what can we start', 'plan the next session', 'group the open issues', 'what is ready to pick up', 'sort the backlog'. Runs before code-start; pairs with code-start and code-wrap."
+description: "Decide what to work on next in ONE repo. Takes every open Issue, discards the ones already shipped and the ones someone else holds, groups what must move together (issues touching the same files MUST share a branch), orders what remains by blast radius, and says which groups can be started RIGHT NOW — including whether the repo's trunk CI is alive enough to merge into. Outputs claim + branch commands that feed straight into code-start. Cheap to re-run: a no-change ping short-circuits in three calls. Trigger phrases: 'what should I work on', 'triage the issues', 'what can we start', 'plan the next session', 'group the open issues', 'what is ready to pick up', 'sort the backlog'; and — when this session's last act was a triage — the re-ping forms 'again', 'anything new?', 'check again', 'anything to pick up yet?', or a bare 'go'. Runs before code-start; pairs with code-start and code-wrap."
 ---
 
 # code-triage — what should we work on next?
@@ -22,6 +22,123 @@ work was already shipped.
 So triage that skips verification is worse than no triage: it hands someone a
 confident, wrong plan. **Every candidate gets checked against the code before it
 reaches your list.**
+
+## 0. Has anything changed? — ask before doing anything else
+
+This skill was built to run once, be read, and end. It is now **pinged on a loop**: a
+long-lived session per repo, re-run whenever it goes idle. A full pass on a ~30-issue
+backlog is roughly 35-60 network calls and ~60 local ones. On a re-run 30 minutes later
+with no new commits, issues or claims, **about 4 of those ~50 carry new information** —
+the gather, the shipped-verification, the grouping and the ordering are pure functions of
+inputs that did not move, and re-derive a byte-identical answer.
+
+So the first thing this skill does is decide whether it needs to run at all.
+
+**The fingerprint — four inputs, three network calls:**
+
+```sh
+GITDIR="$(git rev-parse --path-format=absolute --git-common-dir)"
+CACHE="$GITDIR/colab-triage.json"
+REPO="$(dirname "$GITDIR")"      # the MAIN checkout — see the note on input 4
+
+git fetch origin --quiet && git rev-parse origin/<trunk>          # 1. trunk sha
+gh issue list --state open --limit 100 --json number,updatedAt,labels \
+  | shasum -a 256 | cut -c1-16                                    # 2. backlog digest
+NWO=$(gh repo view --json nameWithOwner -q .nameWithOwner)        # 3. dependency digest
+gh api graphql -F owner="${NWO%%/*}" -F name="${NWO##*/}" -f query='
+  query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){
+    issues(states:OPEN,first:100){ nodes{ number issueDependenciesSummary{ blockedBy } } } } }' \
+  -q '.data.repository.issues.nodes[]|"\(.number):\(.issueDependenciesSummary.blockedBy)"' \
+  | shasum -a 256 | cut -c1-16
+python3 -c 'import json,os,sys                                    # 4. claim digest (local, 0 calls)
+r=os.path.realpath(sys.argv[1]); s=json.load(open(os.path.expanduser("~/.colab/state.json")))
+print(sorted(k for k,v in s.get("claims",{}).items() if os.path.realpath(v["repo"])==r),
+      sorted(n for n,w in s.get("worktrees",{}).items() if os.path.realpath(w["repo"])==r))' "$REPO"
+```
+
+All four equal to the stored run ⇒ **report `nothing has changed since <ts>`, re-print the
+stored conclusion (§0.1), and stop.** Three calls instead of fifty. Input 2 is not an extra
+cost on a run that *does* proceed — §1 needs that list anyway.
+
+- **Where the cache lives, and why not `~/.colab/`.** `--git-common-dir` resolves to the
+  main checkout's `.git` even from inside a worktree, so every worktree of the repo shares
+  one cache and the cache dies with the clone — the correct lifetime for a cache *of* that
+  clone. It is deliberately **not** folded into `~/.colab/state.json`: that file is a
+  published contract with readers outside this repo (`tools/lib/state.js` says so in its
+  header), and a private cache wedged into it becomes a field other tools must parse.
+- **Anchor input 4 on the main checkout, not `$PWD`.** `colab` records every claim and
+  worktree against the **main** repo path, so a filter comparing against the current
+  directory matches nothing whenever it runs from inside a worktree — and "no claims" is
+  indistinguishable from "no claims *found*". `dirname` of the common git dir is that path
+  from anywhere in the repo, worktrees included. (`code-sweep` §1 filters the same state
+  and needs the same anchor for the same reason.)
+- **Input 4 digests this repo's slice, not the file's mtime.** `~/.colab/state.json` is
+  machine-global, and `colab` rewrites it atomically on every command — so its mtime moves
+  when an unrelated repo allocates a port, and a triage that re-ran fully on that would
+  short-circuit almost never. Reading the file is local and free; read it precisely. (Same
+  reason it is a *digest* and not a timestamp: an atomic rewrite with identical contents is
+  not a change.)
+- **Compare for equality, never for recency.** "Newest `updatedAt` is no later than last
+  time" is wrong: when the most recently touched issue *closes*, it leaves the open set and
+  the maximum moves **backwards** — the busiest issue in the repo changing state reads as
+  "nothing happened". Digest the whole `(number, updatedAt)` set and compare digests.
+- **`updatedAt` does not see dependency edges — measured on the live API.** Adding a
+  `blocked_by` edge and removing it again left `updatedAt` byte-identical across both
+  writes, while a label add/remove moved it twice in the same minute. Edges do land in the
+  issue timeline (`blocked_by_added` / `blocked_by_removed`), but reading that is a call
+  *per issue*; input 3 is the entire graph in one query. Drop it and the fingerprint goes
+  blind to precisely the data the §5 readiness gate turns on — a new blocker would be
+  reported as `free (checked)` forever.
+- **What is deliberately NOT in the fingerprint.** Trunk CI, live worktrees and live
+  processes are volatile by nature and are never cached. So a matching fingerprint means
+  *the backlog has not moved*; it never means *you may merge*. Nothing downstream may skip
+  its own CI check on the strength of it.
+- **The cache is an optimisation, never an authority.** Missing, unparseable, or written by
+  a version you do not recognise ⇒ run the full pass. Never report "nothing changed" from a
+  cache you could not read — a silent fall-through to "all quiet" is the one failure mode
+  that costs a day rather than a call.
+
+### 0.1 Persist the conclusion, not only the writes
+
+§4 already argues this for dependency edges: *a sequence you worked out and left in a report
+is lost the moment the report scrolls away*. The same is true of the report itself. Write
+the §6 output into `$CACHE` alongside the fingerprint — the ranked **ready** groups, the
+**blocked** bucket with its named blockers, **taken**, and **close these**. Without it the
+short-circuit is useless: it would announce that nothing changed and have nothing to show.
+
+Record the **scope** of the conclusion with it (see code-sweep's scoped mode; triage's
+single-issue mode below is the same shape), and apply the coverage rule:
+
+> **Short-circuit only when the fingerprint matches AND the stored conclusion's scope
+> *covers* the current request.** Covers, not equals. A stored repo-wide conclusion can
+> serve a re-ping about one issue — filter it. A stored single-issue conclusion cannot
+> serve a repo-wide ping, however unchanged the world is: that run never looked at the
+> rest, and an unexamined issue is not a clean one.
+
+### 0.2 Running this twice must change nothing
+
+Under ping-when-idle a re-run is the normal case, not the exception, so every write this
+skill performs has to be idempotent:
+
+- **Dependency edges: read before writing.** `gh issue view <N> --json blockedBy` and skip
+  the POST if the edge is already there. §4 writes edges; a second triage reaching the same
+  conclusion must not file it twice.
+- **Already-shipped closes:** an issue already closed is not re-closed and not re-evidenced.
+- **`deps-checked` has a timestamp — it is just not on the label.** The label is a cache
+  with no expiry, so today it never goes stale; but the `labeled` event that set it is in
+  the timeline, and so is every edge write. That makes staleness computable rather than a
+  matter of trust:
+
+  ```sh
+  gh api "repos/{owner}/{repo}/issues/<N>/timeline" \
+    -q '.[]|select(.event=="labeled" or .event=="blocked_by_added")|"\(.created_at) \(.event)"'
+  ```
+
+  **A `blocked_by_added` later than the newest `deps-checked` `labeled` event means the
+  label is stale** — treat the issue as `dependencies unchecked`, re-run the §5 gate, and
+  remove the label if a blocker is now open. `CONVENTIONS.md` §5 assigns removal to whoever
+  adds the blocker; this is how the next reader finds out when they didn't. Only spend the
+  call on issues a `deps-checked` is actually deciding for.
 
 ## 1. Gather
 
@@ -77,6 +194,22 @@ for its number. A commit mentioning `#88` proves someone typed `#88`.
   off the list. That is real triage output, not a detour.
 - **Partly shipped** → narrow it to what is actually missing before queueing, so
   nobody re-does the finished half.
+
+**Memoize this pass against the trunk sha.** Both commands are pure functions of the tree:
+with the tree unmoved, they return byte-identical results, and this is the pass that costs
+~2 local invocations per issue on top of the network. So cache the verdict per issue in
+`$CACHE` (§0) keyed by the **trunk sha it was computed at**, and reuse it while that sha
+holds. A new trunk sha invalidates every entry at once — which is right, because a merge is
+exactly the event that can ship an issue.
+
+Two conditions on that, both of which have teeth:
+
+- **Only when the working tree is clean.** `grep -rl` reads the *working tree*, not the
+  commit; with uncommitted changes the result is not a function of the sha at all. Key on
+  `git status --porcelain` being empty, or do not cache.
+- **Only the verdict, never the evidence.** Re-quote `file:line` from the current tree
+  before putting it in a report — §3 already warns that refs rot, and a cached line number
+  is a ref that rots invisibly.
 
 ## 3. Group — this is a correctness constraint, not tidiness
 
@@ -143,6 +276,8 @@ gh api -X POST repos/{owner}/{repo}/issues/<blocked>/dependencies/blocked_by -F 
 The report still explains the reasoning — that is what prose is good for. The
 relationship is the part the readiness gate above (and any other tool) reads.
 
+- **Read before you write.** The edge may already exist — this triage may be the second
+  one to reach the same conclusion (§0.2). Check `blockedBy` first; do not file a duplicate.
 - **Record only what you actually determined.** A sequence you inferred from titles is
   a guess; leave it unwritten and say so in the report.
 - **Clearing one is equally part of the job.** If a blocker has landed, remove the
@@ -165,6 +300,13 @@ That converts *unchecked* into *checked-and-free*, which is the one distinction 
 cannot make for itself — an empty `blockedBy` is identical whether someone checked or
 nobody did. A prose comment saying "no blockers" does not do this; it is unreadable to
 the gate, which is the whole reason this convention exists.
+
+**Set it only after looking, and check it has not gone stale before trusting it** — the
+label carries no expiry of its own, so §0.2 derives one from the timeline.
+
+Single-issue mode is also a **scope**, and §0.1's coverage rule applies to it: a conclusion
+reached about one issue answers for that issue and no other, no matter how still the repo
+has been since.
 
 ## 5. The readiness gate — can this start *right now*?
 
@@ -217,6 +359,12 @@ Hand the top group to **code-start**, which will re-verify the claim before taki
 
 ## Verify complete
 
+- A run that short-circuited said so, named the timestamp it compared against, and
+  re-printed a stored conclusion whose scope covers what was asked.
+- A run that proceeded wrote its fingerprint **and** its conclusion to `$CACHE`, so the
+  next ping can be the cheap one.
+- Re-running changed nothing that was already true: no duplicate `blocked_by` edge, no
+  re-closed issue.
 - Every open Issue is accounted for in exactly one bucket.
 - Every "ready" group passed all six gates, not just "nobody is assigned".
 - Every "already shipped" call carries evidence (sha + `file:line`) — not a hunch.

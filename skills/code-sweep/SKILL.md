@@ -1,6 +1,6 @@
 ---
 name: code-sweep
-description: "Clear out everything finished in ONE repo: find every worktree whose work has landed, every issue whose code shipped but is still open, and every claim outliving its session — then put each through code-wrap, one at a time. The end-of-day job after several parallel sessions. Sorts candidates into wrap / teardown-only / claim-only / blocked, because most do not need a full wrap. Trigger phrases: 'sweep the repo', 'wrap everything finished', 'clean up the worktrees', 'close out the session work', 'tidy up finished work', 'wrap all the done branches'. Uses code-wrap per candidate; never batches merges."
+description: "Clear out everything finished in ONE repo: find every worktree whose work has landed, every issue whose code shipped but is still open, and every claim outliving its session — then put each through code-wrap, one at a time. Run it at end of day, or ping it whenever a session goes idle — a no-change ping short-circuits in three calls. Sorts candidates into wrap / teardown-only / claim-only / blocked, because most do not need a full wrap. Can be scoped to a set of issues or one session/worktree instead of the whole repo. Trigger phrases: 'sweep the repo', 'wrap everything finished', 'clean up the worktrees', 'close out the session work', 'tidy up finished work', 'wrap all the done branches', 'sweep the issues #95 #96', 'sweep the session <name>', 'ship these'; and — when this session's last act was a sweep — the re-ping forms 'again', 'anything new?', 'check again', 'anything to wrap yet?', or a bare 'go'. Uses code-wrap per candidate; never batches merges."
 ---
 
 # code-sweep — clear out everything finished, one at a time
@@ -24,6 +24,61 @@ generated-file conflicts B0 exists to prevent.
 wrap. Running a full wrap on it re-does distillation nobody needs and risks a second
 merge of the same content.
 
+**Run it as often as you like.** This used to be described as the end-of-day job after
+several parallel sessions, which read as a prohibition on running it more often — and the
+cost made that reading fair. §0 removes the cost: a ping with nothing new is three calls
+and a sentence. So a long-lived shipping session may re-run this whenever it goes idle.
+Frequency was never the hazard; *re-deriving everything* to discover nothing changed was.
+Nothing below gets cheaper by being skipped — least of all the per-merge CI re-check.
+
+## 0. Has anything changed, and was a sweep left half-finished?
+
+Same problem and same fingerprint as [`code-triage` §0](../code-triage/SKILL.md) — read it
+there; only the differences are repeated here. A full sweep is a fixed floor of 3 network
+calls plus a CI re-check and a 499-line `code-wrap` per candidate, so a ping with nothing
+new is worth refusing to start.
+
+```sh
+CACHE="$(git rev-parse --path-format=absolute --git-common-dir)/colab-sweep.json"
+```
+
+Separate file from triage's, because the two answer different questions off the same facts
+and a shared file would make one skill's conclusion look like the other's.
+
+**Fingerprint unchanged AND no interrupted sweep recorded** ⇒ report `nothing has changed
+since <ts>`, name the candidates that were left standing last time and why, and stop.
+
+- **`colab landed --all` is part of the deterministic 90%,** and its inputs are the trunk
+  sha and the branch tips. Cache the classification against both; a new trunk sha discards
+  it. Do **not** cache `colab worktrees`, `colab claims` or `gh run list` — live state.
+- **A matching fingerprint never authorises a merge.** §4's per-candidate CI re-check
+  happens regardless: trunk CI can die mid-sweep, and the fingerprint does not watch it.
+
+### 0.1 Resume an interrupted sweep
+
+§4 stops the whole sweep on the first failure, and that stays — skipping ahead leaves a
+half-swept repo. But under ping-when-idle a stopped sweep gets re-pinged within minutes,
+and today the re-ping restarts from §1 carrying nothing: it re-derives every bucket, walks
+back to the candidate that failed, and fails there again.
+
+So when a sweep stops, record in `$CACHE`: the candidates **completed** (with the trunk sha
+each merged at), the candidate it **stopped on**, and the **stop reason**. On the next run:
+
+1. **Re-test the stop reason first, and nothing else.** Dead trunk CI ⇒ one `gh run list`.
+   Still dead ⇒ report `still blocked: <reason>, since <ts>` and stop. That is a two-call
+   ping for a repo that cannot be swept, instead of a full re-derivation ending in the same
+   sentence.
+2. **Cleared ⇒ re-derive the buckets, do not replay the old list.** The recorded completions
+   are skipped; everything else is classified afresh. Trunk moved during the part that did
+   succeed, and §4's invalidation is the whole reason this skill is sequential — a resume
+   that trusted a stale bucket list would reintroduce exactly the batching the Principle
+   rejects.
+3. **A completion record is a shortcut, never evidence.** Before skipping a recorded
+   candidate, confirm it: `colab landed` says its content is on its base. Cheap, and it
+   keeps a truncated or stale cache from being read as "already shipped" — the single most
+   expensive wrong belief in this family (`code-triage`'s opening principle measured it at
+   4 of 9 sessions in one day).
+
 ## 1. Enumerate — scoped to THIS repo
 
 ```sh
@@ -37,11 +92,71 @@ gh issue list --label in-progress
 the sweep will start wrapping another project's work. Filter by repo:
 
 ```sh
+REPO="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
 colab worktrees --json | python3 -c 'import json,sys,os
 r=os.path.realpath(sys.argv[1])
 for w in json.load(sys.stdin).values():
-    if os.path.realpath(w["repo"])==r: print(w["name"], w["branch"], w.get("status",""))' "$PWD"
+    if os.path.realpath(w["repo"])==r: print(w["name"], w["branch"], w.get("status",""))' "$REPO"
 ```
+
+⚠️ **The anchor is the main checkout, not `$PWD`.** `colab` records every worktree and
+claim against the **main** repo path, so this filter run from inside a worktree matches
+nothing — and the sweep reports a clean repo because it enumerated an empty list. That is
+the worst possible failure here: "found nothing" wearing the face of "nothing to find"
+(§1.1 rule 3 exists for the same confusion arriving by a different road). `dirname` of the
+common git dir yields the main checkout from anywhere in the repo.
+
+### 1.1 Scoped mode — sweep a subset, and say that you did
+
+`code-triage` has single-issue mode; this had nothing between "the whole repo" and calling
+`code-wrap` by hand — and calling `code-wrap` directly skips the bucketing that decides
+wrap vs teardown-only vs claim-only, which is the judgement this skill exists to add. A
+shipping session handed three issue numbers deserves neither of those options.
+
+    sweep the issues #95 #96          → candidates whose claims or branch name carry 95 or 96
+    sweep the session <name>          → the worktree of that name, its claims, its issues
+
+Both selectors are natural because §1 already enumerates claims (issue-keyed) and worktrees
+(session-keyed) side by side; scoping picks rows out of lists that were built anyway.
+
+**Enumerate everything first, then narrow.** Never filter at the source. The full list is
+what makes the next three rules possible, and it costs nothing extra — §1's commands do not
+take a selector anyway.
+
+Everything downstream is unchanged: the four buckets, the sequential wraps, the per-merge
+CI re-check, the refusal to batch. Scoping narrows *which* candidates are considered; it
+must never weaken what happens to each one.
+
+**Three things do not follow from filtering, and a scoped mode without them is worse than
+none:**
+
+1. **§5 reconcile is repo-wide by nature — so a scoped run does not do it silently.**
+   Closing shipped-but-open issues and releasing stale claims are not scoped to the
+   candidates, and `colab doctor --prune` is **machine-wide** — it would reach past the
+   scope, past the repo, to other projects entirely. In a scoped run: restrict §5 to the
+   selected issues, **never run `doctor --prune`**, and say both in the report. Someone who
+   asked to ship three issues did not ask you to reconcile the machine.
+2. **Report what you did not look at.** This is the real trap: *a scoped sweep that finds
+   nothing looks identical to a full sweep that finds nothing.* The skill already holds the
+   matching principle for kept worktrees — a worktree kept for a stated reason is fine, one
+   kept silently is the 8-of-9 statistic repeating. A scoped run owes the same honesty about
+   its own boundary: `scoped to N of M candidates`, and name the M−N.
+3. **A selector that matches nothing is not a clean sweep.** An issue with no worktree, no
+   claim and no branch is not "swept"; it was never there. Report
+   `selector matched nothing` and name where you looked, distinct from `nothing to do`. The
+   two differ in what the human should do next — one means the repo is clear, the other
+   means the number was wrong or the work is somewhere else.
+
+**A scoped run's fingerprint is not the repo-wide one.** The §0 inputs are repo-wide facts,
+so *detection* is shared — but the stored conclusion is per-scope, and `code-triage` §0.1's
+coverage rule governs which stored run may answer a ping: a repo-wide conclusion can serve a
+scoped re-ping by filtering, a scoped one can never serve a broader ping. Key the cache entry
+by its normalised selector, and treat unscoped as its own key. Getting this backwards would
+let "I swept #95, nothing to do" answer "sweep the repo" — a clean bill of health for
+candidates nobody examined.
+
+**Unscoped behaviour is exactly what it was.** No selector ⇒ every rule above is inert:
+`M = N`, §5 runs in full, and no scope line appears in the report.
 
 ## 2. Decide what "finished" means — one rule, not per-candidate judgement
 
@@ -119,9 +234,15 @@ For each **wrap** candidate, in order:
 
 If any wrap stops (CI dead, conflict needing judgment, gate failing for unrelated
 reasons), **stop the sweep there** and report. Skipping ahead leaves a half-swept repo
-that is harder to reason about than an unswept one.
+that is harder to reason about than an unswept one. **Record the stop** — completed
+candidates, the one it stopped on, and why — so the next ping resumes instead of
+re-deriving its way back to the same wall (§0.1).
 
 ## 5. Reconcile the tracker
+
+⚠️ **Scoped run? Read §1.1 first.** This whole section is repo-wide, and the `doctor
+--prune` below is machine-wide. Restrict it to the selected issues, skip the prune, and say
+so — reconciliation nobody asked for is the one way scoping can do harm rather than less.
 
 Worktrees are only half of it. Also:
 
@@ -146,8 +267,8 @@ Worktrees are only half of it. Also:
   | unticked | issue closed with evidence | tick it, cite the sha |
 
   The first form is the expensive one: it is how a session gets spent rediscovering
-  work that already shipped — the failure `code-triage` §0 measured at 4 of 9 sessions
-  in a day. The epic is the source triage is *instructed* to trust, so a wrong line
+  work that already shipped — the failure measured at 4 of 9 sessions in a day in
+  `code-triage`'s opening principle. The epic is the source triage is *instructed* to trust, so a wrong line
   there does not merely annoy; it throws away a session.
 
   Same four limits as `code-wrap` B2c: never close the epic on a full table, never
@@ -169,9 +290,34 @@ blocked         #58                      → trunk CI dead (billing), cannot mer
 Say what you left and why. A worktree kept for a stated reason is fine; a worktree
 kept silently is the 8-of-9 statistic repeating.
 
+A **scoped** run says so on the first line and names its boundary — the M−N by name, not
+just by count, because a count cannot be checked against what the human had in mind:
+
+```
+scoped to 2 of 7 candidates   (issues #95 #96)
+not looked at   feat/console-shell-28, fix/import-115-114-113, #26, #58, chore/deps-31
+§5 reconcile    restricted to #95 #96; doctor --prune skipped (machine-wide)
+```
+
+The other two endings are distinct sentences, and must not be collapsed into each other or
+into the clean-sweep line above:
+
+```
+selector matched nothing   #99 — no claim, no worktree, no branch carrying that number
+nothing has changed since 2026-07-21T14:02Z   (3 calls; 2 candidates still standing, see below)
+still blocked: trunk CI dead (billing), since 2026-07-21T11:40Z
+```
+
 ## Verify complete
 
-- Every worktree in this repo is in exactly one bucket — none silently skipped.
+- Every worktree in this repo is in exactly one bucket — none silently skipped. In a
+  scoped run, every worktree is either in a bucket or named as out of scope; "not
+  selected" is a stated outcome, never an omission.
+- A scoped run reported `N of M`, restricted §5 to the selection, and did not run
+  `doctor --prune`.
+- A selector that matched nothing said so — not "swept 0".
+- A run that short-circuited named the timestamp it compared against; a run that stopped
+  recorded enough for the next ping to resume rather than restart.
 - Every merge was preceded by its own CI check, not one check for the whole sweep.
 - Every issue closed carries evidence; every claim released, including on issues you
   did not finish.

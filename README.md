@@ -63,7 +63,7 @@ and is the **single normative file** — everything else in the repo serves it.
 | [`templates/`](templates/) | **Copy-and-own** starting points: CI, release, the `CLAUDE.md` block for adopting repos. **Nothing is called remotely** — copy it, edit it, own it. |
 | [`tools/`](tools/) | `colab` — a small CLI for claiming issues, allocating ports, and managing worktrees (optional). JSON state, zero dependencies. |
 | [`audit/`](audit/) | An external conformance checker. Reads all your repos — every owner, including local-only ones — and reports drift in a single run. Advisory only, never blocking. |
-| [`skills/`](skills/) | Portable session flow: `code-triage` (pick the next task) → `code-start` (open a session) → `code-wrap` (ship + distill), plus `code-sweep` (clear out everything ALREADY DONE in one repo, running code-wrap on each) and `handbook-sync` (bring ONE repo up to the latest handbook, run from inside it). Installed as Claude Code skills by [`install.sh`](install.sh) — see *Setting up a machine* below. |
+| [`skills/`](skills/) | Portable session flow: `code-triage` (pick the next task) → `code-start` (open a session) → `code-wrap` (ship + distill), plus `code-sweep` (clear out everything ALREADY DONE in one repo — or just a named set of issues or one session — running code-wrap on each) and `handbook-sync` (bring ONE repo up to the latest handbook, run from inside it). Installed as Claude Code skills by [`install.sh`](install.sh) — see *Setting up a machine* below. |
 | [`install.sh`](install.sh) | Sets up **your machine**: skills, the `colab` CLI, the pre-commit hook, the fleet list. Idempotent, and `--dry` shows you everything first. |
 
 ## Setting up a machine
