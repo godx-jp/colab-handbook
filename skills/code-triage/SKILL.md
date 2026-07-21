@@ -327,6 +327,7 @@ machine can read it back:
 ```sh
 DB=$(gh api repos/{owner}/{repo}/issues/<blocker> -q .id)   # database id, not the number
 gh api -X POST repos/{owner}/{repo}/issues/<blocked>/dependencies/blocked_by -F issue_id=$DB
+gh issue view <blocked> --json blockedBy      # ← and confirm it names the blocker you meant
 ```
 
 The report still explains the reasoning — that is what prose is good for. The
@@ -334,6 +335,12 @@ relationship is the part the readiness gate above (and any other tool) reads.
 
 - **Read before you write.** The edge may already exist — this triage may be the second
   one to reach the same conclusion (§0.2). Check `blockedBy` first; do not file a duplicate.
+- **Read it back after you write it, too.** A wrong `$DB` — an empty variable, a failed
+  subshell, the issue *number* pasted where the database id goes — does not error. The POST
+  returns 200 and attaches whichever issue holds that id anywhere on GitHub, in repos neither
+  you nor this org has heard of (`CONVENTIONS.md` §5, *Readiness*). The check is not about
+  the API being flaky: at the moment of the write, a wrong id is **indistinguishable from
+  success**, and the only later symptom is a blocker nobody recognises.
 - **Record only what you actually determined.** A sequence you inferred from titles is
   a guess; leave it unwritten and say so in the report.
 - **Remove an edge only when the edge is false — not because the blocker moved.** Delete
