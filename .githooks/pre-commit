@@ -1,10 +1,10 @@
 #!/bin/sh
-# pre-commit — chặn commit chứa secret bằng gitleaks.
-# Bypass khẩn cấp: git commit --no-verify  (chỉ khi chắc chắn KHÔNG có secret)
+# pre-commit — block commits containing secrets, using gitleaks.
+# Emergency bypass: git commit --no-verify  (only when you are certain there is no secret)
 
 if ! command -v gitleaks >/dev/null 2>&1; then
-  echo "⚠️  gitleaks chưa được cài — bỏ qua quét secret cho commit này."
-  echo "    Cài bằng: brew install gitleaks"
+  echo "⚠️  gitleaks is not installed — skipping the secret scan for this commit."
+  echo "    Install it with: brew install gitleaks"
   exit 0
 fi
 
@@ -13,9 +13,9 @@ status=$?
 
 if [ "$status" -ne 0 ]; then
   echo ""
-  echo "❌ gitleaks phát hiện secret trong staged changes — commit bị CHẶN."
-  echo "   • Gỡ secret khỏi diff rồi commit lại, HOẶC"
-  echo "   • Nếu chắc chắn là false positive: git commit --no-verify"
+  echo "❌ gitleaks found a secret in the staged changes — commit BLOCKED."
+  echo "   • Remove the secret from the diff and commit again, OR"
+  echo "   • If you are sure it is a false positive: git commit --no-verify"
   exit 1
 fi
 

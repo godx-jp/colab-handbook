@@ -63,7 +63,67 @@ and is the **single normative file** — everything else in the repo serves it.
 | [`templates/`](templates/) | **Copy-and-own** starting points: CI, release, the `CLAUDE.md` block for adopting repos. **Nothing is called remotely** — copy it, edit it, own it. |
 | [`tools/`](tools/) | `colab` — a small CLI for claiming issues, allocating ports, and managing worktrees (optional). JSON state, zero dependencies. |
 | [`audit/`](audit/) | An external conformance checker. Reads all your repos — every owner, including local-only ones — and reports drift in a single run. Advisory only, never blocking. |
-| [`skills/`](skills/) | Portable session flow: `code-triage` (pick the next task) → `code-start` (open a session) → `code-wrap` (ship + distill), plus `code-sweep` (clear out everything ALREADY DONE in one repo, running code-wrap on each) and `handbook-sync` (bring ONE repo up to the latest handbook, run from inside it). Install them as Claude Code skills via `install.sh`. |
+| [`skills/`](skills/) | Portable session flow: `code-triage` (pick the next task) → `code-start` (open a session) → `code-wrap` (ship + distill), plus `code-sweep` (clear out everything ALREADY DONE in one repo, running code-wrap on each) and `handbook-sync` (bring ONE repo up to the latest handbook, run from inside it). Installed as Claude Code skills by [`install.sh`](install.sh) — see *Setting up a machine* below. |
+| [`install.sh`](install.sh) | Sets up **your machine**: skills, the `colab` CLI, the pre-commit hook, the fleet list. Idempotent, and `--dry` shows you everything first. |
+
+## Setting up a machine
+
+Once per machine, before you adopt anything into a repo.
+
+**You need:** `git`; `node` ≥ 18 (`.nvmrc` pins 22, which is what CI here runs);
+`gh` **logged in** (`gh auth login`) — claims, the skills and the audit's remote
+targets are all useless without it, and the failure surfaces much later as
+something confusing; and `gitleaks` only if you want the pre-commit hook.
+`install.sh` checks every one of these and reports what is missing before it
+changes anything.
+
+**1. Clone it somewhere permanent** — with the rest of your code, not in a
+scratch directory.
+
+```sh
+git clone https://github.com/godx-jp/colab-handbook.git ~/code/colab-handbook
+cd ~/code/colab-handbook
+```
+
+**This clone is infrastructure, not a download.** The skills install as symlinks
+*into this working tree*: delete the clone and every session on the machine
+loses them, and whichever branch it has checked out is the version of the skills
+every session gets. So keep it on `main` unless you are actively working on the
+handbook itself. `install.sh` warns if it finds itself under `/tmp`,
+`~/Downloads` or `~/Desktop`.
+
+**2. Install.**
+
+```sh
+./install.sh --all --dry   # see exactly what would happen; changes nothing
+./install.sh --all         # skills + colab CLI + pre-commit hook + fleet list
+```
+
+`--all` is the recommended first run. Everything it does is a symlink or a copy,
+it is idempotent, and it never overwrites anything it did not create — your own
+skill, or an existing `~/.colab/repos.txt`, is left alone with a warning. Bare
+`./install.sh` installs the skills and nothing else, if that is genuinely all
+you want.
+
+| Flag | What it does |
+|---|---|
+| *(none)* | Symlink `skills/` into `~/.claude/skills/`, so they are available in every repo you open. |
+| `--tools` | Symlink the `colab` CLI to `~/.local/bin/colab`, and check that directory is really on your `PATH` — printing the exact line to add if it is not. |
+| `--hooks` | Point this clone's git at `.githooks/` (gitleaks pre-commit). `core.hooksPath` lives in `.git/config`, so it is per-clone, per-machine, and never travels with the repo. |
+| `--fleet` | Seed `~/.colab/repos.txt` from `audit/repos.txt`, only if it is absent. That list stays machine-local on purpose: it names your private repos, and this repo is public. |
+| `--all` | `--tools --hooks --fleet`. |
+| `--dry` | Print what would happen, change nothing. Combines with all of the above. |
+
+**3. Verify, and point the audit at your repos.**
+
+```sh
+colab --help                 # not found? fix your PATH — step 2 prints the exact line
+$EDITOR ~/.colab/repos.txt   # replace the examples with your own repos
+node audit/audit.mjs         # a conformance report across the whole fleet
+```
+
+Then read [`CONVENTIONS.md`](CONVENTIONS.md): ~15 minutes, and the only
+normative file here.
 
 ## Adopting it into a repo
 
