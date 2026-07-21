@@ -196,6 +196,14 @@ that did not get finished. Releasing is about freeing the issue for someone else
 declaring it done; an unfinished issue that stays claimed silently blocks whoever picks it
 up next.
 
+**A group is not a chain, and they are recorded differently.** A *group* is issues that
+touch the same code, so they must move together on one branch — that is the paragraph
+above, and it is spelled with trailing numbers in a branch name. A *chain* is issues that
+must happen in an order, across separate sessions and separate branches. A chain is never
+expressed by a branch name; it is recorded as a dependency ([§5](#5-claiming-work--how-to-say-im-on-this)).
+Mixing them produces the worst of both: a branch carrying work that is not ready, or a
+sequence nothing enforces.
+
 **Branches that predate adoption are grandfathered.** Do not rename them — several may be
 checked out in live worktrees, and renaming breaks active sessions for no benefit. Apply the
 convention to new branches only.
@@ -314,6 +322,67 @@ Reconcile it rather than trusting it:
 colab claims --sync      # reconcile local cache against GitHub
 colab doctor --prune     # free claims whose worktrees no longer exist
 ```
+
+### Readiness — open and unclaimed is not enough
+
+An issue is **ready to start** when it is open, unclaimed, **and has no open blocker**.
+The third condition is the one that used to be uncomputable, because dependencies were
+written in prose: *"blocked by the other one"*, *"these five must queue behind each
+other"*. Prose does not block a parallel session, and no tool can read it. Measured on one
+repo: an epic tracking ~14 children by hand-edited checklist reported `subIssues.totalCount
+= 0` — the relationships a machine could act on simply did not exist.
+
+**So dependencies are recorded in GitHub's own relationship model, not in prose.** Prose
+still explains *why*; it is no longer the record of *what*.
+
+- **Parent/child** — an epic and the issues that implement it: sub-issues.
+- **Sequence** — this cannot start until that one lands: blocked-by.
+
+```sh
+# read (repo-relative — no owner/name to get wrong)
+gh issue view <N> --json blockedBy,blocking,parent,subIssues,subIssuesSummary
+
+# write a sequence — REST, and the payload is the DATABASE id, not the issue number
+gh api -X POST   repos/{owner}/{repo}/issues/<N>/dependencies/blocked_by -F issue_id=<db-id>
+gh api -X DELETE repos/{owner}/{repo}/issues/<N>/dependencies/blocked_by/<db-id>
+gh api repos/{owner}/{repo}/issues/<M> -q .id      # ← how to get that db-id
+
+# write a parent/child — GraphQL, and this one takes NODE ids
+gh api graphql -f query='mutation($p:ID!,$c:ID!){addSubIssue(input:{issueId:$p,subIssueId:$c}){clientMutationId}}' \
+  -f p=<parent-node-id> -f c=<child-node-id>
+```
+
+**The two halves of this model do not share an API, and that is the trap.** Sub-issues are
+GraphQL mutations keyed by **node** id (`I_kwDO…`); dependencies are REST endpoints keyed by
+**database** id (an integer). There is no dependency mutation in GraphQL — the schema
+exposes `blockedBy`, `blocking` and `issueDependenciesSummary` for *reading* only. Passing
+a node id to the REST call, or an issue number to either, fails in ways that read like a
+permissions problem. Verified against the live API, both directions, add and remove.
+
+**Three states, and the third is not the second.** A consumer must distinguish *has an open
+blocker* · *checked, and free* · **not yet checked**. Absent relationship data means nobody
+has looked — it must never be read as "ready". That distinction is the whole value of
+recording this natively: a readiness check becomes a computation instead of a judgement.
+
+Two of those states read straight off the graph; **the third needs a marker of its own**,
+because "no blockers" and "nobody checked for blockers" are the same empty list:
+
+```sh
+gh label create deps-checked --color 0E8A16 --description "Dependencies verified — no open blocker"
+gh issue edit <N> --add-label deps-checked        # set it only after actually looking
+gh issue edit <N> --remove-label deps-checked     # on any new blocker, or on reopening
+```
+
+| graph says | label | state |
+|---|---|---|
+| an open `blockedBy` node | (ignored) | **blocked** — name the blocker |
+| empty | present | **free** — someone verified this |
+| empty | absent | **unchecked** — nobody looked; not ready |
+
+The label is *derived* state, so it is only ever as fresh as its last check: whoever adds a
+blocker removes it. Prefer leaving it off to leaving it wrong — an absent label costs one
+check, a stale one costs the wall you walk into. A prose note saying "checked, no blockers"
+does **not** count; that is the practice this section replaces, wearing a different hat.
 
 ### Rules
 
@@ -541,8 +610,13 @@ here.
    (Tier C)? **Deploying by hand does not make a repo Tier B** — the question is whether
    production exists, not whether shipping is automated ([§2](#2-tiers)).
 2. **Write `.github/project.yml`** ([§3](#3-githubprojectyml--the-marker)).
-3. **Create the claim label** — it will not exist yet:
-   `gh label create in-progress --color FBCA04 --description "Claimed by an active session"`
+3. **Create the labels** — they will not exist yet:
+   ```sh
+   gh label create in-progress  --color FBCA04 --description "Claimed by an active session"
+   gh label create deps-checked --color 0E8A16 --description "Dependencies verified — no open blocker"
+   ```
+   The second is optional-but-cheap: without it a readiness check can never tell *free*
+   from *nobody looked* ([§5](#5-claiming-work--how-to-say-im-on-this)).
 4. **Add the tier topic** — `gh repo edit <owner>/<repo> --add-topic tier-b` (or
    `tier-c` / `tier-a`)
 5. **Add the handbook pointer to the repo's `CLAUDE.md`** — copy

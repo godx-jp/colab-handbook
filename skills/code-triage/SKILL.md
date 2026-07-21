@@ -97,10 +97,19 @@ code-wrap's harvest reads the branch name and the claim registry, so a number in
 neither is one the wrap will never find, and it sits open with its code merged. The
 failure this whole skill exists to prevent, re-created by sloppy naming.
 
-**Epics: read the checklist table, never the title.** The title states the ambition;
-the table states what is done, in progress and untouched — and only the table is
-maintained. Verify its `file:line` references before quoting them; engines get
-edited and the refs rot.
+**Epics: read the state, never the title.** The title states the ambition; the title is
+not evidence. Where the state lives depends on how the epic is built:
+
+- **Native sub-issues** — `gh issue view <epic> --json subIssuesSummary,subIssues`.
+  GitHub maintains this; it cannot drift. Prefer it, and prefer converting an epic to it.
+- **A hand-written checklist** — read the table, and **treat it as a claim, not a
+  fact.** It is maintained by `code-wrap` B2c and `code-sweep` §5, both of which run
+  only when someone runs them; a table nobody has swept since the last merge is stale
+  by default. Spot-check any line that decides your plan — *especially* one reading
+  "in progress on branch `x`", which is the form that most often survives its own
+  branch and sends a session to redo shipped work.
+
+Verify `file:line` references before quoting them; engines get edited and refs rot.
 
 ## 4. Order by blast radius, not by number
 
@@ -117,6 +126,46 @@ Rank the surviving groups:
 State the reason next to each rank. "Ordered by priority" with no reasoning is not
 triage; it is a re-sorted list.
 
+### Then write the ordering down — as relationships, not just as report prose
+
+Triage is not only a *reader* of the dependency graph; it is the main thing that
+**writes** it. A sequence you worked out and left in a report is lost the moment the
+report scrolls away, and the next triage re-derives it from scratch — or doesn't.
+
+So when this pass concludes that one issue must wait for another, record it where a
+machine can read it back:
+
+```sh
+DB=$(gh api repos/{owner}/{repo}/issues/<blocker> -q .id)   # database id, not the number
+gh api -X POST repos/{owner}/{repo}/issues/<blocked>/dependencies/blocked_by -F issue_id=$DB
+```
+
+The report still explains the reasoning — that is what prose is good for. The
+relationship is the part the readiness gate above (and any other tool) reads.
+
+- **Record only what you actually determined.** A sequence you inferred from titles is
+  a guess; leave it unwritten and say so in the report.
+- **Clearing one is equally part of the job.** If a blocker has landed, remove the
+  now-false edge (`-X DELETE …/dependencies/blocked_by/<db-id>`) — a stale blocker
+  makes ready work look blocked forever, and nothing else in the family removes it.
+- **Triage still never claims and never touches trunk.** Writing relationships between
+  issues is the one write this skill performs.
+
+### Single-issue mode
+
+Given one specific issue rather than a backlog, do the same work scoped to it: is *this*
+ready? Run §2 and the §5 gate against it alone, then leave the answer **where a machine
+reads it** — either a `blocked_by` edge naming the blocker, or the `deps-checked` label:
+
+```sh
+gh issue edit <N> --add-label deps-checked      # verified: no open blocker
+```
+
+That converts *unchecked* into *checked-and-free*, which is the one distinction the gate
+cannot make for itself — an empty `blockedBy` is identical whether someone checked or
+nobody did. A prose comment saying "no blockers" does not do this; it is unreadable to
+the gate, which is the whole reason this convention exists.
+
 ## 5. The readiness gate — can this start *right now*?
 
 A group is **ready** only if every one of these holds. Anything else is `blocked`,
@@ -126,7 +175,13 @@ with the blocker named:
 - [ ] **Verifiably undone** — §2 passed against the code, not the tracker.
 - [ ] **Actionable** — the Issue says what "done" looks like. An Issue that is a
       question is blocked on an answer, not ready to code.
-- [ ] **No open dependency** — nothing it needs is itself unfinished.
+- [ ] **No open blocker** — read the **relationship**, never the prose:
+      `gh issue view <N> --json blockedBy` → any node still `OPEN` blocks it. Prose
+      saying "depends on the other one" is an explanation, not a record; it blocks
+      nothing and no tool can act on it (`CONVENTIONS.md` §5, *Readiness*).
+      **Empty is not "free" — it is "nobody looked".** Report those three states
+      apart: `blocked by #N` · `free (checked)` · `dependencies unchecked`. Collapsing
+      the last into the first two is how a group gets started into a wall.
 - [ ] **Trunk CI is alive AND green** — `gh run list --branch <trunk> -L 1`. A
       failure that never started (billing lockout, runner outage) counts as dead.
       If you cannot merge when you finish, you are not ready to start

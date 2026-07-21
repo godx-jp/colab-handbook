@@ -131,6 +131,28 @@ Worktrees are only half of it. Also:
 - **Closed issues still holding a claim** → release. Closing and releasing are
   separate acts and only one is automatic.
 - **Claims whose worktree is gone** → `colab doctor --prune` reports and removes them.
+- **Epic checklist lines that contradict reality** → fix the line, and say why you did.
+  This is the cheapest possible place to catch them: the sweep has already read every
+  issue's true state, so this compares what is already in hand and scans nothing new.
+
+  Only **hand-written** checklists — an epic using native sub-issues is maintained by
+  GitHub and needs nothing (`gh issue view <epic> --json subIssuesSummary`). The three
+  forms seen in the wild, all in one repo on one day:
+
+  | line says | reality | fix |
+  |---|---|---|
+  | "in progress, branch `x`" | branch gone, issue closed, code on trunk | tick it, cite the trunk sha |
+  | ticked, noted "held open for review" | issue already closed | drop the stale note |
+  | unticked | issue closed with evidence | tick it, cite the sha |
+
+  The first form is the expensive one: it is how a session gets spent rediscovering
+  work that already shipped — the failure `code-triage` §0 measured at 4 of 9 sessions
+  in a day. The epic is the source triage is *instructed* to trust, so a wrong line
+  there does not merely annoy; it throws away a session.
+
+  Same four limits as `code-wrap` B2c: never close the epic on a full table, never
+  rewrite its prose, never build a table that does not exist, never infer parentage
+  from a title.
 
 ## 6. Report
 

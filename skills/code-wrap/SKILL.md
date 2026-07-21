@@ -315,6 +315,62 @@ applied once, not twice — the double-count this issue reported is gone."
 **Not evidence:** quoting your own commit message · restating the ticked checklist ·
 "done in `feat/x-23`". All three assert the work happened; none show it did.
 
+### B2c. Update the parent epic — if, and only if, it is hand-maintained
+
+`code-triage` instructs its readers to **trust the epic's checklist table over its
+title**, on the grounds that only the table is maintained. Nothing in this family
+maintained it. Measured across one repo in one day: one epic stayed correct purely
+because the operator happened to remember it existed through four consecutive merges,
+while a second — that nobody remembered — held two lines wrong in *opposite*
+directions: one claiming a branch that no longer existed, one ticked but annotated
+"held open for review" on an issue already closed. A document that says "trust X"
+while nothing updates X does not fail neutrally; it produces confidently wrong plans.
+
+**First ask which kind of parent it is**, because #34's mechanism removed most of
+this work rather than adding to it:
+
+```sh
+gh issue view $N --json parent -q '.parent.number // "none"'
+```
+
+- **A native parent (sub-issue link)** → **do nothing.** GitHub maintains
+  `subIssuesSummary` itself; the child closing *is* the update. Ticking a checklist
+  line here would be inventing a second, hand-run source of truth beside a correct
+  automatic one.
+- **No native parent** → look for a hand-written checklist that references this issue:
+
+```sh
+gh issue list --state open --search "#$N in:body" --json number,title
+```
+
+For each open parent whose body has a **checklist line** containing `#$N`, tick that
+one line and record the trunk sha beside it. Prefer converting the epic to native
+sub-issues if the owner wants it — then this step stops applying forever.
+
+**Four things not to do** — each is a way this step turns destructive:
+
+1. **Never close the epic**, even when the last box ticks. Boxes running out does not
+   mean work running out: an epic can have two phases complete and two whose issues
+   are not written yet. Closing it buries the unwritten part.
+2. **Never rewrite the epic's prose.** Edit the one checklist line for the issue that
+   just closed. The body is where the owner records decisions; a skill has no business
+   editing there.
+3. **No checklist, no action.** Do not create a table the repo did not choose.
+4. **Never infer parentage from a title.** Accept it only from a native `parent` link,
+   or from a literal `#$N` on a checklist line. Prose that merely mentions `#$N`
+   ("related to #$N", "unlike #$N") is **not** a checklist line and must not be edited.
+
+   A checklist line is `- [ ]` or `- [x]` — **a bullet is not a checklist**:
+
+   ```sh
+   grep -nE '^\s*-\s*\[[ x]\].*#'"$N"      # a hit here may be ticked; anything else may not
+   ```
+
+   This is not hypothetical. The issue that asked for this step lists its own related
+   work as `- **#28** (…)` — a bullet, matching any loose "list line mentioning #N"
+   rule, and editing it would tick a line that tracks nothing. Verified against that
+   body: the anchored pattern rejects it, a `-.*#N` pattern accepts it.
+
 ### B3. Release the claim(s)
 
 ```sh

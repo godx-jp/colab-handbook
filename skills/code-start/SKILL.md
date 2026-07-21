@@ -133,6 +133,20 @@ gh issue view $N --comments                      # prior-session log
   ## Gotchas
   ```
   Record the returned number as `$N`.
+
+  **Belongs to an epic? Attach it as a real sub-issue, not a checklist line.** A
+  hand-edited `- [ ] #N` in the parent's body is maintained by nobody and drifts within
+  days; the native link is what `subIssues` / `subIssuesSummary` report, so a tool can
+  see the child exists. Both ids below are **node** ids (`I_kwDO…`) — the sub-issue
+  mutation does not take issue numbers, and the dependency REST endpoints take a
+  *different* kind of id again (`CONVENTIONS.md` §5, *Readiness*):
+  ```sh
+  P=$(gh issue view <epic> --json id -q .id); C=$(gh issue view $N --json id -q .id)
+  gh api graphql -f query='mutation($p:ID!,$c:ID!){addSubIssue(input:{issueId:$p,subIssueId:$c}){clientMutationId}}' \
+    -f p=$P -f c=$C
+  ```
+  Only when the parent is genuinely an epic for this work — do not invent a hierarchy
+  the repo has not chosen.
 - **No GitHub remote?** Keep the same structure in a tracked file
   (`docs/sessions/<slug>.md`); code-wrap promotes it to an Issue if the repo goes
   to GitHub later. Everything below that says "Issue" means this file instead.
