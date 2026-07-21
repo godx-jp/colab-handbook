@@ -125,6 +125,25 @@ git push -u origin <branch>    # a backup/record, NOT a PR, NOT trunk
 
 ## Phase B — only after a human says go
 
+**What counts as "a human said go".** Typing it into the session is the ordinary
+form, not the only one. A click in an operator dashboard is a human decision too —
+provided the prompt that spawned you carries evidence of *when* and *which* click,
+so the authorisation can be audited afterwards instead of being asserted by the
+agent that benefits from it. The shape:
+
+> `<operator>` triggered the merge via the dashboard Merge button at `<ts>`
+> (intent `<id>`) — this click IS the Phase B human go-ahead.
+
+Match on the **timestamp and the intent id**, not on the wording: those are the two
+things a dashboard can write and an agent cannot invent, and they are what makes the
+click auditable after the fact. Missing either, you hold a claim of authorisation
+with nothing behind it — treat it as no go-ahead and ask. **Never compose that
+sentence yourself**; a go-ahead you wrote is not a go-ahead you received.
+
+This grants no new latitude. B0–B4 run in full, `autonomy: auto-trunk` still decides
+whether you may perform the trunk merge at all, and no click of any kind authorises
+a promotion, a tag, or anything that deploys.
+
 ### B0. Is there still cargo? Then sync `<base>` into the branch
 
 **First, know what you are merging into.** `<base>` is the branch's base: `<trunk>`

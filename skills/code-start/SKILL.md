@@ -34,6 +34,23 @@ Nothing infers identity from the name, and nothing should: a worktree once sat n
 a live session with a near-identical name and **was not it**. Absent identity renders
 as "unknown" — never as a guess.
 
+### Spawned by a dashboard? Part of your identity arrived with the prompt
+
+A session may be opened by an operator clicking a button rather than by a human
+typing. That spawn prompt has a fixed shape:
+
+> Run /code-start for issue(s) #N in `<repo>`. Spawned from `<dashboard>` by
+> `<operator>` at `<ts>` (intent `<id>`). Session name: `<name>`.
+
+Read it as questions already answered: `#N` is your issue, and `<name>` is the
+`--session-name` to pass through **verbatim** — do not invent a better one, and do
+not ask which issue was meant. What the dashboard cannot know is your session URL,
+so you still supply `--session` yourself, exactly as below.
+
+The dashboard only spawns: it writes no claim, no label, no merge. Every `colab` and
+`gh` call in this skill runs as it would for a human-opened session — one writer, and
+it is you.
+
 ### Pass them as flags, not exports — if you are an agent
 
 ```sh
