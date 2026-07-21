@@ -131,8 +131,24 @@ gh issue view $N --comments                      # prior-session log
   ## Decisions / Knowledge
 
   ## Gotchas
+
+  Filed-by: <boss (via <session>) | agent (<what prompted it>, session <name>)>
   ```
   Record the returned number as `$N`.
+
+  **The `Filed-by:` line is not optional, and it is about intent — not about who
+  typed** (`CONVENTIONS.md` §5, *Provenance*). On this path you are almost always
+  transcribing work a person just asked for, so it is `Filed-by: boss` and **no
+  label**. If instead you are filing something *you* noticed and nobody approved,
+  say `agent` and add the label:
+  ```sh
+  gh label create agent-filed --color C5DEF5 --description "Filed by an agent on its own initiative — not human-approved" 2>/dev/null || true
+  gh issue create --title "…" --body-file <tmpfile> --label agent-filed
+  ```
+  Getting this backwards is not cosmetic in either direction: a human request
+  mislabelled `agent-filed` gets excluded from batch starts and sits untouched,
+  while agent-initiated work left unlabelled reads as approved and can be started
+  by a tool no person ever consulted.
 
   **Belongs to an epic? Attach it as a real sub-issue, not a checklist line.** A
   hand-edited `- [ ] #N` in the parent's body is maintained by nobody and drifts within

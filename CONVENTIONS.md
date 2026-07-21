@@ -384,6 +384,44 @@ blocker removes it. Prefer leaving it off to leaving it wrong — an absent labe
 check, a stale one costs the wall you walk into. A prose note saying "checked, no blockers"
 does **not** count; that is the practice this section replaces, wearing a different hat.
 
+### Provenance — who decided the work should exist
+
+Issues now arrive from three directions: a person, an agent that hit something while
+coding, and an agent filing a follow-up as it wraps a session. Readiness above answers
+*can this be started*. Provenance answers a different question, and the one that matters
+the moment anything starts work in batches: **has a human decided this work should
+happen at all?**
+
+Nothing else in the model answers it. An agent-filed issue is open, unclaimed and
+unblocked the instant it is created — indistinguishable, to every check in this section,
+from work a person asked for.
+
+**So an agent that files an issue on its own initiative labels it `agent-filed` and ends
+the body with a machine-readable line:**
+
+```
+Filed-by: agent (during code-wrap of #48, session <name>)
+Filed-by: boss (via discussion session <name>)
+```
+
+- **No label means a human filed it.** That is the default, so existing issues need no
+  backfill and a repo adopting this mid-life is instantly consistent.
+- **Provenance is whose *intent* it was, not whose keyboard.** An agent transcribing what
+  a person just decided in a discussion writes `Filed-by: boss` and adds **no** label —
+  the person decided the work exists; the agent only typed it. An agent that noticed a
+  problem by itself and filed it is `agent-filed`, even if a human was in the room.
+- The `Filed-by:` line is the durable record and stands alone; the label exists so the
+  distinction is **queryable** (`gh issue list --label agent-filed`) without reading
+  bodies. Write both.
+
+**Why this is a convention and not a tooling detail:** anything that starts work in bulk —
+a start button, a batch triage, a scheduled sweep — must be able to exclude work no human
+approved. Without the distinction, the closed loop is available by default: an agent files
+work, a fan-out tool starts it, that session files more. The label is what lets the
+default be *excluded, and started only when a person clicks* — which makes the click the
+approval. A tool cannot construct that gate from an issue's contents; only whoever filed
+it knows the answer, and only at filing time.
+
 ### Rules
 
 - Claim **before** you start, not when you open the PR. An unclaimed issue is fair game.
@@ -614,9 +652,13 @@ here.
    ```sh
    gh label create in-progress  --color FBCA04 --description "Claimed by an active session"
    gh label create deps-checked --color 0E8A16 --description "Dependencies verified — no open blocker"
+   gh label create agent-filed  --color C5DEF5 --description "Filed by an agent on its own initiative — not human-approved"
    ```
    The second is optional-but-cheap: without it a readiness check can never tell *free*
-   from *nobody looked* ([§5](#5-claiming-work--how-to-say-im-on-this)).
+   from *nobody looked*. The third must exist **before** any agent files an issue here,
+   not after — absence of the label means *a human filed this*, so a repo where the label
+   does not exist reports every agent-filed issue as human-approved
+   ([§5](#5-claiming-work--how-to-say-im-on-this)).
 4. **Add the tier topic** — `gh repo edit <owner>/<repo> --add-topic tier-b` (or
    `tier-c` / `tier-a`)
 5. **Add the handbook pointer to the repo's `CLAUDE.md`** — copy
@@ -730,6 +772,7 @@ was invisible because nothing looked wrong — CI was green the whole time.
 ```sh
 # starting work
 gh issue list --label in-progress                 # what's taken
+gh issue list --label agent-filed                 # filed by an agent — no human approved it yet
 gh issue edit N --add-assignee @me --add-label in-progress
 git checkout -b feat/<slug>-N origin/<trunk>      # trunk = main (B) or dev (A)
 

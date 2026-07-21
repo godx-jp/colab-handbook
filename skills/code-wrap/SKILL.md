@@ -38,6 +38,30 @@ gh issue comment $N -b "**<YYYY-MM-DD>** — did X, decided Y, left Z open."
   not a copy of the diff. The code is already in git.
 - No GitHub remote? Write the same into the session notes file from code-start.
 
+#### Filing a follow-up here? It is agent-filed, and it must say so
+
+This step is where most agent-initiated issues in the fleet are born: you found
+something real, it is out of scope, so you file it rather than lose it. Keep doing
+that — but a follow-up you decided to file is **work no human has approved yet**,
+and it must be labelled so a batch-start tool can leave it alone
+(`CONVENTIONS.md` §5, *Provenance*):
+
+```sh
+gh label create agent-filed --color C5DEF5 --description "Filed by an agent on its own initiative — not human-approved" 2>/dev/null || true
+gh issue create --title "<type>: <thing>" --label agent-filed --body-file <tmpfile>
+```
+
+End the body with the origin, naming the issue you were wrapping when you found it —
+that is the breadcrumb back to the context:
+
+```
+Filed-by: agent (during code-wrap of #$N, session <name>)
+```
+
+The distinction is intent, not keyboard. **If the human asked for the follow-up
+during this session, it is theirs** — `Filed-by: boss (via session <name>)`, no
+label. Only what you decided to raise on your own is `agent-filed`.
+
 ### A2. Update repo docs the work made stale — in `docs/`, not in `CLAUDE.md`
 
 The Issue is the feature's log; **docs in the repo are the living knowledge** the
