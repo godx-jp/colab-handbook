@@ -242,6 +242,7 @@ already exists on that issue:
 git fetch --prune origin                   # ← without this the check is blind (see below)
 git branch -a --list '*<issue-number>*'    # a previous session's branch may still exist
 colab worktrees                            # if colab is installed — is a worktree holding it?
+gh issue view $N --json labels -q '.labels[].name|select(startswith("group:"))'
 ```
 
 - **`git fetch` first, always.** A stale clone cannot see a branch pushed from
@@ -254,6 +255,22 @@ colab worktrees                            # if colab is installed — is a work
   duplicate branch.
 - Use `colab worktrees`, not `colab claims`, for this: B3 already released the
   claims, so a kept worktree shows up in the worktree list and **nowhere else**.
+- **A `group:` label means your issue is not alone.** Triage found that these issues touch
+  the same files, so they must move on **one** branch (`CONVENTIONS.md` §5, *Grouping*).
+  List the members and read the `Because:` line that carries the collision:
+  ```sh
+  gh issue list --label "group:<key>" --state open        # every member
+  gh issue view $N --comments | grep -A1 '^Group: '       # the file:line that justified it
+  ```
+  Then take **the whole group** — claim every member (above) and put every number in the
+  trailing run of one branch name (step 4). Splitting a group is how two sessions merge
+  over each other, which is the thing the group was computed to prevent. If you are
+  deliberately breaking it (the collision is gone), remove the label from the members it
+  no longer covers and say so in your report — nothing else removes it, and a stale group
+  label reads exactly like a live one.
+- **No `group:` label is not proof of no collision** — it can equally mean nobody has
+  triaged this issue. Run [`code-triage`](../code-triage/SKILL.md) if you are unsure;
+  do not read absence as clearance.
 - **Found one → continue it, or ask.** Do not open a second branch on an issue
   that already has one; you will each merge over the other's work.
 

@@ -468,6 +468,89 @@ default be *excluded, and started only when a person clicks* — which makes the
 approval. A tool cannot construct that gate from an issue's contents; only whoever filed
 it knows the answer, and only at filing time.
 
+### Grouping — issues that must share one branch
+
+*Readiness* gave two relationships a native home: parent/child as sub-issues, sequence as
+blocked-by. A third one this model leans on constantly had none, and it is the one that
+produces branch names like `fix/import-fixes-115-114-113`: **these issues touch the same
+files, so they must move on one branch.** Two sessions editing the same files merge over
+each other. The group is the prevention, not a tidiness preference.
+
+Triage already computes it — it has to, in order to emit a branch name and a claim
+command. A real run in this repo concluded that two issues MUST share a branch because
+both rewrite `skills/code-sweep/SKILL.md:3`, named the line and the consequence, printed
+it, and ended. Nothing outside that terminal could read it, and the next run re-derived it
+from scratch — or did not. That is the failure *Readiness* already named, one relationship
+later: *prose does not block a parallel session, and no tool can read it.* The cost is
+exact — a second session can claim one member without ever learning the other exists,
+which is precisely the collision the grouping was computed to prevent.
+
+**Neither existing mechanism can carry it, because the shape is wrong:**
+
+| | direction | shape | so encoding a group with it asserts |
+|---|---|---|---|
+| sub-issues | parent → child | hierarchical | one peer is the other's parent — or a parent issue exists that represents no work and sits in the backlog forever |
+| blocked-by | blocker → blocked | directional | one waits for the other; and written both ways to stay honest, every member blocks every other |
+| **group** | **none** | **symmetric, flat** | — |
+
+The middle row is not a style objection. The readiness gate reads `blockedBy`, so a
+mutually-blocked group is one that nothing can ever report as ready.
+
+**So a group is recorded as a label carrying the group key, on every member:**
+
+```sh
+KEY=import-fixes    # the branch slug WITHOUT the numbers: fix/import-fixes-115-114-113
+gh label create "group:$KEY" --color 5319E7 \
+  --description "Must share one branch — these issues touch the same files"
+for N in 115 114 113; do gh issue edit "$N" --add-label "group:$KEY"; done
+gh issue list --label "group:$KEY"                 # the members, from any machine
+```
+
+The key is **the branch slug minus its trailing numbers**, so label and branch name
+predict each other in both directions and there is nothing to agree per group.
+
+**A label makes the group queryable; it does not make it justified.** The list above
+returns three numbers and not one word of *why*, and the `file:line` collision is the
+whole evidence. So each member also gets a comment ending in a machine-readable line —
+exactly as *Provenance* pairs `Filed-by:` with `agent-filed`:
+
+```
+Group: import-fixes — #115 #114 #113
+Because: app/Import/Parser.php:88 — #115 and #114 both rewrite the delimiter branch
+```
+
+Write both. The label is what a tool filters on; the `Because:` line is what survives a
+human asking whether the grouping was right. Re-quote its `file:line` from the current
+tree as you write it — refs rot ([§4](#4-branches-and-commits)).
+
+**Three states, and the third is not the second** — the same discipline `deps-checked`
+carries above:
+
+| the label | state |
+|---|---|
+| on two or more **open** issues | **grouped** — start them together, or not at all |
+| on exactly one open issue | **spent** — the others closed, or someone broke the group. Remove it |
+| absent | **ungrouped, or nobody triaged.** Never evidence that the ground is clear |
+
+Be clear about the cost: this is *derived* state, only ever as fresh as the triage run
+that wrote it. **Whoever breaks a group removes the label from the members it no longer
+covers.** Prefer leaving it off to leaving it wrong — an absent label costs one triage
+pass, a stale one costs the merge-over the label exists to prevent.
+
+**Who writes it, who reads it, and what needs no cleanup.** `code-triage` writes it: it
+is the step that judges which files an issue touches, and a judgement no tool can
+re-derive is exactly the kind that has to be persisted. `code-start` reads it before it
+branches, alongside the check that a clean `in-progress` label does not prove clean
+ground. **Wrapping adds no step** — closing the members removes them from every query
+that matters, and a `group:` label left on a closed issue is a true record of how that
+work moved.
+
+**Why not "the group is whatever was claimed to one worktree".** It costs no new
+vocabulary and is true by construction, and it still does not close the hole: that record
+exists only *after* someone has claimed, so it cannot inform the decision to claim — the
+one moment the group must be readable. It records a human having acted on triage's
+judgement, which is not the same thing as the judgement.
+
 ### Rules
 
 - Claim **before** you start, not when you open the PR. An unclaimed issue is fair game.
@@ -819,6 +902,7 @@ was invisible because nothing looked wrong — CI was green the whole time.
 # starting work
 gh issue list --label in-progress                 # what's taken
 gh issue list --label agent-filed                 # filed by an agent — no human approved it yet
+gh issue list --label group:<key>                 # must share one branch — start them together
 gh issue edit N --add-assignee @me --add-label in-progress
 git checkout -b feat/<slug>-N origin/<trunk>      # trunk = main (B) or dev (A)
 

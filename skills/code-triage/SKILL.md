@@ -135,6 +135,9 @@ skill performs has to be idempotent:
   the POST if the edge is already there. §4 writes edges; a second triage reaching the same
   conclusion must not file it twice.
 - **Already-shipped closes:** an issue already closed is not re-closed and not re-evidenced.
+- **Group records: the label is idempotent, the comment is not.** Re-applying `group:<key>`
+  changes nothing; re-posting its evidence comment stacks a duplicate every idle cycle.
+  Grep the existing comments for the key before posting (§3).
 - **`deps-checked` has a timestamp — it is just not on the label.** The label is a cache
   with no expiry, so today it never goes stale; but the `labeled` event that set it is in
   the timeline, and so is every edge write. That makes staleness computable rather than a
@@ -255,6 +258,48 @@ not evidence. Where the state lives depends on how the epic is built:
 
 Verify `file:line` references before quoting them; engines get edited and refs rot.
 
+### Then persist the group — it is a judgement no tool can re-derive
+
+A group printed to a terminal dies with the terminal, and the next session claiming one
+member never learns the other exists — the exact collision this section computes in order
+to prevent. "Which files does this issue touch" is a judgement, so nothing downstream can
+recover it; **triage is the only writer** (`CONVENTIONS.md` §5, *Grouping*).
+
+Two writes per group, and both are needed: the label makes it *queryable*, the comment
+carries the *evidence*.
+
+```sh
+KEY=import-fixes            # the branch slug WITHOUT the trailing numbers
+gh label create "group:$KEY" --color 5319E7 \
+  --description "Must share one branch — these issues touch the same files" 2>/dev/null || true
+for N in 115 114 113; do gh issue edit "$N" --add-label "group:$KEY"; done
+
+# then, once per member — the why, ending in the machine-readable pair
+gh issue comment 115 --body 'Group: import-fixes — #115 #114 #113
+Because: app/Import/Parser.php:88 — #115 and #114 both rewrite the delimiter branch'
+```
+
+- **Re-running must not duplicate the comment.** §0.2 is binding here and the two writes
+  are not equally safe: `--add-label` is idempotent by nature, `gh issue comment` is not —
+  a skill pinged on a loop would otherwise stack an identical justification on the issue
+  every idle cycle. Read first, and post only if no comment already carries this key:
+  ```sh
+  gh issue view 115 --json comments -q '.comments[].body' | grep -q "^Group: $KEY" || gh issue comment 115 --body "…"
+  ```
+  Re-post only when the membership or the evidence actually changed — and then say what
+  changed, rather than repeating the original.
+- **Remove what you contradicted.** If this pass concludes a previously grouped issue no
+  longer belongs — its collision landed, or the group was wrong — take the label off that
+  issue (`gh issue edit <N> --remove-label "group:$KEY"`). Nothing else removes it, and a
+  stale group label reads exactly like a fresh one.
+- **A one-member group is not a group.** After removals, a `group:` label left on a single
+  open issue is spent: remove it too.
+- **Quote the evidence from the current tree, not from `$CACHE`.** §2 caches verdicts and
+  never evidence, for this reason: a cached line number is a ref that rots invisibly.
+- **Record only collisions you actually checked.** A group inferred from titles is a guess;
+  leave it unwritten and say so in the report. Writing it makes the guess look verified to
+  every reader afterwards.
+
 ## 4. Order by blast radius, not by number
 
 Rank the surviving groups:
@@ -298,8 +343,9 @@ relationship is the part the readiness gate above (and any other tool) reads.
   the blocker's state for itself (§5.1), and an edge deleted for a display's convenience
   does not come back if the blocker is reverted. Editing a fact to change what a report
   prints is how the graph stops being trustworthy.
-- **Triage still never claims and never touches trunk.** Writing relationships between
-  issues is the one write this skill performs.
+- **Triage still never claims and never touches trunk.** Its writes are exactly three, all
+  of them recordings of its own judgement about issues: `blocked_by` edges, the
+  `deps-checked` label, and the `group:` label plus its evidence comment (§3).
 
 ### Single-issue mode
 
@@ -441,7 +487,10 @@ Hand the top group to **code-start**, which will re-verify the claim before taki
 - A run that proceeded wrote its fingerprint **and** its conclusion to `$CACHE`, so the
   next ping can be the cheap one.
 - Re-running changed nothing that was already true: no duplicate `blocked_by` edge, no
-  re-closed issue.
+  re-closed issue, no second copy of a group's evidence comment.
+- Every multi-issue group survives this run: `group:<key>` on **every** member, one
+  evidence comment naming the collision, and the label removed anywhere it stopped being
+  true. A group that exists only in this report is the failure §3 describes.
 - Every open Issue is accounted for in exactly one bucket.
 - Every "ready" group passed all six gates, not just "nobody is assigned".
 - Every open blocker was judged on its **state** (§5.1), not on being open — and every
