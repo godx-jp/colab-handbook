@@ -353,14 +353,36 @@ gh api repos/{owner}/{repo}/issues/<M> -q .id      # ← how to get that db-id
 # write a parent/child — GraphQL, and this one takes NODE ids
 gh api graphql -f query='mutation($p:ID!,$c:ID!){addSubIssue(input:{issueId:$p,subIssueId:$c}){clientMutationId}}' \
   -f p=<parent-node-id> -f c=<child-node-id>
+gh api graphql -f query='mutation($p:ID!,$c:ID!){removeSubIssue(input:{issueId:$p,subIssueId:$c}){clientMutationId}}' \
+  -f p=<parent-node-id> -f c=<child-node-id>
+gh issue view <M> --json id -q .id                 # ← how to get that node id
 ```
+
+`removeSubIssue` requires **both** ids: a child cannot be detached by naming only itself.
+(`addSubIssue` is the laxer of the two — it accepts `subIssueUrl` in place of `subIssueId`,
+and `replaceParent: true` to move a child that already has a parent.)
 
 **The two halves of this model do not share an API, and that is the trap.** Sub-issues are
 GraphQL mutations keyed by **node** id (`I_kwDO…`); dependencies are REST endpoints keyed by
 **database** id (an integer). There is no dependency mutation in GraphQL — the schema
-exposes `blockedBy`, `blocking` and `issueDependenciesSummary` for *reading* only. Passing
-a node id to the REST call, or an issue number to either, fails in ways that read like a
-permissions problem. Verified against the live API, both directions, add and remove.
+exposes `blockedBy`, `blocking` and `issueDependenciesSummary` for *reading* only.
+
+**Both halves are verified by execution, not by reading the schema.** Each was round-tripped
+against the live API: written, read back through *both* directions of the relationship,
+removed, and read back again to confirm nothing was left behind. Introspection tells you an
+input's shape and nothing about what the endpoint does with it — which is the whole point
+here, because the wrong-id mistakes do not fail alike.
+
+**Three of them are loud; the fourth is silent, and it is the one to fear.** Give GraphQL an
+issue number or a database id and it refuses legibly (`NOT_FOUND`, *"Could not resolve to a
+node with the global id of '34'"*); give the REST call a node id and it refuses on type
+(HTTP 422, *"is not of type `integer`"*). But give the REST call an **issue number** and it
+**succeeds** — the number is a valid integer, so it is read as a database id, and you get a
+dependency on whichever issue holds that id *anywhere on GitHub*. Measured here:
+`issue_id=34` silently attached a blocker from a repository owned by a stranger, unrelated
+to ours in every way. Nothing errors, and the readiness gate then reads a perfectly real
+blocker. **Read `blockedBy` back after every write** — a dependency you did not intend is
+invisible at the moment you create it.
 
 **"No blockers" and "nobody checked for blockers" are the same empty list**, so the second
 needs a marker of its own. Absent relationship data means nobody has looked — it must never
