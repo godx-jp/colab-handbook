@@ -20,6 +20,7 @@ const squash = require('./lib/squash');
 const procs = require('./lib/procs');
 const landed = require('./lib/landed');
 const notify = require('./lib/notify');
+const journal = require('./lib/journal');
 const {
   HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
   parseArgs, table, shortRepo,
@@ -38,6 +39,10 @@ const {
  * a warning about an optional signal is noise on the output of a command that worked.
  */
 function pushEvent(action, fields) {
+  // Reuse of notify's CALL SITES, not of its delivery: this only tells the local journal which repo
+  // the invocation was about, so the invocation record is attributed correctly even when the state
+  // diff carried no repo. Nothing here waits on, or knows about, whether an event was sent.
+  try { if (fields && fields.repo) journal.noteRepo(fields.repo); } catch (_) { /* optional */ }
   try { notify.notify(state.loadConfig(), action, fields); } catch (_) { /* secondary signal */ }
 }
 
@@ -1864,13 +1869,20 @@ const HELP_CONFIG = `colab config [show|add-repo <path>|rm-repo <path>|add-reser
   add-reserved-file <path>   add a machine-local reserved-ports file (~ is expanded); its ports join
                              the reserved set (lenient parse: whitespace ints per line, # comments)
   rm-reserved-file <path>    remove a reserved-ports file
-  set <key> <value>          set claimTTLHours | portRange | worktreeSubdir | notifyUrl
+  set <key> <value>          set claimTTLHours | portRange | worktreeSubdir | notifyUrl | journal
 
 notifyUrl is OPTIONAL and off by default: unset, colab makes no network call of its own. Set it to
 an http(s) endpoint and claim / release / ship / worktree new / worktree rm each push one small
 best-effort JSON event as they succeed — fire-and-forget, never retried, never able to fail or slow
 the command that triggered it. Observers already poll this state file; the push only sharpens the
 timestamp. Unset it again with:  colab config set notifyUrl ""
+
+journal is OPTIONAL and off by default: unset, colab writes no journal file at all. Set it and every
+state transition and every invocation is appended to ~/.colab/journal.jsonl — one JSON object per
+line, local, never sent anywhere. It is what lets you ask afterwards how long a worktree lived,
+which invocations failed, and where the wall clock went; state.json cannot answer any of those,
+because it DELETES records rather than retiring them. Turn it off again with:
+  colab config set journal false        (removes the key; the existing file is left alone)
 `;
 
 function cmdConfig(argv) {
@@ -1916,6 +1928,14 @@ function cmdConfig(argv) {
     if (!k || v === undefined) throw new UserError('set needs <key> <value>');
     if (k === 'claimTTLHours') cfg[k] = parseFloat(v);
     else if (k === 'portRange' || k === 'worktreeSubdir') cfg[k] = v;
+    else if (k === 'journal') {
+      // Same "absent, not falsy" discipline as notifyUrl: off is the key not being there, so
+      // "turned it off" and "never turned it on" are one state on disk. Only the exact strings
+      // below are accepted — a typo must not silently start growing a file nobody asked for.
+      if (v === 'false' || v === 'off' || v === '') delete cfg[k];
+      else if (v === 'true' || v === 'on') cfg[k] = true;
+      else throw new UserError('journal must be true or false');
+    }
     else if (k === 'notifyUrl') {
       // Empty string DELETES the key rather than storing '', so "turn it off" and "never turned it
       // on" are the same state on disk. A stored '' would read as a configured-but-broken endpoint.
@@ -3431,10 +3451,39 @@ function main(argv) {
   }
 }
 
-try {
-  process.exit(main(process.argv.slice(2)) || 0);
-} catch (e) {
-  if (e instanceof UserError) { process.stderr.write(`✗ ${e.message}\n`); process.exit(1); }
-  process.stderr.write(`✗ ${e.stack || e.message}\n`);
-  process.exit(1);
+/**
+ * Entry point, wrapped so the optional local journal (lib/journal.js) gets one record per
+ * invocation: argv, exit code, wall-clock duration. Off unless `journal: true` is configured, in
+ * which case every line below is a no-op that touches no path.
+ *
+ * The record is written on EVERY exit path including the failing ones — "which invocations exit
+ * non-zero" is one of the questions this exists to answer, so a journal that only logged successes
+ * would be worse than none. Journalling happens after the message is printed and can never change
+ * the exit code: the CLI's contract is its exit status, and an optional feature does not get to
+ * touch it.
+ */
+{
+  const startedAt = Date.now();
+  const argv = process.argv.slice(2);
+  let code = 0;
+  let failure;
+  try {
+    journal.setCmd(argv);
+  } catch (_) { /* optional, never fatal */ }
+  try {
+    code = main(argv) || 0;
+  } catch (e) {
+    if (e instanceof UserError) {
+      process.stderr.write(`✗ ${e.message}\n`);
+      failure = e.message;
+    } else {
+      process.stderr.write(`✗ ${e.stack || e.message}\n`);
+      failure = e.message;
+    }
+    code = 1;
+  }
+  try {
+    journal.invoked({ argv, exit: code, durationMs: Date.now() - startedAt, error: failure });
+  } catch (_) { /* optional, never fatal */ }
+  process.exit(code);
 }

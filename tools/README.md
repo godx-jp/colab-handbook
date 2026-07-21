@@ -292,13 +292,18 @@ A worktree entry carries a `status`, backfilled-on-read (older/absent → `runni
   teardown: pre-remove hook → `git worktree remove` → free ports → drop the entry, all local-only). It
   **refuses** a merged worktree with uncommitted **tracked** changes (reports it instead). `running`
   worktrees are **never** swept. Teardown removes the entry outright — "killed" is the absence of a
-  record, not a stored status (per Boss: no need to save it).
+  record, not a stored status (per Boss: no need to save it). That absence is exactly what the
+  optional local journal recovers, without adding a status to the schema: teardown emits a
+  `worktree.removed` line carrying `livedMs` and the last `status`, so how long the worktree lived
+  and whether it ever reached `merged` survive the record that is being deleted.
 
 ## State & config files (machine-local)
 
-Everything lives under `~/.colab/` (override the directory with the `COLAB_HOME` env var).
-Writes are atomic (temp file + `rename`) and guarded by a `mkdir`-based lock (`state.lock`) so
-concurrent sessions don't lose writes.
+Everything lives under `~/.colab/` (override the directory with the `COLAB_HOME` env var):
+`state.json` (current truth), `config.json`, `state.lock`, and — only if you opt in — `journal.jsonl`
+(history; see `journal` below). Writes to the first are atomic (temp file + `rename`) and guarded by
+a `mkdir`-based lock (`state.lock`) so concurrent sessions don't lose writes; the journal is
+append-only and never participates in that lock.
 
 ### `~/.colab/config.json`
 
@@ -322,6 +327,7 @@ concurrent sessions don't lose writes.
 | `portRange` | default search window for `port alloc` / `worktree new` (default `5200-5999`). |
 | `worktreeSubdir` | where worktrees are created inside a repo (default `.worktrees` — gitignore it). |
 | `notifyUrl` | **absent by default** — optional observer endpoint, see below. Unset means colab makes no network call of its own, ever. |
+| `journal` | **absent by default** — set to `true` for a local append-only record of every state transition and invocation in `~/.colab/journal.jsonl`, see below. Unset means colab writes no journal file, ever. Unrelated to `notifyUrl`: local file vs. remote push. |
 
 ### `notifyUrl` — optional event push (off by default)
 
@@ -352,7 +358,7 @@ the timestamp from *within a tick* to *the second it happened*, and records whic
   own exit does not wait on it — a receiver that hangs is invisible to you (the child gives up after
   200 ms). Every push happens *after* the command's real work has already succeeded.
 - **`kind` comes from a fixed map, because receivers keep a closed vocabulary** and answer 400 to
-  anything else. That refusal is correct: a journal counted by kind gets quietly half-right answers
+  anything else. That refusal is correct: a record counted by kind gets quietly half-right answers
   the moment one fact has two names. Adding an action means agreeing a kind with the receiver first.
 - **Order is carried by `ts`, not by arrival.** Events are emitted in a deliberate order (claims
   before the worktree that held them), but each child races the others; inverted arrival has been
@@ -360,6 +366,71 @@ the timestamp from *within a tick* to *the second it happened*, and records whic
 
 Unset, none of this exists: `notify()` returns before it can resolve a host, and the test suite
 asserts that no process is spawned for any action.
+
+**Two senses of the word "journal", and they are not the same thing.** Whatever a `notifyUrl`
+receiver keeps on its own side is *its* record: remote, someone else's, and possibly empty, since
+delivery here is undependable by design. The `journal` key below is *local*: a file on this machine,
+written directly, never sent anywhere, and complete whether or not any observer exists. When both
+appear in one sentence, say **receiver-side** or **local journal**. They share no code, no
+vocabulary of kinds, and no configuration.
+
+### `journal` — optional local record (off by default)
+
+`state.json` answers *what is true now* and only that: records are **deleted**, not retired. So the
+one number worth having — how long something lived — is destroyed at the moment it becomes knowable,
+because the record being deleted is the only thing still carrying `created`. Set `journal: true` and
+colab appends one JSON object per line to `~/.colab/journal.jsonl` (`COLAB_HOME`-aware):
+
+```sh
+colab config set journal true
+colab config set journal false     # removes the key; the existing file is left alone
+```
+
+| kind | when | notable fields |
+|---|---|---|
+| `colab.invoked` | every invocation, success or failure | `cmd`, `argv`, `exit`, `durationMs`, `repo`, `cwd`, `pid`, `error?` |
+| `worktree.created` / `claim.created` / `port.allocated` | a record enters state | the record's own fields |
+| `worktree.changed` / `claim.changed` | a field changes in place (e.g. `status` → `merged`, which is what dates a merge) | `changed: {field: [before, after]}`, `ageMs` |
+| `worktree.removed` / `claim.removed` / `port.freed` | a record leaves state | **`livedMs`**, plus the record as it was |
+| `journal.truncated` | the file hit its size cap | `droppedBytes` |
+
+What it is for — each of these is a query over the file alone, and none is answerable without it:
+
+```sh
+# how long did each worktree live, and was anything merged first?
+jq -r 'select(.kind=="worktree.removed") | "\(.repo) \(.name) \(.livedMs/1000)s \(.status)"' ~/.colab/journal.jsonl
+# worktrees torn down with nothing landed
+jq -r 'select(.kind=="worktree.removed" and .status!="merged") | .name' ~/.colab/journal.jsonl
+# which invocations failed
+jq -r 'select(.kind=="colab.invoked" and .exit!=0) | "\(.exit) \(.argv|join(" "))"' ~/.colab/journal.jsonl
+# where the wall clock goes, per command
+jq -r 'select(.kind=="colab.invoked") | "\(.cmd) \(.durationMs)"' ~/.colab/journal.jsonl
+```
+
+Design notes, in case a future change is tempted to relax one:
+
+- **Off is absolute.** Unset, nothing here runs: the snapshot returns `null` on its first line, no
+  path is touched and no directory created. A test spies on every `fs` write entry point and asserts
+  that not one targets a journal path, because a grep cannot see a write it did not think to look for.
+- **It cannot corrupt state, structurally.** The journal is a separate append-only file. It never
+  reads, writes or locks `state.json`. Only the *diff* is computed inside the state lock; the append
+  happens after the lock is released, so a slow disk blocks no other session, and every journal call
+  is wrapped so that a failure to record can never fail the mutation being recorded.
+- **The kinds above are ours, and are deliberately not `notifyUrl`'s.** That vocabulary is closed and
+  owned by an external receiver; widening it for local use would force a change on a contract we do
+  not own. Nothing here touches a socket.
+- **`livedMs` costs no bookkeeping anywhere.** It is `now − created`, read one instruction before
+  the record is destroyed. That is the whole trick, and it is why the hook is in `mutate()`.
+- **Size-capped, oldest-first.** Past 5 MiB the file is truncated to its newest half on the next
+  write, cut at a line boundary — and the truncation writes a `journal.truncated` line, so a count
+  taken from the file can never mistake a trimmed history for a complete one. This is deliberately
+  not a rotation scheme: numbered files and a compactor are more machinery than an opt-in local file
+  earns, and each part is another thing that can fail inside a command doing real work.
+- **`config set <key> <value>` is recorded without its value.** The key survives, so "who changed
+  what, when" still answers; the value does not, because `notifyUrl` can carry a token and a local
+  file that quietly accumulates credentials is a worse problem than the one this solves.
+- **No per-step timing inside `ship`.** Invocation totals are free; per-step numbers mean editing the
+  ship path itself, and new code on the path that merges work is a poor trade for a first version.
 
 ### `~/.colab/state.json` (version 1)
 
@@ -494,7 +565,7 @@ Run `colab <cmd> --help` for full detail.
 | `template [<name>] [--dest F] [--repo P] [--force]` | copy a handbook workflow template into a repo, **stamped** with the handbook version (see below) |
 | `update [<repo>...] [--apply] [--json] [--quiet]` | sweep the fleet registry for stamped copies that fell behind a changed template; `--apply` refreshes the **pristine** ones. Never commits; never touches a hand-edited copy (see below) |
 | `register [<path>] [--remove] [--list]` | add/remove a repo in **both** fleet registries at once; `--list` flags drift (see below) |
-| `config [show \| add-repo P \| rm-repo P \| add-reserved-file P \| rm-reserved-file P \| set K V]` | manage config (`set` keys: `claimTTLHours`, `portRange`, `worktreeSubdir`, `notifyUrl`) |
+| `config [show \| add-repo P \| rm-repo P \| add-reserved-file P \| rm-reserved-file P \| set K V]` | manage config (`set` keys: `claimTTLHours`, `portRange`, `worktreeSubdir`, `notifyUrl`, `journal`) |
 
 ### Release notes
 

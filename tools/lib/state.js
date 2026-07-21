@@ -47,6 +47,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
+// Optional local journal. Requires nothing back from this module (it resolves COLAB_DIR itself), so
+// there is no require cycle; see the note on COLAB_DIR in lib/journal.js.
+const journal = require('./journal');
+
 const HOME = os.homedir();
 const COLAB_DIR = process.env.COLAB_HOME || path.join(HOME, '.colab');
 const STATE_FILE = path.join(COLAB_DIR, 'state.json');
@@ -64,6 +68,11 @@ const DEFAULT_CONFIG = {
   // Optional observer endpoint. Unset (the default) = colab makes no network call of its own, ever.
   // Set it and state-changing commands POST one best-effort event each; see lib/notify.js for why
   // it is deliberately undependable. Absent rather than '' so `config show` does not advertise it.
+  //
+  // Optional LOCAL journal (`journal: true`). Unset = colab writes no journal file, ever. Set it and
+  // every state transition and every invocation is appended to ~/.colab/journal.jsonl; see
+  // lib/journal.js. Absent rather than false, for the same reason as notifyUrl. Unrelated to
+  // notifyUrl: one is a local append-only file, the other a push to somebody else's receiver.
 };
 
 function ensureDir() {
@@ -152,14 +161,38 @@ function withLock(fn, { tries = 100, waitMs = 100 } = {}) {
   }
 }
 
-/** Load → mutate under lock → save, in one atomic critical section. */
+/**
+ * Load → mutate under lock → save, in one atomic critical section.
+ *
+ * Also the ONE place every fact enters or leaves state, which is why the optional journal
+ * (lib/journal.js) hooks here and nowhere else: a before/after diff taken around `fn` captures all
+ * 13 delete sites and every write, with no per-command plumbing and no chance of a caller
+ * forgetting to report. It is off unless `journal: true` is configured, and when off `snapshot()`
+ * returns null on its first line, so the disabled path costs one boolean and allocates nothing.
+ *
+ * Two properties the journal must never cost us, both structural rather than promised:
+ *   - It cannot fail a mutation. Everything journal-related is inside try/catch, and the catch is
+ *     empty on purpose — a full disk must not roll back a claim that succeeded.
+ *   - It cannot hold the lock. Only the diff is computed inside the critical section; the append
+ *     happens after withLock has returned, so a slow filesystem blocks no other session.
+ */
 function mutate(fn) {
-  return withLock(() => {
+  let records = null;
+  const result = withLock(() => {
     const st = loadState();
-    const result = fn(st);
+    let before = null;
+    try { before = journal.snapshot(st); } catch (_) { before = null; }
+    const r = fn(st);
     saveState(st);
-    return result;
+    if (before) {
+      try { records = journal.recordDiff(before, journal.snapshot(st)); } catch (_) { records = null; }
+    }
+    return r;
   });
+  if (records && records.length) {
+    try { journal.append(records); } catch (_) { /* never at the expense of the mutation */ }
+  }
+  return result;
 }
 
 module.exports = {
