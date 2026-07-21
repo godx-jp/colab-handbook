@@ -120,15 +120,22 @@ wrong for anything that outlives one. A daemon, a launch agent or a headless
 runner started months ago would silently change behaviour because somebody
 checked out an unrelated branch, and nothing would report it: the process keeps
 working, differently. So `--tools` also writes a **copy** to `~/.colab/bin/`
-(honouring `COLAB_HOME`), stamped with the handbook version it was taken from.
-That copy never moves on its own.
+(honouring `COLAB_HOME`), stamped with the handbook version it was taken from —
+or, when that tree sits ahead of the last tag, with the commit it was taken from
+(`v1.7.0-2-gc8436c6`) and a warning, because no released version describes those
+bytes. That copy never moves on its own.
 
 Refreshing it is therefore an act, never a side effect: re-run `./install.sh
---tools`. `colab update` tells you when it is due — it classifies the frozen copy
-exactly as it classifies a repo's template copy, so a release that changed no CLI
-code does not nag you. It never rewrites the copy, not even with `--apply`: that
-is the toolchain your running services are executing. `colab --version` says
-which of the two you are talking to.
+--tools`. `colab update` tells you when it is due. **`behind` means a released
+CLI change exists that this machine lacks** — the comparison runs to the latest
+tag, so a release that changed no CLI code does not nag you, and unreleased work
+in your own checkout does not either. (That last part is why the bound is the tag
+rather than `HEAD`: measuring to `HEAD` marked every machine stale for the whole
+window between a CLI commit and the next tag, and the advertised remedy copies
+*from* that same working tree — so on a machine developing the handbook it
+advised services to adopt untagged code.) It never rewrites the copy, not even
+with `--apply`: that is the toolchain your running services are executing.
+`colab --version` says which of the two you are talking to.
 
 **3. Verify, and point the audit at your repos.**
 

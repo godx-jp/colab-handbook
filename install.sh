@@ -185,15 +185,24 @@ freeze_cli() {
     return
   fi
 
-  local ver
-  ver="$(node -e 'const s=require(process.argv[1]);process.stdout.write(s.handbookInfo(process.argv[2]).version)' \
+  # `version` is what we stamp, `tag` is the release it descends from; they differ when this tree is
+  # ahead of the last tag. Read both, so the copy never silently claims to BE a release it is newer
+  # than — see stamp.js freezeVersion.
+  local desc ver tag
+  desc="$(node -e 'const s=require(process.argv[1]);const f=s.freezeVersion(process.argv[2]);process.stdout.write(f.version+" "+f.tag)' \
     "$DIR/tools/lib/stamp.js" "$DIR" 2>/dev/null || true)"
+  ver="${desc%% *}"
+  tag="${desc##* }"
   if [ -z "$ver" ]; then
     warn "could not determine the handbook version — nothing was frozen."
     return
   fi
   if [ "$ver" = "v0" ]; then
     warn "handbook has no tags yet — freezing @ v0. Tag it, then re-run to stamp a real version."
+  elif [ "$ver" != "$tag" ]; then
+    warn "this tree is AHEAD of $tag — freezing @ $ver (unreleased work included).
+       No version describes these bytes, so the stamp names the commit instead of overstating $tag.
+       Services will run code that is in no release; re-freeze after the next tag if that matters."
   fi
 
   # Never clobber something we did not write. Our copy always has a STAMP beside it, so a colab in

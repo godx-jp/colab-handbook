@@ -72,6 +72,37 @@ function handbookInfo(root) {
 }
 
 /**
+ * What to stamp a frozen copy WITH: { version, tag, exact, untagged }.
+ *
+ * A frozen copy is bytes taken from a working tree, and when that tree is ahead of the last tag no
+ * version honestly describes it. Stamping the bare tag overstates what the copy contains — it
+ * silently claims to be a release it is newer than. So `version` is `git describe --tags`, which
+ * is the bare tag when HEAD sits exactly on one (`v1.6.1`, the common case, unchanged) and the long
+ * form when it does not (`v1.6.1-14-gc8436c6`).
+ *
+ * The long form is not a cosmetic label — it is chosen because it stays correct everywhere the
+ * stamp is already consumed, with no second format on the machine:
+ *   - parseWorkflowStamp's version pattern accepts it;
+ *   - cmpSemver reads it as its tag (trailing junk parses to 0), so it never trips the "stamp is
+ *     NEWER than the handbook" branch against its own tag;
+ *   - `git rev-parse` resolves it, so classifyFrozen can use it as a lower bound directly — which
+ *     makes the comparison EXACT rather than merely honest: a copy frozen mid-cycle is measured
+ *     from the commit it was actually taken from, so the next release marks it behind only for the
+ *     commits it genuinely lacks.
+ *
+ * Dirty trees are deliberately NOT described (`--dirty` would produce a ref nothing can resolve,
+ * turning every such copy into `n-a` with misleading "fetch tags" advice). Uncommitted work in a
+ * frozen copy stays outside this model.
+ */
+function freezeVersion(root) {
+  const hb = handbookInfo(root);
+  if (hb.untagged || !hb.hasGit) return { version: 'v0', tag: 'v0', exact: false, untagged: true };
+  const d = gitIn(root, ['describe', '--tags']);
+  const version = d.ok && d.out ? d.out : hb.version;
+  return { version, tag: hb.version, exact: version === hb.version, untagged: false };
+}
+
+/**
  * The handbook's shared git directory — the one identity that survives worktrees. Every worktree
  * of a repo reports the SAME `--git-common-dir`, while their working-tree paths all differ.
  */
@@ -140,17 +171,22 @@ function templateFiles(name) {
 }
 
 /**
- * Did any of the given template files change between the stamped version and HEAD?
- * Returns { verifiable, changed }. verifiable=false when the stamped ref does not resolve in this
+ * Did any of the given files change between the stamped version and `untilRef` (default HEAD)?
+ * Returns { verifiable, changed }. verifiable=false when either ref does not resolve in this
  * checkout (a tag we do not have) — reported, never guessed.
  *
  * This is the check that keeps releases quiet: comparing version STRINGS would mark every adopter
  * stale on every handbook release, including releases that touched nothing they copied.
+ *
+ * `untilRef` exists because the two callers are asking about different UNITS. A template copy is
+ * compared against HEAD: the adopter refreshes from the working tree, so the working tree is the
+ * thing they can actually get. The frozen CLI copy is compared against the latest TAG — see
+ * classifyFrozen for why measuring it to HEAD made every maintainer's machine permanently stale.
  */
-function templateChangedSince(root, files, sinceRef) {
-  const resolvable = gitIn(root, ['rev-parse', '--verify', '--quiet', sinceRef + '^{commit}']).ok;
-  if (!resolvable) return { verifiable: false, changed: false };
-  const log = gitIn(root, ['log', '--oneline', `${sinceRef}..HEAD`, '--', ...files]);
+function templateChangedSince(root, files, sinceRef, untilRef = 'HEAD') {
+  const resolves = (ref) => gitIn(root, ['rev-parse', '--verify', '--quiet', ref + '^{commit}']).ok;
+  if (!resolves(sinceRef) || !resolves(untilRef)) return { verifiable: false, changed: false };
+  const log = gitIn(root, ['log', '--oneline', `${sinceRef}..${untilRef}`, '--', ...files]);
   return { verifiable: true, changed: log.ok && log.out.length > 0 };
 }
 
@@ -420,11 +456,21 @@ function classifyStamped(opts) {
  * Classify the frozen CLI copy: { state, reason, from, to }, with state one of
  * current / behind / n-a.
  *
- * Deliberately the SAME question as classifyStamped asks of a template copy — "did the thing you
- * copied actually change between your stamp and HEAD?", answered by `git log`, not by comparing
- * version strings — so a handbook release that touched no CLI code does not tell every machine its
- * frozen copy is stale. The version comparison and the git read are the ones above; nothing about
- * "behind" is decided twice.
+ * Answered by `git log`, not by comparing version strings — so a handbook release that touched no
+ * CLI code does not tell every machine its frozen copy is stale.
+ *
+ * The upper bound is the latest TAG, not HEAD, and that is the whole difference from a template
+ * copy. A stamp records a version, so measuring it to HEAD compares two different units: any
+ * unreleased commit under FROZEN_SOURCES marked every machine `behind` until the next tag. That
+ * re-coupled precisely what freezing decouples — `behind` was computed against the working tree,
+ * and its advertised remedy (`install.sh --tools`) copies FROM the working tree, so on a machine
+ * where the handbook is being developed the tool continuously advised services to adopt untagged
+ * code. It also misreported worst for maintainers (HEAD ahead of the tag is their resting state)
+ * and best for pure consumers, and `colab update`'s exit code rides on it, so anything scripting
+ * it flapped red for the whole window between a CLI commit and the next tag.
+ *
+ * `behind` therefore means: a RELEASED CLI change exists that this machine lacks. True regardless
+ * of what the local checkout happens to be doing.
  *
  * No `diverged` state, and that is the one real difference from a template copy. A template is
  * copy-and-own: the adopter is entitled to edit it, so an edit must be detected and protected. The
@@ -444,24 +490,24 @@ function classifyFrozen(opts) {
     return { state: 'n-a', reason: `stamp is NEWER than handbook ${hb.version} — this machine froze from a checkout ahead of here`, from: stampVersion, to: hb.version };
   }
 
-  const { verifiable, changed } = templateChangedSince(root, FROZEN_SOURCES, stampVersion);
+  const { verifiable, changed } = templateChangedSince(root, FROZEN_SOURCES, stampVersion, hb.version);
   if (!verifiable) {
     return { state: 'n-a', reason: `stamped @ ${stampVersion}, a version not in this handbook checkout — fetch tags, or re-freeze`, from: stampVersion, to: hb.version };
   }
   if (!changed) {
     const why = cmpSemver(stampVersion, hb.version) === 0
       ? 'frozen at the current handbook version'
-      : `CLI unchanged since ${stampVersion}`;
+      : `no released CLI change since ${stampVersion}`;
     return { state: 'current', reason: why, from: stampVersion, to: hb.version };
   }
-  return { state: 'behind', reason: `the CLI changed since ${stampVersion} — re-run install.sh --tools to re-freeze`, from: stampVersion, to: hb.version };
+  return { state: 'behind', reason: `${hb.version} changed the CLI since ${stampVersion} — re-run install.sh --tools to re-freeze`, from: stampVersion, to: hb.version };
 }
 
 module.exports = {
   CLAUDE_BLOCK_TEMPLATE, WORKFLOW_FINGERPRINTS,
   FROZEN_STAMP_NAME, FROZEN_STAMP_FILE, FROZEN_SOURCES, classifyFrozen,
   gitIn, gitCommonDir, isHandbookItself,
-  handbookInfo, templateNames, templateFiles, templateChangedSince, templateAt,
+  handbookInfo, freezeVersion, templateNames, templateFiles, templateChangedSince, templateAt,
   stampLine, parseWorkflowStamp, parseClaudeStamp,
   fingerprintHits, workflowProvenance, unstampedFinding,
   looksLikeHandbookWorkflow, looksLikeHandbookClaude,

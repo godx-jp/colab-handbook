@@ -340,7 +340,7 @@ test('a handbook release that touched no CLI code does not make a frozen copy be
   h.git('tag', 'v1.1.0');
   const c = stamp.classifyFrozen({ root: h.root, hb: h.hb(), stampVersion: 'v1.0.0' });
   assert.strictEqual(c.state, 'current');
-  assert.match(c.reason, /unchanged since v1\.0\.0/);
+  assert.match(c.reason, /no released CLI change since v1\.0\.0/);
 });
 
 test('a change to the CLI script makes a frozen copy behind', (t) => {
@@ -398,6 +398,106 @@ test('an untagged handbook deactivates the comparison, as it does for templates'
   assert.match(c.reason, /untagged/);
 });
 
+// --- the maintainer case: unreleased work must not mark every machine stale ---
+//
+// Every test above tags immediately after the commit it makes, so HEAD and the latest tag coincide
+// and none of them can tell "measured to the tag" from "measured to HEAD". That gap is exactly
+// where the bug lived. These control the distance between the two.
+
+test('unreleased CLI commits do NOT make a copy stamped at the latest tag behind', (t) => {
+  // The maintainer's resting state: HEAD ahead of the tag. Measured to HEAD this reported `behind`
+  // on every machine until the next release — and its advertised remedy re-copies from this very
+  // working tree, so the tool advised adopting untagged code. `behind` means RELEASED and lacking.
+  const h = tempHandbook(t);
+  h.git('tag', 'v1.0.0');
+  h.commit('tools/colab', '#!/usr/bin/env node\n// unreleased\n', 'feat: cli, not yet tagged');
+  h.commit('tools/lib/state.js', 'module.exports = { wip: true };\n', 'fix: lib, not yet tagged');
+  const c = stamp.classifyFrozen({ root: h.root, hb: h.hb(), stampVersion: 'v1.0.0' });
+  assert.strictEqual(c.state, 'current');
+  assert.strictEqual(c.to, 'v1.0.0', 'the upper bound is the latest tag, not HEAD');
+});
+
+test('the same commits DO make it behind once they are released', (t) => {
+  // The other half: the fix must not simply stop reporting. Same history as above plus a tag.
+  const h = tempHandbook(t);
+  h.git('tag', 'v1.0.0');
+  h.commit('tools/colab', '#!/usr/bin/env node\n// released\n', 'feat: cli');
+  h.git('tag', 'v1.1.0');
+  const c = stamp.classifyFrozen({ root: h.root, hb: h.hb(), stampVersion: 'v1.0.0' });
+  assert.strictEqual(c.state, 'behind');
+  assert.strictEqual(c.from, 'v1.0.0');
+  assert.strictEqual(c.to, 'v1.1.0');
+});
+
+test('a released CLI change is behind even with further unreleased commits on top', (t) => {
+  // Guards the naive fix of "ignore commits after the tag" — the release is still missing here.
+  const h = tempHandbook(t);
+  h.git('tag', 'v1.0.0');
+  h.commit('tools/colab', '#!/usr/bin/env node\n// released\n', 'feat: cli');
+  h.git('tag', 'v1.1.0');
+  h.commit('tools/lib/state.js', 'module.exports = { wip: true };\n', 'fix: lib, not yet tagged');
+  const c = stamp.classifyFrozen({ root: h.root, hb: h.hb(), stampVersion: 'v1.0.0' });
+  assert.strictEqual(c.state, 'behind');
+  assert.strictEqual(c.to, 'v1.1.0');
+});
+
+// --- what a freeze stamps itself with ---------------------------------------
+
+test('freezing from a tree sitting exactly on a tag stamps the bare tag', (t) => {
+  const h = tempHandbook(t);
+  h.git('tag', 'v1.0.0');
+  const f = stamp.freezeVersion(h.root);
+  assert.strictEqual(f.version, 'v1.0.0');
+  assert.strictEqual(f.exact, true);
+});
+
+test('freezing from a tree ahead of the tag does not claim to BE that tag', (t) => {
+  // It contains more than v1.0.0, so stamping "v1.0.0" overstates the release and understates the
+  // bytes. The long describe form names the commit the copy was actually taken from.
+  const h = tempHandbook(t);
+  h.git('tag', 'v1.0.0');
+  h.commit('tools/colab', '#!/usr/bin/env node\n// unreleased\n', 'feat: cli');
+  const f = stamp.freezeVersion(h.root);
+  assert.strictEqual(f.exact, false);
+  assert.strictEqual(f.tag, 'v1.0.0');
+  assert.notStrictEqual(f.version, 'v1.0.0');
+  assert.match(f.version, /^v1\.0\.0-\d+-g[0-9a-f]+$/);
+});
+
+test('a describe-form stamp survives every consumer it passes through', (t) => {
+  // The reason this format was chosen over inventing a second one. If any of these regress, a
+  // mid-cycle freeze starts misreporting instead of merely being unusual.
+  const h = tempHandbook(t);
+  h.git('tag', 'v1.0.0');
+  h.commit('tools/colab', '#!/usr/bin/env node\n// unreleased\n', 'feat: cli');
+  const v = stamp.freezeVersion(h.root).version;
+
+  assert.deepStrictEqual(stamp.parseWorkflowStamp(stamp.stampLine(stamp.FROZEN_STAMP_NAME, v)),
+    { name: stamp.FROZEN_STAMP_NAME, version: v }, 'must round-trip through the stamp line');
+  assert.strictEqual(stamp.cmpSemver(v, 'v1.0.0'), 0,
+    'must not read as NEWER than its own tag, or classifyFrozen short-circuits to n-a');
+
+  // Resolvable as a ref, so it works as a lower bound — the copy is measured from the commit it
+  // was actually taken from, not from the tag before it.
+  const c = stamp.classifyFrozen({ root: h.root, hb: h.hb(), stampVersion: v });
+  assert.strictEqual(c.state, 'current');
+});
+
+test('a copy frozen mid-cycle is behind only for what the next release actually adds', (t) => {
+  const h = tempHandbook(t);
+  h.git('tag', 'v1.0.0');
+  h.commit('tools/colab', '#!/usr/bin/env node\n// a\n', 'feat: cli a');
+  const v = stamp.freezeVersion(h.root).version;   // frozen here, mid-cycle
+  h.git('tag', 'v1.1.0');                          // …and that work is released as-is
+  assert.strictEqual(stamp.classifyFrozen({ root: h.root, hb: h.hb(), stampVersion: v }).state,
+    'current', 'it already HAS everything v1.1.0 contains');
+
+  h.commit('tools/lib/state.js', 'module.exports = { b: true };\n', 'fix: lib b');
+  h.git('tag', 'v1.2.0');
+  assert.strictEqual(stamp.classifyFrozen({ root: h.root, hb: h.hb(), stampVersion: v }).state,
+    'behind', 'v1.2.0 adds something it lacks');
+});
+
 // --- end to end through the real CLI ----------------------------------------
 
 /** Run `colab update --json` against a throwaway COLAB_HOME. Returns the parsed report. */
@@ -432,9 +532,14 @@ test('`colab update` reads the frozen stamp from COLAB_HOME, not from a hardcode
   assert.ok(report.frozen.path.includes(report.registry.replace(/\/repos\.txt$/, '')),
     'the reported path must sit under the COLAB_HOME the registry came from');
   // Deliberately asserts WHERE the stamp was read from, never what state it classified to.
-  // State belongs to the fixture tests above, which control the git history they compare
-  // against. This one runs against the live repo, so any state assertion here reads as
-  // `behind` for every commit that touches tools/ between two tags — including the commit
-  // that added this test. Version equality was never the classifier: see the pair at
-  // 'a handbook release that touched no CLI code…' and 'a change to the CLI script…'.
+  // State belongs to the fixture tests above, which control the git history they compare against.
+  //
+  // The original reason was that this ran `behind` for every commit touching tools/ between two
+  // tags. That specific flap is gone — the comparison now runs to the latest tag, so a copy
+  // stamped at it is `current` no matter what HEAD is doing (see 'unreleased CLI commits do NOT
+  // make a copy stamped at the latest tag behind'). The assertion still does not belong here:
+  // this runs against the live repo, and the self-audit CI job checks out at the default depth
+  // with no tags, so `git describe` finds nothing and every stamp comparison deactivates to
+  // `n-a`. A state assertion would therefore pass locally and be meaningless in CI — a worse
+  // failure than a flapping one, because it looks green.
 });

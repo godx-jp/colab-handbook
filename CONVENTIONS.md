@@ -505,6 +505,12 @@ stating, because both are deliberate:
   *actually changed* since that stamp — checked with `git log <stamp>..HEAD` scoped to the
   template's own path. Comparing version strings instead would mark the entire fleet stale on
   every release and train everyone to ignore the report.
+- **The frozen CLI copy is measured to the latest tag, not to `HEAD`** — the one place those
+  two differ, because the units differ. A template copy is refreshed *from the working tree*,
+  so the working tree is what an adopter can actually get; a frozen copy is refreshed from a
+  release. Measured to `HEAD` it reported `behind` for every unreleased CLI commit, which is
+  the resting state of any machine developing the handbook — and the remedy it advertised
+  copies from that same tree, so it advised services to adopt untagged code.
 - **An unstamped copy is never rewritten**, by any flag. Unknown lineage means we cannot know
   what replacing it would destroy; it is reported, and a human re-copies deliberately.
 - **Provenance is decided by content, never by filename.** A copy is recognised by text only
