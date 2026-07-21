@@ -330,6 +330,7 @@ concurrent sessions don't lose writes.
   "worktrees": {
     "import-fixes-115-114-113": {
       "name": "...", "repo": "/abs/repo", "branch": "fix/...",
+      "base": "main",                   // cut from this, and `ship` merges back into it
       "path": "/abs/repo/.worktrees/...", "ports": [5230],
       "host": "machine", "session": "https://claude.ai/code/session_…",
       "sessionName": "colab-handbook",  // short human label (either/both/neither)
@@ -357,9 +358,12 @@ concurrent sessions don't lose writes.
 - **Global per machine**: ports are unique across *all* repos, so it's one file, not per-repo.
 - Port `owner.type` is `worktree` | `claim` | `manual`; `ref` is the worktree name, claim key, or
   a manual label.
-- `session`, `sessionName`, and `status` are **backward-compatible**: entries written before they
-  existed render as blank identity / `running` status — no migration needed. See *Session identity*
-  and *Worktree lifecycle* below.
+- `session`, `sessionName`, `status` and `base` are **backward-compatible**: entries written before
+  they existed render as blank identity / `running` status, and a missing `base` falls back to the
+  repo's trunk — no migration needed. See *Session identity* and *Worktree lifecycle* below.
+- **This file has readers outside this repo** — an internal dashboard joins worktrees and claims to
+  live sessions straight from it. Treat the shape as a published contract: adding a field is safe,
+  renaming or removing one breaks consumers you cannot grep for.
 
 ## Reserved ports — the design change
 

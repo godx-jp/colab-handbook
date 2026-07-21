@@ -10,19 +10,37 @@
  * State is GLOBAL per machine: ports must be unique across ALL repos, not per-repo, so everything
  * lives in one file. Writes are atomic (temp file + rename).
  *
+ * THIS SCHEMA HAS CONSUMERS OUTSIDE THIS REPO. At least one internal dashboard reads
+ * ~/.colab/state.json directly to join worktrees and claims to the sessions that own them. So the
+ * shape below is a published contract, not an implementation detail: adding a field is safe,
+ * renaming or removing one is a breaking change for readers you cannot grep for. The authoritative
+ * annotated version lives in tools/README.md ("~/.colab/state.json (version 1)") — keep the two in
+ * step, and prefer to extend the prose there rather than here.
+ *
  * State shape (version 1):
  * {
  *   version: 1,
  *   worktrees: {                         // the port-OWNING entity
- *     "<name>": { name, repo, branch, path, ports: [5230,...], host, created }
+ *     "<name>": { name, repo, branch, base, path, ports: [5230,...], host,
+ *                 session, sessionName, status, created }
  *   },
  *   claims: {                            // many claims may reference one worktree (group of issues)
- *     "<repoAbs>#<n>": { issue:"#115", repo, worktree:<name>|null, branch, host, created, ttlHost }
+ *     "<repoAbs>#<n>": { issue:"#115", repo, worktree:<name>|null, branch, host,
+ *                        session, sessionName, created }
  *   },
  *   ports: {                             // flat registry — one entry per allocated port
  *     "5230": { port:5230, owner:{type:"worktree"|"claim"|"manual", ref:"<name|key|label>"}, host, created }
  *   }
  * }
+ *
+ * Field notes for the two that carry weight beyond storage:
+ *   base     the branch the worktree was cut from AND the one `colab ship` merges back into —
+ *            trunk normally, a declared `integration:` line by request. Not derived at ship time.
+ *   session  the ONLY join key to a live session; `sessionName` is display text and joins nothing.
+ *            A name with no URL is a half-identity — the row reads as owned and links nowhere.
+ *
+ * `session`, `sessionName`, `status` and `base` are backward-compatible: entries written before
+ * they existed simply lack them, and readers must tolerate that — no migration is performed.
  */
 
 const fs = require('fs');
