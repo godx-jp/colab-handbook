@@ -321,6 +321,45 @@ concurrent sessions don't lose writes.
 | `claimTTLHours` | `doctor` flags worktree-less claims older than this (default 24). |
 | `portRange` | default search window for `port alloc` / `worktree new` (default `5200-5999`). |
 | `worktreeSubdir` | where worktrees are created inside a repo (default `.worktrees` — gitignore it). |
+| `notifyUrl` | **absent by default** — optional observer endpoint, see below. Unset means colab makes no network call of its own, ever. |
+
+### `notifyUrl` — optional event push (off by default)
+
+Set it and the five state-changing commands POST one small JSON event each, as they succeed:
+
+```sh
+colab config set notifyUrl http://127.0.0.1:9000/api/events
+colab config set notifyUrl ""      # unset — same state on disk as never having set it
+```
+
+| command | event `kind` |
+|---|---|
+| `claim` | `claim.appeared` (one per issue actually kept — an issue lost to the tie-break was never yours) |
+| `release`, and each claim released by `worktree rm` | `claim.released` |
+| `worktree new` | `worktree.appeared` |
+| `worktree rm` | `worktree.removed` |
+| `ship` (after the push succeeds) | `worktree.state-changed` |
+
+Body: `{kind, ts, repo?, issue?, worktree?, session?, payload?}`.
+
+**This is a secondary signal and is designed to be undependable.** The observers it exists for
+already discover every one of these facts by polling `state.json` on a timer; the push only sharpens
+the timestamp from *within a tick* to *the second it happened*, and records which host acted. So:
+
+- **No retry, no queue, no response read, no error surfaced.** A dropped event costs an observer one
+  tick of latency and nothing else. Never build something that needs the event to arrive.
+- **It cannot fail or slow the command.** Each event rides a detached child process, so the CLI's
+  own exit does not wait on it — a receiver that hangs is invisible to you (the child gives up after
+  200 ms). Every push happens *after* the command's real work has already succeeded.
+- **`kind` comes from a fixed map, because receivers keep a closed vocabulary** and answer 400 to
+  anything else. That refusal is correct: a journal counted by kind gets quietly half-right answers
+  the moment one fact has two names. Adding an action means agreeing a kind with the receiver first.
+- **Order is carried by `ts`, not by arrival.** Events are emitted in a deliberate order (claims
+  before the worktree that held them), but each child races the others; inverted arrival has been
+  observed. Sort by `ts`.
+
+Unset, none of this exists: `notify()` returns before it can resolve a host, and the test suite
+asserts that no process is spawned for any action.
 
 ### `~/.colab/state.json` (version 1)
 
@@ -455,7 +494,7 @@ Run `colab <cmd> --help` for full detail.
 | `template [<name>] [--dest F] [--repo P] [--force]` | copy a handbook workflow template into a repo, **stamped** with the handbook version (see below) |
 | `update [<repo>...] [--apply] [--json] [--quiet]` | sweep the fleet registry for stamped copies that fell behind a changed template; `--apply` refreshes the **pristine** ones. Never commits; never touches a hand-edited copy (see below) |
 | `register [<path>] [--remove] [--list]` | add/remove a repo in **both** fleet registries at once; `--list` flags drift (see below) |
-| `config [show \| add-repo P \| rm-repo P \| add-reserved-file P \| rm-reserved-file P \| set K V]` | manage config |
+| `config [show \| add-repo P \| rm-repo P \| add-reserved-file P \| rm-reserved-file P \| set K V]` | manage config (`set` keys: `claimTTLHours`, `portRange`, `worktreeSubdir`, `notifyUrl`) |
 
 ### Release notes
 

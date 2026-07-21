@@ -19,6 +19,7 @@ const stamp = require('./lib/stamp');
 const squash = require('./lib/squash');
 const procs = require('./lib/procs');
 const landed = require('./lib/landed');
+const notify = require('./lib/notify');
 const {
   HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
   parseArgs, table, shortRepo,
@@ -27,6 +28,18 @@ const {
 // ---------------------------------------------------------------------------
 // shared resolution helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Best-effort observer push (lib/notify.js). Silent when `notifyUrl` is unset, which is the default.
+ *
+ * Wrapped in its own try/catch on top of the one inside notify(): every call site here sits AFTER
+ * the command's real work has succeeded, so an exception escaping this line would turn a completed
+ * claim or a finished teardown into a non-zero exit and a stack trace. Never throws, never prints —
+ * a warning about an optional signal is noise on the output of a command that worked.
+ */
+function pushEvent(action, fields) {
+  try { notify.notify(state.loadConfig(), action, fields); } catch (_) { /* secondary signal */ }
+}
 
 /**
  * Absolute MAIN repo root from --repo or cwd; throws UserError if none.
@@ -483,6 +496,9 @@ function cmdClaim(argv) {
     print(`Claimed ${kept.map((n) => '#' + n).join(' ')} in ${shortRepo(repoAbs)}` +
       (wtName ? ` → worktree "${wtName}" (branch ${branch})` : ` (trunk)`));
   }
+  // One event per issue KEPT — not per command. An issue lost to the tie-break was never ours, and
+  // reporting the group as claimed would tell an observer the opposite of what GitHub now says.
+  for (const num of kept) pushEvent('claim', { repo: repoAbs, issue: num, worktree: wtName, session, payload: { branch } });
   // Lost any issue to the tie-break → non-zero so the caller picks another.
   return lost.length ? 1 : 0;
 }
@@ -528,6 +544,7 @@ function cmdRelease(argv) {
     warn('gh not usable here — released LOCAL-ONLY');
   }
   print(`Released #${num} from ${shortRepo(out.repo)}`);
+  pushEvent('release', { repo: out.repo, issue: num, worktree: out.wtName, session: found.claim.session });
   if (out.wtName && out.remaining === 0) {
     print(`  note: worktree "${out.wtName}" now has ZERO claims (not removed — run: colab worktree rm ${out.wtName})`);
   } else if (out.wtName) {
@@ -1064,6 +1081,10 @@ function cmdWorktreeNew(argv) {
   const keptIssues = issues.filter((n) => !lostIssues.includes(n));
   print(`  issues:   ${keptIssues.map((n) => '#' + n).join(' ') || '—'}${gh ? '' : ' (local-only)'}` +
     (lostIssues.length ? `  (lost: ${lostIssues.map((n) => '#' + n).join(' ')})` : ''));
+  // The worktree first, then the claims it carries. As at teardown, this orders `ts` and not
+  // arrival — see the note in cmdWorktreeRm.
+  pushEvent('worktree-new', { repo: repoAbs, worktree: name, session, payload: { branch, base, ports: alloc.chosenPorts } });
+  for (const num of keptIssues) pushEvent('claim', { repo: repoAbs, issue: num, worktree: name, session, payload: { branch } });
   return lostIssues.length ? 1 : 0;
 }
 
@@ -1149,6 +1170,13 @@ function cmdWorktreeRm(argv) {
   // turned a leaked process into a clean bill of health, and it poisons the registry in both
   // directions: the next session is handed the port and hits EADDRINUSE, or slides silently to
   // another one. Verify each port, and name the ones that are still bound.
+  // Claims first, then the worktree — the mirror of `worktree new`. This orders the `ts` values,
+  // which is the only ordering on offer: each event rides its own detached child, so ARRIVAL order
+  // is genuinely racy and was observed inverted here. An observer that sorts by ts sees the
+  // intended sequence; one that trusts arrival order would be wrong about these two either way.
+  for (const num of attachedIssues) pushEvent('release', { repo: repoAbs, issue: num, worktree: name, session: wt.session });
+  pushEvent('worktree-rm', { repo: repoAbs, worktree: name, session: wt.session, payload: { branch: wt.branch } });
+
   const stillBound = removed.freedPorts.filter((p) => procs.portIsBound(Number(p)));
   const trulyFreed = removed.freedPorts.filter((p) => !stillBound.includes(p));
   print(`  freed ports: ${trulyFreed.join(', ') || '—'}`);
@@ -1836,7 +1864,13 @@ const HELP_CONFIG = `colab config [show|add-repo <path>|rm-repo <path>|add-reser
   add-reserved-file <path>   add a machine-local reserved-ports file (~ is expanded); its ports join
                              the reserved set (lenient parse: whitespace ints per line, # comments)
   rm-reserved-file <path>    remove a reserved-ports file
-  set <key> <value>          set claimTTLHours | portRange | worktreeSubdir
+  set <key> <value>          set claimTTLHours | portRange | worktreeSubdir | notifyUrl
+
+notifyUrl is OPTIONAL and off by default: unset, colab makes no network call of its own. Set it to
+an http(s) endpoint and claim / release / ship / worktree new / worktree rm each push one small
+best-effort JSON event as they succeed — fire-and-forget, never retried, never able to fail or slow
+the command that triggered it. Observers already poll this state file; the push only sharpens the
+timestamp. Unset it again with:  colab config set notifyUrl ""
 `;
 
 function cmdConfig(argv) {
@@ -1882,8 +1916,15 @@ function cmdConfig(argv) {
     if (!k || v === undefined) throw new UserError('set needs <key> <value>');
     if (k === 'claimTTLHours') cfg[k] = parseFloat(v);
     else if (k === 'portRange' || k === 'worktreeSubdir') cfg[k] = v;
+    else if (k === 'notifyUrl') {
+      // Empty string DELETES the key rather than storing '', so "turn it off" and "never turned it
+      // on" are the same state on disk. A stored '' would read as a configured-but-broken endpoint.
+      if (v === '') delete cfg[k];
+      else if (!/^https?:\/\//i.test(v)) throw new UserError('notifyUrl must be an http(s) URL (or "" to unset)');
+      else cfg[k] = v;
+    }
     else throw new UserError(`Unknown config key "${k}"`);
-    state.saveConfig(cfg); print(`${k} = ${cfg[k]}`); return 0;
+    state.saveConfig(cfg); print(`${k} = ${cfg[k] === undefined ? '(unset)' : cfg[k]}`); return 0;
   }
   return print(HELP_CONFIG);
 }
@@ -2936,6 +2977,15 @@ function cmdShip(argv) {
   print('  pushed.');
   cleanupEphemeral();
   cleanupTarget();
+
+  // The work has landed and is pushed — this is the moment worth reporting, and it is reported HERE
+  // rather than at the end of the command so it precedes the teardown events B3 emits. Ship is a
+  // worktree state change, not a claim change: the claims are released by B3, which speaks for them.
+  pushEvent('ship', {
+    repo: repoAbs, worktree: sess.name, session: sess.session,
+    issue: sess.issues.length === 1 ? sess.issues[0] : undefined,
+    payload: { state: 'merged', branch: sess.branch, target, sha, issues: sess.issues },
+  });
 
   // ---- (f) B3: teardown the worktree (releases claims + ports + ✅ comments) ----
   const worktreeKept = !!(sess.name && opts.keepWorktree);

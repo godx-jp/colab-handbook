@@ -61,6 +61,9 @@ const DEFAULT_CONFIG = {
   reservedFiles: [],      // machine-local files of reserved ports (lenient: whitespace ints, # comments)
   claimTTLHours: 24,      // worktree-less claims older than this are flagged by `doctor`
   portRange: '5200-5999', // default search window for `port alloc` / `worktree new`
+  // Optional observer endpoint. Unset (the default) = colab makes no network call of its own, ever.
+  // Set it and state-changing commands POST one best-effort event each; see lib/notify.js for why
+  // it is deliberately undependable. Absent rather than '' so `config show` does not advertise it.
 };
 
 function ensureDir() {
