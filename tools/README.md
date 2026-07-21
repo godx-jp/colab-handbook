@@ -39,6 +39,13 @@ colab claim 115 114 113 --worktree import-fixes-115-114-113 --branch fix/import-
 # or let `worktree new` do it all: create the worktree, allocate ports, claim the group
 colab worktree new fix/import-fixes-115-114-113 --issues 115,114,113 --ports 1
 
+# cut from a long-lived line instead of trunk (only one declared in project.yml `integration:`);
+# the base is recorded, and `colab ship` merges back into IT, never into trunk
+colab worktree new feat/checkout-rewrite-42 --issues 42 --base v2
+
+# has this work already landed on its base? (correct across squash merges — "commits ahead" is not)
+colab landed --all
+
 # finish issues one at a time; siblings and the worktree survive
 colab release 114
 
@@ -62,6 +69,12 @@ branch on it.
   whole group.
 - **Claiming and ports work without a worktree.** `colab claim 42` (a trunk claim) and
   `colab port alloc` are standalone.
+- **A worktree owns its base, and the base is the merge target.** It is trunk unless
+  `--base <line>` named a branch the repo declared in `project.yml` `integration:`. `ship`
+  merges into the recorded base rather than resolving trunk afresh — base and target are one
+  decision, because a branch cut from a long-lived line and merged into trunk would carry the
+  whole line in with it inside a single squash commit. Shipping a declared line itself into
+  trunk is refused in every configuration, `autonomy: auto-trunk` included.
 
 ## Claim lifecycle (enforced)
 
@@ -149,7 +162,9 @@ whose `cwd` no longer exists is the real orphan — that one wants killing.
 
 It also **never deletes a git ref**. `doctor` lists branches whose content is already in trunk —
 `git branch --merged` cannot find them after a squash — and stops there, even under `--prune`,
-printing the commands instead. Every other prune touches only colab's own state file; deleting refs
+printing the commands instead. Declared `integration:` lines are excluded from that list: a
+long-lived line contains nothing new until work is merged into it, which is exactly when
+suggesting its deletion would be most destructive. Every other prune touches only colab's own state file; deleting refs
 across every repo a shared machine happens to know about is categorically different.
 
 Because `ship` **keeps** branches by default, that list is the primary cleanup path and is *expected
@@ -254,12 +269,14 @@ A worktree entry carries a `status`, backfilled-on-read (older/absent → `runni
 ```
 
 - **running → merged** has two writers: (1) `colab ship` sets it right after B1 lands the squash on
-  trunk (so a `--keep-worktree` entry survives as `merged`); (2) `colab doctor` auto-detects — for a
-  `running` worktree with **no live claims** whose branch is **tree-contained in trunk**, it records
-  the flip on `--prune`. Containment is checked with `git merge-tree --write-tree` (merging the branch
-  into trunk yields trunk's exact tree), which is correct for **squash merges** — an ancestry/rev-list
-  test would miss them — and stays correct when trunk has moved on. When it can't tell, it leaves the
-  worktree `running`.
+  the target (so a `--keep-worktree` entry survives as `merged`); (2) `colab doctor` auto-detects — for
+  a `running` worktree with **no live claims** whose branch has **landed on its base**, it records the
+  flip on `--prune`. That question is one shared rule (`lib/landed.js`, also behind `colab landed`):
+  merging the branch into its base yields the base's exact tree. It is correct for **squash merges** —
+  an ancestry/rev-list test would miss every one of them — and stays correct when the base has moved
+  on since. It is asked against the worktree's **recorded base**, so a session on a declared line is
+  not judged against trunk. When it cannot tell — a base that rewrote the branch's work leaves a
+  conflict and no content answer — the verdict is `unknown` and the worktree stays `running`.
 - **Any live claim keeps a worktree `running`**, even if the current branch is already contained — a
   group with an unfinished sibling is not done.
 - **merged → killed**: `colab doctor --prune` now **sweeps** merged worktrees still on disk (full

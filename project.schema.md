@@ -4,8 +4,11 @@ The per-repo marker file. One flat YAML document, committed, at
 `.github/project.yml`. It exists so a human or agent can learn the repo's state
 with zero API calls — including in repos that have no GitHub remote at all.
 
-Keep it flat. No nesting, no anchors — the readers (the audit tool, the `colab`
-CLI, CI resolution steps) deliberately use a minimal YAML subset.
+Keep it flat. No nested maps, no anchors — the readers (the audit tool, the
+`colab` CLI, CI resolution steps) deliberately use a minimal YAML subset:
+`key: value` scalars, plus **lists of scalars** in either form (`[a, b]`, or
+`- a` lines indented under the key). Anything else is reported as a parse
+finding rather than half-read.
 
 ## Fields
 
@@ -132,6 +135,48 @@ it is folklore. Omit the key on any other `deploy` value.
 `capacitor-vite`, `astro-static`, `go-cli`, … There is no fixed list — a closed
 enum was tried and immediately failed on a repo that fit no bucket. Used by
 humans and agents for orientation, never for machine dispatch.
+
+### `integration` — optional
+
+```yaml
+trunk: dev
+integration:
+  - v2          # a long-lived line; it merges into trunk by hand, when it is ready
+```
+
+Additional **long-lived integration branches** — lines that accumulate work for a
+release far enough out that they are not merged into trunk for weeks. Empty and
+absent are the same thing, and absent is the normal case.
+
+Declaring a line does three things and no more: `colab worktree new --base <line>`
+will cut from it, `colab ship` merges a worktree back into **the base it was cut
+from**, and the line is guarded and exempted the way trunk is (no raw pushes, no
+branch-name regex, not a "ghost" when a workflow names it).
+
+**Why this is not `trunk`.** The tempting alternative is to let a repo declare its
+long-lived line as trunk and be done. That does not stay on the development side of
+the fence: on Tiers A and C, `trunk` **is** the production spine — it is the branch
+`colab promote` merges into the release branch. Naming the line as trunk points the
+promotion path straight at it, which is the opposite of the intent. So `trunk` stays
+tier-locked ([above](#trunk--required)) and this is a separate axis.
+
+**The guarantee: nothing in the promote / tag / deploy path reads this field.** A
+branch on this axis cannot reach production by construction, not by discipline. The
+only way work on a line reaches users is for a human to merge that line into trunk
+and then promote — and `colab ship` refuses the line → trunk merge even under
+[`autonomy: auto-trunk`](#autonomy--optional), because a long divergence meeting the
+branch that promotes is an integration event of the same weight as a promotion.
+
+Validity: an entry may not be `trunk`'s value, may not be `main` (the release branch
+on Tiers A and C, the trunk on Tier B), may not be the word `trunk` (a role, never a
+branch name), and **must exist as a branch**. A declared line nobody ever cut is the
+same failure as a release branch nothing consumes, so the audit reports it.
+
+CI on a line is checked but **advisory**: a line with no workflow triggering on push
+to it gets a warning, never a failure. Merges into it really do run zero CI, which is
+worth saying — but a line that is not yet gated is a normal early state, and failing
+the repo for it would push teams back to declaring the line nowhere, which is the
+state this field exists to end. Trunk's CI gate remains a hard requirement.
 
 ### `ports` — optional
 
@@ -308,6 +353,7 @@ stack: fastapi + vite spa
 | `deploy: manual` → `runbook:` set, and the path exists in the repo | a hand-deploy only one person knows how to run |
 | `tier: B` → `trunk: main`, `deploy: none`, `production: null` | ceremony without benefit |
 | declared `trunk` branch actually exists | docs describing a repo that doesn't exist |
+| every `integration` entry exists, and is not `trunk` / `main` / the word `trunk` | a dev-side line acquiring a path to production |
 | toolchain pin vs manifest agreement | building on one version, deploying on another |
 
 `push-main` on a Tier A repo **is a finding** — a mismatch between the

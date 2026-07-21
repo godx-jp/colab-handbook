@@ -1,8 +1,12 @@
 #!/bin/sh
 # pre-push-guard — refuse raw `git push` to protected branches unless a sanctioned path set the env.
 #   TRUNK (from .github/project.yml): allowed by COLAB_SHIP=1 (colab ship) or COLAB_HUMAN=1.
+#   INTEGRATION lines (project.yml `integration:`): same rule as trunk. Work merges into a declared
+#     line exactly the way it merges into trunk — via `colab ship` — so it gets the same door. The
+#     line is a DEVELOPMENT integration point: guarding it protects the branch, and nothing here
+#     gives it any path to production.
 #   MAIN, on tier A and C (trunk != main): allowed by COLAB_PROMOTE=1 (colab promote) or COLAB_HUMAN=1.
-#     COLAB_SHIP does NOT open main — ship is trunk-only by design.
+#     COLAB_SHIP does NOT open main — ship is trunk/line-only by design.
 #     The guard keys on `trunk != main`, never on the tier letter, so tier C is covered
 #     automatically — main there is what promotion deploys, so it needs the gate most.
 # On tier B (trunk == main) the trunk rule already covers main. Non-protected pushes always pass.
@@ -23,14 +27,32 @@ fi
 trunk=$(sed -n 's/^trunk:[[:space:]]*//p' "$pj" | head -1 | tr -d "\"'" | awk '{print $1}')
 [ -z "$trunk" ] && exit 0
 
+# Declared integration lines, in either YAML list form: `integration: [a, b]` or `integration:`
+# followed by `  - a` lines. Same minimal subset the audit tool and the CLI read.
+integration=$(awk '
+  /^integration:[[:space:]]*\[/ {
+    s = $0; sub(/^[^[]*\[/, "", s); sub(/\].*$/, "", s); gsub(/[,"'"'"']/, " ", s); print s; next
+  }
+  /^integration:[[:space:]]*$/ { inlist = 1; next }
+  inlist && /^[[:space:]]*-[[:space:]]*/ {
+    s = $0; sub(/^[[:space:]]*-[[:space:]]*/, "", s); sub(/[[:space:]]*#.*$/, "", s)
+    gsub(/["'"'"']/, "", s); print s; next
+  }
+  inlist && /^[^[:space:]#]/ { inlist = 0 }
+' "$pj")
+
 # Which protected refs are being pushed? (stdin: <localref> <localsha> <remoteref> <remotesha>)
 pushing_trunk=0
 pushing_main=0
+pushing_line=""
 while read -r _localref _localsha remoteref _remotesha; do
   case "${remoteref:-}" in
     refs/heads/"$trunk") pushing_trunk=1 ;;
     refs/heads/main)     pushing_main=1 ;;
   esac
+  for line in $integration; do
+    if [ "${remoteref:-}" = "refs/heads/$line" ]; then pushing_line="$line"; fi
+  done
 done
 
 # TRUNK guard (also covers tier B, where trunk == main).
@@ -40,7 +62,14 @@ if [ "$pushing_trunk" -eq 1 ] && [ "${COLAB_SHIP:-}" != "1" ] && [ "${COLAB_HUMA
   exit 1
 fi
 
-# MAIN guard — only on tier A (trunk != main). COLAB_SHIP intentionally does NOT open main.
+# INTEGRATION-LINE guard — a declared long-lived line is an integration point, not a feature branch.
+if [ -n "$pushing_line" ] && [ "${COLAB_SHIP:-}" != "1" ] && [ "${COLAB_HUMAN:-}" != "1" ]; then
+  echo "pre-push-guard: refusing raw push to integration line '$pushing_line'." >&2
+  echo "  Use 'colab ship' (it merges into the base the branch was cut from), or export COLAB_HUMAN=1." >&2
+  exit 1
+fi
+
+# MAIN guard — only on tier A and C (trunk != main). COLAB_SHIP intentionally does NOT open main.
 if [ "$trunk" != "main" ] && [ "$pushing_main" -eq 1 ] && [ "${COLAB_PROMOTE:-}" != "1" ] && [ "${COLAB_HUMAN:-}" != "1" ]; then
   echo "pre-push-guard: refusing raw push to 'main' (promotion target)." >&2
   echo "  Use 'colab promote' for trunk→main, or export COLAB_HUMAN=1 for a sanctioned manual push." >&2

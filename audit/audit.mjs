@@ -120,29 +120,63 @@ function die(msg) {
 // project.yml is a flat mapping of scalars by design. A hand-rolled reader keeps this
 // tool dependency-free; anything it cannot understand is reported as a parse finding
 // rather than silently ignored, so the narrowness is visible instead of dangerous.
+//
+// ONE indented form is accepted: a block sequence of scalars under a key, because
+// `integration:` is a list and a descriptor that cannot express a list would push repos
+// into encoding one in a string. Nesting of every other shape remains a finding — the
+// reader stays narrow on purpose, and the narrowness stays visible.
+//
+// (The `colab` CLI reads the same file through tools/lib/yaml.js, which accepts nested
+// maps as well. The two are deliberately NOT merged: this one's refusal to parse nesting
+// is a CHECK — it is how an over-clever descriptor gets reported instead of silently
+// half-read — while the CLI only needs to consume valid files. Sharing one reader would
+// mean deleting the check.)
+
+function parseScalarValue(raw) {
+  let val = raw.replace(/\s+#.*$/, "").trim(); // strip trailing comment
+  if (/^".*"$/.test(val) || /^'.*'$/.test(val)) return val.slice(1, -1);
+  if (val === "" || val === "null" || val === "~") return null;
+  if (val === "true") return true;
+  if (val === "false") return false;
+  return val;
+}
 
 function parseFlatYaml(text) {
   const out = {};
   const problems = [];
+  // The key whose block sequence may follow. Cleared by any column-0 line, so a `- item`
+  // can never attach to a key it does not sit directly under.
+  let listKey = null;
   text.split(/\r?\n/).forEach((raw, idx) => {
     const line = raw.replace(/\t/g, "  ");
     if (!line.trim() || /^\s*#/.test(line)) return;
     if (/^\s+/.test(line)) {
-      problems.push(`line ${idx + 1}: nested/indented YAML is not supported by this reader (flat key: value only)`);
+      const item = line.match(/^\s+-\s*(.*)$/);
+      if (listKey !== null && item) {
+        if (!Array.isArray(out[listKey])) out[listKey] = [];
+        out[listKey].push(parseScalarValue(item[1]));
+        return;
+      }
+      problems.push(`line ${idx + 1}: nested/indented YAML is not supported by this reader (flat key: value, or a "- item" list under a key)`);
       return;
     }
+    listKey = null;
     const m = line.match(/^([A-Za-z0-9_.-]+)\s*:\s*(.*)$/);
     if (!m) {
       problems.push(`line ${idx + 1}: not a "key: value" pair -> ${line.trim()}`);
       return;
     }
-    let [, key, val] = m;
-    val = val.replace(/\s+#.*$/, "").trim(); // strip trailing comment
-    if (/^".*"$/.test(val) || /^'.*'$/.test(val)) val = val.slice(1, -1);
-    else if (val === "" || val === "null" || val === "~") val = null;
-    else if (val === "true") val = true;
-    else if (val === "false") val = false;
-    out[key] = val;
+    const [, key, rawVal] = m;
+    const trimmed = rawVal.replace(/\s+#.*$/, "").trim();
+    if (/^\[.*\]$/.test(trimmed)) {
+      const inner = trimmed.slice(1, -1).trim();
+      out[key] = inner === "" ? [] : inner.split(",").map((s) => parseScalarValue(s));
+      return;
+    }
+    out[key] = parseScalarValue(rawVal);
+    // A key with a genuinely empty value may open a block sequence on the next lines. It
+    // stays `null` if none follows — `production:` must keep meaning null, not [].
+    if (trimmed === "") listKey = key;
   });
   return { data: out, problems };
 }
@@ -686,9 +720,20 @@ function auditRepo(target, ctx) {
     fail(`main checkout is on "${head}", not trunk "${trunk}" — anything reading this working tree (dev server, symlink, LaunchAgent) is serving that branch. Move the work to a worktree and return the checkout to ${trunk}`);
   }
 
+  // ---- integration lines (optional, dev-side only) -------------------------
+  // A declared long-lived line that worktrees may be cut from and shipped back into. It is NOT a
+  // second trunk: nothing in the promote / tag / deploy path reads this field, which is what keeps
+  // such a line unable to reach production BY CONSTRUCTION rather than by discipline. The tier↔trunk
+  // coherence check above is deliberately untouched — relaxing `trunk:` was the rejected design,
+  // because on tiers A and C trunk IS the branch promotion consumes.
+  const integration = checkIntegration(cfg, trunk, branches, fail, warn);
+  // Declared lines are integration points, so they inherit trunk's exemptions: the §4 branch-name
+  // regex does not apply to them, and a workflow naming one is not referencing a ghost.
+  const exempt = integration.length ? new Set([...INTEGRATION_BRANCHES, ...integration]) : INTEGRATION_BRANCHES;
+
   // ---- branch naming -------------------------------------------------------
   if (branches) {
-    const bad = branches.filter((b) => !INTEGRATION_BRANCHES.has(b) && !BRANCH_RE.test(b));
+    const bad = branches.filter((b) => !exempt.has(b) && !BRANCH_RE.test(b));
     if (bad.length) {
       warn(`branch name(s) off-convention: ${bad.slice(0, 4).join(", ")}${bad.length > 4 ? ` (+${bad.length - 4})` : ""} — want <type>/<slug>`);
     }
@@ -697,7 +742,7 @@ function auditRepo(target, ctx) {
   // ---- trunk is CI-gated ---------------------------------------------------
   // Merges land on the trunk as PUSHES; if no CI workflow triggers on push to the
   // declared trunk, every merge runs zero CI while everyone believes it is gated.
-  checkTrunkCiGated(src, trunk, workflows, branches, fail, warn);
+  checkTrunkCiGated(src, trunk, workflows, branches, fail, warn, { integration, exempt });
 
   // ---- toolchain agreement -------------------------------------------------
   // Report disagreement; never auto-resolve. Three sources can disagree: the
@@ -724,6 +769,64 @@ function auditRepo(target, ctx) {
     return info;
   }
   return finish();
+}
+
+// `integration:` — the declared dev-side axis. Optional; absent is the normal case.
+//
+// It answers one question: which OTHER long-lived branches may a worktree legitimately be cut from
+// and shipped back into? A team keeping a line for a release months out otherwise has nowhere to put
+// it, and the two available workarounds are both worse: park the main checkout on it (the exact
+// state the on-trunk check exists to catch — everything reading that working tree serves the line),
+// or declare it as `trunk` (which points the promotion path at it, since on tiers A and C trunk is
+// what promotion consumes).
+//
+// The validity rules all defend the same boundary — that a declared line is a DEVELOPMENT
+// integration point and can never be a production one:
+//   - not `trunk`: trunk is already the primary integration point; listing it twice would give the
+//     same branch two sets of rules, one of which reaches production.
+//   - not `main`: on tiers A and C that is the release branch, and on tier B it is trunk. Either way
+//     it is the branch this field must never touch.
+//   - not literally `trunk`: a branch by that name is banned outright (§2 — trunk is a role).
+//   - it must EXIST: a declared line nobody cut is the "release branch nothing consumes" failure
+//     under a new name, and the CLI would cut worktrees from a ref that is not there.
+//
+// Returns the validated list (possibly empty) so callers can exempt these branches from the
+// naming regex and the ghost-branch advisory.
+function checkIntegration(cfg, trunk, branches, fail, warn) {
+  if (!cfg || !("integration" in cfg)) return [];
+  const raw = cfg.integration;
+  if (raw === null) return []; // `integration:` with nothing under it — an empty list, the default
+  if (!Array.isArray(raw)) {
+    fail(`integration must be a list of branch names, found ${JSON.stringify(raw)} — write it as "- <branch>" lines or [a, b]`);
+    return [];
+  }
+  const out = [];
+  for (const entry of raw) {
+    const b = entry === null || entry === undefined ? "" : String(entry).trim();
+    if (!b) { fail("integration contains an empty entry"); continue; }
+    if (b === trunk) {
+      fail(`integration lists the trunk ("${b}") — trunk is already the primary integration point; the field is for ADDITIONAL lines`);
+      continue;
+    }
+    if (b === "main") {
+      fail('integration lists "main" — that is the release branch (tiers A and C) or the trunk (tier B), and nothing on this axis may have a path to production');
+      continue;
+    }
+    if (b === "trunk") {
+      fail('integration lists "trunk" — "trunk" is a role, never a branch name (CONVENTIONS.md §2)');
+      continue;
+    }
+    if (out.includes(b)) { warn(`integration lists "${b}" twice`); continue; }
+    out.push(b);
+  }
+  if (Array.isArray(branches)) {
+    for (const b of out) {
+      if (!branches.includes(b)) fail(`integration line "${b}" does not exist as a branch — a declared line nobody cut is the same failure as a release branch nothing consumes`);
+    }
+  } else if (out.length) {
+    warn(`cannot list branches — integration line(s) ${out.join(", ")} unverified`);
+  }
+  return out;
 }
 
 // `deploy: manual` promises that the hand-deploy procedure is written down and findable.
@@ -759,7 +862,7 @@ function checkRunbook(src, runbook, fail, warn) {
 // workflow_dispatch-only workflow does no branch gating and is not CI-type). This exclusion
 // is about what COUNTS AS CI here and says nothing about whether the setup is desirable —
 // a `deploy: push-main` repo is separately a tier A finding above.
-function checkTrunkCiGated(src, trunk, workflows, branches, fail, warn) {
+function checkTrunkCiGated(src, trunk, workflows, branches, fail, warn, { integration = [], exempt = INTEGRATION_BRANCHES } = {}) {
   if (!trunk || !workflows.length) return;
 
   const ci = []; // CI-type workflows: { wf, pushGate, prGate, refs }
@@ -797,14 +900,15 @@ function checkTrunkCiGated(src, trunk, workflows, branches, fail, warn) {
   // This check only catches CI that exists but points at the wrong branch.
   if (!ci.length) return;
 
-  const pushGatesTrunk = (g) => {
+  const pushGates = (g, branch) => {
     if (g === "all") return true;
-    if (Array.isArray(g)) return g.some((p) => globMatch(p, trunk));
-    if (g && g.ignore) return !g.ignore.some((p) => globMatch(p, trunk));
+    if (Array.isArray(g)) return g.some((p) => globMatch(p, branch));
+    if (g && g.ignore) return !g.ignore.some((p) => globMatch(p, branch));
     return false;
   };
+  const gatedBySomeWorkflow = (branch) => ci.some((c) => pushGates(c.pushGate, branch));
 
-  if (!ci.some((c) => pushGatesTrunk(c.pushGate))) {
+  if (!gatedBySomeWorkflow(trunk)) {
     const gates = ci.map((c) => {
       if (Array.isArray(c.pushGate)) return `${c.wf} gates: ${c.pushGate.join(", ")}`;
       if (c.pushGate === "all") return `${c.wf} gates: all branches`;
@@ -813,14 +917,26 @@ function checkTrunkCiGated(src, trunk, workflows, branches, fail, warn) {
     fail(`trunk "${trunk}" is not CI-gated — no workflow triggers on push to it (${gates.join("; ")})`);
   }
 
+  // A declared integration line without its own push gate is an ADVISORY, never a failure. Work
+  // merges into such a line the same way it merges into trunk, so ungated is a real gap — but a
+  // line that is not yet CI-gated is a normal early state, and failing the repo for it would push
+  // teams to declare the line nowhere (which is the state this field exists to end). Trunk's gate
+  // is the one that must exist, because trunk is what reaches a release.
+  for (const b of integration) {
+    if (!gatedBySomeWorkflow(b)) {
+      warn(`integration line "${b}" is not CI-gated — no workflow triggers on push to it, so merges into it run zero CI (advisory: an ungated line is a normal early state)`);
+    }
+  }
+
   // Stale-reference advisory: a workflow names a branch that does not exist. Standard
-  // integration aliases (main/master/dev/trunk) are exempt — teams list them
-  // defensively; the anti-pattern is a project-specific ghost like develop/workos.
+  // integration aliases (main/master/dev/trunk) and this repo's declared integration
+  // lines are exempt — teams list them defensively; the anti-pattern is a
+  // project-specific ghost like develop/workos.
   if (Array.isArray(branches)) {
     for (const c of ci) {
       const ghosts = [...new Set(c.refs)]
         .filter((b) => !/[*?[]/.test(b)) // glob patterns aren't concrete branches
-        .filter((b) => !INTEGRATION_BRANCHES.has(b))
+        .filter((b) => !exempt.has(b))
         .filter((b) => !branches.includes(b));
       if (ghosts.length) warn(`${c.wf} triggers on nonexistent branch(es): ${ghosts.join(", ")}`);
     }

@@ -20,6 +20,14 @@
 # Safety: a destination that already exists and is NOT a symlink back to us is
 # left untouched (skipped with a warning) — so a repo's own richer skill, or a
 # hand-made file, is never clobbered.
+#
+# KNOW WHAT A SYMLINK INSTALL MEANS: every link points into THIS WORKING TREE, not
+# at a copied snapshot. Checking this repo out onto a branch therefore changes the
+# skills — and, with --tools, the CLI — for every session on the machine, instantly
+# and invisibly. That is the point (edit and it is live) and the hazard (a half-
+# finished branch left checked out is a half-finished toolchain for everyone). Work
+# on this repo in a WORKTREE and leave the main checkout on trunk, which is what the
+# handbook asks of every other repo for the same reason.
 set -eo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

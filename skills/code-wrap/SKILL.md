@@ -9,7 +9,9 @@ Two phases. **Phase A runs now** and ends with the branch pushed as a backup.
 **Phase B runs only when a human says go** — merging to trunk is a human decision.
 
 Notation: `$N` = the feature's Issue number · `<trunk>` = the branch sessions
-merge into (from `.github/project.yml`; `main` for Tier B, `dev` for Tier A).
+merge into (from `.github/project.yml`; `main` for Tier B, `dev` for Tier A) ·
+`<base>` = **the branch this session ships into** — `<trunk>`, unless it was cut
+from a declared `integration:` line, in which case it is that line (B0).
 
 ## Principle
 
@@ -123,19 +125,48 @@ git push -u origin <branch>    # a backup/record, NOT a PR, NOT trunk
 
 ## Phase B — only after a human says go
 
-### B0. Sync trunk into the branch, regen generated files (before merging)
+### B0. Is there still cargo? Then sync `<base>` into the branch
 
-Merge conflicts here are almost always **generated files** (codegen locks,
-duplicate-timestamp migrations, generated route/type files) — they happen when a
-branch regenerated on an old base while trunk moved ahead. Cure it in the branch,
-before touching trunk. Skip if trunk hasn't moved since you branched
-(`git rev-list --count <branch>..origin/<trunk>` = 0):
+**First, know what you are merging into.** `<base>` is the branch's base: `<trunk>`
+in the ordinary case, or the declared `integration:` line the session was cut from
+(`CONVENTIONS.md` §2, recorded by `colab worktree new --base`). Everything below —
+the sync, the CI check, the squash, the push — targets `<base>`, not trunk-by-reflex.
+Shipping a line-based branch into trunk would drag the whole line in behind it inside
+one squash commit.
 
 ```sh
-git fetch origin <trunk>
-git merge origin/<trunk>       # conflicts in generated files → the regen below overwrites them
+colab worktrees --json     # this worktree's .base — trunk if it has none
+```
+
+**Then ask whether there is anything left to ship:**
+
+```sh
+colab landed --worktree <name>      # landed · cargo · unknown
+```
+
+- **cargo** → continue with the wrap. This is the normal path.
+- **landed** → the content is already on `<base>`. **Do not merge again.** Go
+  straight to B2b (evidence), B3 (release claims) and B4 (teardown).
+- **unknown** → treat as cargo and look by hand before merging.
+
+**Never decide this by counting commits.** A squash-merge mints a new sha, so a
+shipped branch's own commits look permanently unmerged — a count-only check calls
+*every branch we have ever shipped* unshipped and invites re-merging finished work.
+Without `colab`, ask the content question directly: `git merge-tree --write-tree
+origin/<base> <branch>` printing exactly `git rev-parse origin/<base>^{tree}` means
+the branch adds nothing. (`CONVENTIONS.md` §4, "Has it landed?")
+
+**Now sync.** Merge conflicts here are almost always **generated files** (codegen
+locks, duplicate-timestamp migrations, generated route/type files) — they happen when
+a branch regenerated on an old base while `<base>` moved ahead. Cure it in the branch,
+before touching `<base>`. Skip if `<base>` hasn't moved since you branched
+(`git rev-list --count <branch>..origin/<base>` = 0):
+
+```sh
+git fetch origin <base>
+git merge origin/<base>        # conflicts in generated files → the regen below overwrites them
 # then re-run the repo's codegen on the merged base, e.g. npm run build / codegen
-git add -A && git commit -m "chore(sync): merge <trunk> + regen generated files"
+git add -A && git commit -m "chore(sync): merge <base> + regen generated files"
 ```
 
 Re-run the gate (A3) — a fresh-migrate test must pass, proving both branches'
@@ -143,15 +174,19 @@ migrations run clean together. *(Machine-specific reconcile — e.g. deduping a
 migration against one already on trunk — hooks in here; the universal rule is
 "regen on the merged base, never hand-merge generated files".)*
 
-### B1. Verify trunk CI is alive AND green
+### B1. Verify CI on `<base>` is alive AND green
 
 ```sh
-gh run list --branch <trunk> -L 1
+gh run list --branch <base> -L 1
 ```
 
 A "failure" that never started (billing lockout, runner outage) still means
 **stop** — we once merged for 12 hours into repos whose CI was silently dead
 (`CONVENTIONS.md` §4). Branch protection can't check this for us; this command must.
+
+If `<base>` is a declared line with **no runs at all**, it is not yet CI-gated: check
+`<trunk>` instead and say so in the report. That is a normal early state for a line,
+not a green light — a line that *has* runs and is red still stops the wrap.
 
 ### B1b. Harvest every issue the branch carried
 
@@ -213,11 +248,17 @@ merged (`CONVENTIONS.md` §4).
 ### B2. Squash-merge with `Closes #N`
 
 ```sh
-git checkout <trunk> && git pull
+git checkout <base> && git pull
 git merge --squash <branch>
 git commit    # subject: type(scope): …  · body: Closes #N   (one line per issue in the group)
-git push origin <trunk>
+git push origin <base>
 ```
+
+**`<base>`, every line of it.** If `<base>` is a declared line rather than trunk, the
+main checkout must not be parked on it to do this — use `colab ship`, which merges in
+an ephemeral worktree, or make one yourself. The at-rest invariant does not pause for
+a merge. And merging that **line into trunk** afterwards is never part of a wrap: it
+is a human integration event of a promotion's weight.
 
 - **`Closes #N`, not a bare `(#N)`** — GitHub only auto-closes on the keyword. We
   measured 26/30 issues left open with their code long merged because commits
@@ -240,7 +281,10 @@ the **trunk squash sha** — the branch sha is gone once the branch is deleted (
 squash leaves no merge relation, which is why deleting the branch needs
 `git branch -D`, not `-d`).
 
-Evidence is three parts: **trunk sha · `file:line` · what you checked and what came back.**
+Evidence is three parts: **the `<base>` squash sha · `file:line` · what you checked and
+what came back.** When `<base>` is a declared line, say so in the comment: that code is
+**not in trunk yet**, and an evidence comment that implies otherwise will be read as
+"this is in the next release".
 
 ```sh
 gh issue comment 88 -b "Shipped in \`a1b2c3d\` on <trunk>.
@@ -343,11 +387,14 @@ not perform it.
   left dangling.
 - Every one of those issues has an evidence comment — **including the ones `Closes #N`
   auto-closed**, which attach nothing on their own.
-- If Phase A only: trunk is unchanged (no session commit in `git log <trunk>`).
+- If Phase A only: `<base>` is unchanged (no session commit in `git log <base>`).
 - **The main checkout is back on trunk** — `git -C <repo-root> branch --show-current`
   must print `<trunk>`. If you branched in place rather than using a worktree, this is
   the step that pays that debt: a checkout left on a feature branch means anything
   reading that tree (dev server, symlink, LaunchAgent) is serving unmerged code.
-- After Phase B: `git log --oneline -5 <trunk>` shows the squash-merge; **every** claim
+- After Phase B: `git log --oneline -5 <base>` shows the squash-merge; **every** claim
   released (unconditionally, finished or not); worktree removed — or kept with the reason
   written in your report and its claims released by hand.
+- **Your report names the branch you merged into.** Not "merged" — merged *into what*.
+  It is the difference between shipped-to-trunk and parked-on-a-line, and only one of
+  those is on its way to users.

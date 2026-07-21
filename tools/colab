@@ -18,6 +18,7 @@ const ports = require('./lib/ports');
 const stamp = require('./lib/stamp');
 const squash = require('./lib/squash');
 const procs = require('./lib/procs');
+const landed = require('./lib/landed');
 const {
   HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
   parseArgs, table, shortRepo,
@@ -834,9 +835,17 @@ The portable core does only universal steps. Machine-specific steps (DB cloning,
 dependency symlinking, dev-server restarts) live in OPTIONAL repo hooks, not here.
 
   colab worktree new <branch> [options]
-      fetch origin → create worktree from origin/<trunk> (trunk read from .github/project.yml,
-      else origin/HEAD) → copy .env* if present → allocate ports → record state → run hook.
+      fetch origin → create worktree from origin/<base> (base = trunk unless --base; trunk read
+      from .github/project.yml, else origin/HEAD) → copy .env* if present → allocate ports →
+      record state → run hook.
       Options:
+        --base <branch>    cut from a DECLARED integration line instead of trunk. Only branches
+                           listed in .github/project.yml \`integration:\` are accepted — "some other
+                           branch" stays improvisation. The base is recorded on the worktree, and
+                           \`colab ship\` merges back into IT, never into trunk: a branch cut from a
+                           long-lived line and shipped to trunk would drag the whole line in behind
+                           it as one innocuous-looking squash. Merging the line into trunk is a
+                           human act, refused by ship even under autonomy: auto-trunk.
         --issues N,M,K     claim these issues onto the new worktree (alias: --issue <n>)
         --ports N          allocate N consecutive ports for the worktree
         --at p1,p2,...     pin EXACTLY these ports (refuses if reserved/allocated); excludes --ports/--range
@@ -876,7 +885,7 @@ HOOKS (optional, provided by the adopting repo):
   <repo>/.colab/hooks/pre-remove    run before worktree removal
   Both receive:  argv = <worktree-path> <port> <port> ...
   and env: COLAB_WORKTREE_PATH, COLAB_WORKTREE_NAME, COLAB_BRANCH, COLAB_PORTS (csv),
-           COLAB_REPO, COLAB_TRUNK, COLAB_ISSUES (csv)
+           COLAB_REPO, COLAB_TRUNK, COLAB_BASE (what the branch was cut from), COLAB_ISSUES (csv)
   A non-zero post-create hook is a WARNING (worktree already exists); pre-remove non-zero ABORTS.
 `;
 
@@ -894,6 +903,10 @@ function runHook(repoAbs, name, ctx) {
     ...process.env,
     COLAB_WORKTREE_PATH: ctx.wtPath, COLAB_WORKTREE_NAME: ctx.name, COLAB_BRANCH: ctx.branch,
     COLAB_PORTS: (ctx.ports || []).join(','), COLAB_REPO: repoAbs, COLAB_TRUNK: ctx.trunk || '',
+    // The branch this session was cut from and ships back into — trunk unless the repo declared an
+    // integration line and the session asked for it. Hooks that clone a DB or seed an environment
+    // need the base, not the trunk, or they set the session up against the wrong schema.
+    COLAB_BASE: ctx.base || ctx.trunk || '',
     COLAB_ISSUES: (ctx.issues || []).join(','),
   };
   print(`  running hook ${name} …`);
@@ -903,7 +916,7 @@ function runHook(repoAbs, name, ctx) {
 
 function cmdWorktreeNew(argv) {
   const opts = parseArgs(argv, {
-    values: { '--issues': 'issues', '--ports': 'ports', '--range': 'range', '--at': 'at', '--name': 'name', '--trunk': 'trunk', '--repo': 'repo', '--session': 'session', '--session-name': 'sessionName' },
+    values: { '--issues': 'issues', '--ports': 'ports', '--range': 'range', '--at': 'at', '--name': 'name', '--trunk': 'trunk', '--base': 'base', '--repo': 'repo', '--session': 'session', '--session-name': 'sessionName' },
     aliases: { '--issue': '--issues' },
     flags: { '--force': 'force', '-h': 'help', '--help': 'help' },
   });
@@ -948,16 +961,39 @@ function cmdWorktreeNew(argv) {
   if (!trunk) trunk = git.detectTrunk(repoAbs);
   if (!trunk) throw new UserError('Could not determine trunk branch — pass --trunk <name>');
 
+  // ---- base: trunk by default, a DECLARED integration line by request ----
+  // Only branches the repo has declared may be a base. "Some other branch" stays improvisation, and
+  // improvisation is what put a main checkout on a long-lived line in the first place.
+  const doc = projectDoc(repoAbs);
+  const bases = allowedBases(repoAbs, doc, trunk);
+  const base = opts.base ? String(opts.base).trim() : trunk;
+  if (base !== trunk && !bases.includes(base)) {
+    throw new UserError(
+      `--base "${base}" is not a declared base for this repo. Allowed: ${bases.join(', ')}.\n` +
+      '  Add it to .github/project.yml `integration:` if it is a long-lived line the team keeps ' +
+      '(project.schema.md), rather than branching off it ad hoc.');
+  }
+
   const wtPath = path.join(repoAbs, worktreeSubdir(config), name);
   if (fs.existsSync(wtPath)) throw new UserError(`Worktree path already exists: ${wtPath}`);
 
   // 1. fetch + create worktree
-  print(`fetch origin/${trunk} + create worktree "${name}" (branch ${branch})`);
-  const fetch = git.git(['fetch', 'origin', trunk], repoAbs);
-  if (!fetch.ok) warn(`git fetch failed (${fetch.stderr.split('\n')[0]}) — creating from local origin/${trunk}`);
-  const add = git.git(['worktree', 'add', wtPath, '-b', branch, `origin/${trunk}`], repoAbs);
+  print(`fetch origin/${base} + create worktree "${name}" (branch ${branch})`);
+  const fetch = git.git(['fetch', 'origin', base], repoAbs);
+  if (!fetch.ok) warn(`git fetch failed (${fetch.stderr.split('\n')[0]}) — creating from local origin/${base}`);
+  const add = git.git(['worktree', 'add', wtPath, '-b', branch, `origin/${base}`], repoAbs);
   if (!add.ok) throw new UserError(`git worktree add failed: ${add.stderr}`);
-  const baseSha = git.git(['rev-parse', '--short', `origin/${trunk}`], repoAbs).stdout;
+  const baseSha = git.git(['rev-parse', '--short', `origin/${base}`], repoAbs).stdout;
+
+  // How far behind trunk the line is, as INFORMATION — never a threshold. A long-lived line is
+  // expected to diverge; a refusal (or a warning with a number in it) would fire on every healthy
+  // session and be tuned out within a week.
+  if (base !== trunk) {
+    const behind = git.git(['rev-list', '--count', `origin/${base}..origin/${trunk}`], repoAbs);
+    print(`  base is the declared line "${base}"` +
+      (behind.ok ? `, ${behind.stdout} commit(s) behind ${trunk} (expected for a long-lived line)` : ''));
+    print(`  this worktree ships back into ${base}; merging ${base} → ${trunk} stays a human act.`);
+  }
 
   // 2. copy env files (never committed)
   const envCopied = [];
@@ -982,7 +1018,9 @@ function cmdWorktreeNew(argv) {
       if (!found) throw new UserError(`Could not find ${portCount} consecutive free ports in ${range}`);
       chosenPorts = found;
     }
-    st.worktrees[name] = { name, repo: repoAbs, branch, path: wtPath, ports: chosenPorts, host: HOST, session, sessionName, status: 'running', created: nowISO() };
+    // `base` is recorded even when it IS trunk: a reader must be able to tell "cut from trunk" from
+    // "cut before bases existed", and only a written value says the first.
+    st.worktrees[name] = { name, repo: repoAbs, branch, base, path: wtPath, ports: chosenPorts, host: HOST, session, sessionName, status: 'running', created: nowISO() };
     for (const p of chosenPorts) st.ports[String(p)] = { port: p, owner: { type: 'worktree', ref: name }, host: HOST, created: nowISO() };
     const claimedNums = [], dupes = [];
     for (const num of issues) {
@@ -1014,13 +1052,13 @@ function cmdWorktreeNew(argv) {
   }
 
   // 5. optional repo hook (machine-specific steps plug in here)
-  const hook = runHook(repoAbs, 'post-create', { wtPath, name, branch, ports: alloc.chosenPorts, trunk, issues });
+  const hook = runHook(repoAbs, 'post-create', { wtPath, name, branch, ports: alloc.chosenPorts, trunk, base, issues });
   if (hook.ran && !hook.ok) warn(`post-create hook exited ${hook.code} — worktree was still created; finish setup manually`);
 
   print('');
   print(`✓ Worktree ready`);
   print(`  path:     ${wtPath}`);
-  print(`  branch:   ${branch}  (base origin/${trunk} @ ${baseSha})`);
+  print(`  branch:   ${branch}  (base origin/${base} @ ${baseSha})${base === trunk ? '' : '  [declared line]'}`);
   print(`  env:      ${envCopied.join(' ') || '—'}`);
   print(`  ports:    ${alloc.chosenPorts.join(', ') || '—'}`);
   const keptIssues = issues.filter((n) => !lostIssues.includes(n));
@@ -1194,7 +1232,14 @@ function cmdWorktrees(argv) {
   const rows = wts.map((wt) => {
     const claims = Object.values(st.claims).filter((c) => c.worktree === wt.name).map((c) => c.issue).join(' ') || '-';
     const alive = wt.path ? (fs.existsSync(wt.path) ? 'yes' : 'MISSING') : 'n/a';
-    return [wt.name, shortRepo(wt.repo), wt.branch, wt.ports.join(',') || '-', claims, wtStatus(wt), identityCell(wt.sessionName, wt.session), alive];
+    // A non-trunk base is shown inline rather than in its own column: it is rare, and a worktree
+    // that ships somewhere other than trunk must not look identical to one that does. Read from
+    // project.yml directly — resolveTrunk's origin/HEAD fallback can hit the network, and listing
+    // worktrees must stay a local, instant command.
+    const doc = projectDoc(wt.repo);
+    const declaredTrunk = doc && doc.trunk ? String(doc.trunk) : '';
+    const branchCell = wt.base && declaredTrunk && wt.base !== declaredTrunk ? `${wt.branch} → ${wt.base}` : wt.branch;
+    return [wt.name, shortRepo(wt.repo), branchCell, wt.ports.join(',') || '-', claims, wtStatus(wt), identityCell(wt.sessionName, wt.session), alive];
   });
   print(table(rows, ['NAME', 'REPO', 'BRANCH', 'PORTS', 'ISSUES', 'STATUS', 'SESSION', 'ON-DISK']));
   identityLegend(wts);
@@ -1276,8 +1321,13 @@ function shippedBranches(repos, st) {
   }
   for (const repo of repos) {
     if (!repo || !fs.existsSync(repo) || !git.repoRoot(repo)) continue;
-    const trunk = resolveTrunk(repo, projectDoc(repo));
+    const doc = projectDoc(repo);
+    const trunk = resolveTrunk(repo, doc);
     if (!trunk) continue;
+    // A declared integration line is never "spent": it is an integration point that outlives many
+    // sessions, and it is contained in trunk by construction for as long as nothing has been merged
+    // into it yet — which is exactly when suggesting its deletion would be most destructive.
+    const lines = resolveIntegration(repo, doc, trunk);
     // Branches checked out anywhere in this repo (main checkout + every worktree) are off limits.
     const checkedOut = new Set(
       git.git(['worktree', 'list', '--porcelain'], repo).stdout.split('\n')
@@ -1287,7 +1337,7 @@ function shippedBranches(repos, st) {
     const refs = git.git(['for-each-ref', '--format=%(refname:short)', 'refs/heads/'], repo);
     if (!refs.ok) continue;
     for (const branch of refs.stdout.split('\n').filter(Boolean)) {
-      if (branch === trunk || branch === 'main') continue;
+      if (branch === trunk || branch === 'main' || lines.includes(branch)) continue;
       if (checkedOut.has(branch)) continue;
       if ((liveByRepo.get(repo) || EMPTY_SET).has(branch)) continue;
       if (!branchContainedInTrunk(repo, branch).contained) continue;
@@ -1363,7 +1413,10 @@ function cmdDoctor(argv) {
       if (!wt.path || !fs.existsSync(wt.path)) continue; // dead handled in pass 1; stubs have no tree
       const liveClaims = Object.values(st.claims).filter((c) => c.worktree === wt.name).length;
       if (liveClaims > 0) continue;
-      const res = branchContainedInTrunk(wt.repo, wt.branch);
+      // Against the base this worktree was CUT FROM. A session on a declared integration line has
+      // shipped when its content is on the line; measuring it against trunk would keep it "running"
+      // for as long as the line lives.
+      const res = branchContainedInTrunk(wt.repo, wt.branch, wt.base);
       if (res.contained) {
         report.mergedFlips.push({ name: wt.name, repo: shortRepo(wt.repo), branch: wt.branch });
         if (opts.prune) wt.status = 'merged';
@@ -2270,12 +2323,17 @@ function cmdUpdate(argv) {
 }
 
 // ---------------------------------------------------------------------------
-// ship — the ONE sanctioned door for code-wrap Phase B (session branch → TRUNK).
+// ship — the ONE sanctioned door for code-wrap Phase B (session branch → the base it was cut from).
 //
 // Autonomy is granted by the REPO (project.yml `autonomy: auto-trunk`), never by the caller: a
 // human decides which repos an agent may auto-merge, and --force cannot override that. ship never
 // touches main (when trunk != main), never tags, never promotes — those stay human. Every step is
-// gated; any failure aborts cleanly BEFORE the push, so trunk is never left half-shipped.
+// gated; any failure aborts cleanly BEFORE the push, so the target is never left half-shipped.
+//
+// The target is the worktree's RECORDED BASE, which is trunk unless the session was cut from a
+// declared integration line. Following the base rather than resolving trunk afresh is not a
+// convenience: shipping a line-based branch into trunk would carry the whole line along inside one
+// squash commit. Merging a line itself into trunk is refused here in every configuration.
 // ---------------------------------------------------------------------------
 
 // Files that are regenerated, not authored — a merge conflict here is resolvable by re-running the
@@ -2313,36 +2371,70 @@ function resolveTrunk(repoAbs, doc) {
 }
 
 /**
- * Is <branch>'s content already contained in <trunk>? This must be TRUE after a SQUASH merge, where
- * the branch tip is never an ancestor of trunk (so `rev-list branch ^trunk` won't hit 0) — an
- * ancestry test is the wrong tool. Instead we ask the real question: "does merging branch into trunk
- * change trunk's tree at all?" If `git merge-tree --write-tree trunk branch` yields exactly trunk's
- * current tree, the branch adds nothing → it is contained. This is correct for squash merges of any
- * number of commits AND stays correct when trunk has moved on with unrelated work (the merge keeps
- * that work, so the tree still matches only if branch introduces nothing new).
- * Returns:
- *   { contained:true }               merged tree == trunk tree → branch is in trunk
- *   { contained:false }              merge introduces changes (not merged) → leave running
- *   { contained:false, ambiguous }   refs missing / conflict / old git / error → LEAVE running (safe)
+ * Declared long-lived integration lines (project.yml `integration:`), or [].
+ *
+ * These are DEVELOPMENT integration points: a worktree may be cut from one and shipped back into
+ * one. Nothing in promote / tag / deploy reads this — that is the field's whole guarantee, so keep
+ * every use of it on the ship/worktree side of the CLI (project.schema.md).
+ *
+ * Entries equal to trunk or to `main` are dropped rather than honoured: the audit reports them as
+ * findings, and a malformed descriptor must not be the thing that hands a session a base with a
+ * path to production. Fail closed, report loudly elsewhere.
  */
-function branchContainedInTrunk(repoAbs, branch) {
-  const trunk = resolveTrunk(repoAbs, projectDoc(repoAbs));
-  if (!trunk || trunk === branch) return { contained: false, ambiguous: true };
-  const okT = git.git(['rev-parse', '--verify', '--quiet', trunk], repoAbs).ok;
-  const okB = git.git(['rev-parse', '--verify', '--quiet', branch], repoAbs).ok;
-  if (!okT || !okB) return { contained: false, ambiguous: true };
-  const trunkTree = git.git(['rev-parse', `${trunk}^{tree}`], repoAbs);
-  const mt = git.git(['merge-tree', '--write-tree', trunk, branch], repoAbs);
-  if (mt.code === 0 && trunkTree.ok) {
-    const mergedTree = mt.stdout.split('\n')[0].trim();
-    return { contained: mergedTree === trunkTree.stdout };
-  }
-  if (mt.code === 1) return { contained: false }; // clean merge with changes → not contained
-  // Old git without --write-tree, or a conflict, or an error → fall back to a two-dot tree compare
-  // (correct when trunk hasn't advanced), else stay ambiguous. Never guess "contained".
-  const d = git.git(['diff', '--quiet', trunk, branch], repoAbs);
-  if (d.code === 0) return { contained: true };
-  return { contained: false, ambiguous: true };
+function resolveIntegration(repoAbs, doc, trunk) {
+  const raw = doc && doc.integration;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((b) => (b === null || b === undefined ? '' : String(b).trim()))
+    .filter((b) => b && b !== trunk && b !== 'main' && b !== 'trunk');
+}
+
+/** The set of refs a worktree may legitimately be based on: trunk ∪ integration. */
+function allowedBases(repoAbs, doc, trunk) {
+  return [trunk, ...resolveIntegration(repoAbs, doc, trunk)].filter(Boolean);
+}
+
+/**
+ * The base a session branch was cut from, and therefore the branch it ships back into.
+ *
+ * Recorded per worktree at creation (`state.worktrees[name].base`) because it is a per-machine,
+ * per-session fact — the repo declares which bases are LEGAL, the state records which one was
+ * USED. Worktrees created before this existed have no `base`, so trunk is the fallback: that is
+ * what they were in fact cut from.
+ *
+ * Base and ship target are ONE decision, not two. A worktree cut from a long-lived line and shipped
+ * into trunk would drag the whole line in behind it as a single squash commit that reads like a
+ * small change — which is exactly the accident `integration:` exists to make impossible.
+ */
+function resolveBase(st, repoAbs, worktreeName, trunk) {
+  const wt = worktreeName ? st.worktrees[worktreeName] : null;
+  const recorded = wt && wt.base ? String(wt.base) : '';
+  return recorded || trunk;
+}
+
+/**
+ * Is <branch>'s content already in the branch it would ship into? A thin adapter over the shared
+ * rule in lib/landed.js — see that file for why "commits ahead" is the wrong question, why
+ * `git cherry` does not fix it, and exactly what the rule does not cover.
+ *
+ * `base` is the branch's recorded base when the caller knows it, trunk otherwise. Asking a
+ * line-based branch about trunk would report a fully-shipped branch as enormous cargo.
+ *
+ * Returns { contained, ambiguous, verdict } — `ambiguous` covers missing refs, a conflicting
+ * rewrite, and a git too old for the content test. Callers must treat it as NOT contained: this
+ * decides whether a worktree is a teardown candidate, and being wrong toward "contained" is the
+ * direction that loses work.
+ *
+ * (The previous implementation read `merge-tree` exit code 1 as "a clean merge with changes". It is
+ * a CONFLICT — a clean merge with changes also exits 0, with a differing tree — so a branch whose
+ * work trunk had rewritten was reported as a confident "not contained" rather than an honest
+ * "cannot tell". Same action, worse information.)
+ */
+function branchContainedInTrunk(repoAbs, branch, base) {
+  const target = base || resolveTrunk(repoAbs, projectDoc(repoAbs));
+  if (!target || target === branch) return { contained: false, ambiguous: true };
+  const verdict = landed.landedState(repoAbs, target, branch);
+  return { contained: verdict.state === 'landed', ambiguous: verdict.state === 'unknown', verdict };
 }
 
 /** New migration files introduced on <branch> vs <trunk> (Laravel + Prisma layouts). */
@@ -2390,18 +2482,29 @@ function buildSquashMessage(mainRoot, trunk, branch, issues) {
 
 const HELP_SHIP = `colab ship [--repo <path>] [--worktree <name> | --branch <br>] [--message "<msg>"] [--keep-worktree] [--delete-branch] [--dry]
 
-The ONE sanctioned door for code-wrap Phase B: squash-merge a session branch into TRUNK. Autonomy is
-granted by the repo's .github/project.yml (\`autonomy: auto-trunk\`) — NOT by any flag. Without that
-grant, ship refuses and a human must run Phase B. ship NEVER touches main (when trunk≠main), NEVER
-tags, NEVER promotes.
+The ONE sanctioned door for code-wrap Phase B: squash-merge a session branch into the BASE IT WAS
+CUT FROM — trunk for an ordinary session, or the declared integration line recorded on its worktree
+(project.yml \`integration:\`). Autonomy is granted by the repo's .github/project.yml
+(\`autonomy: auto-trunk\`) — NOT by any flag. Without that grant, ship refuses and a human must run
+Phase B. ship NEVER touches main (when trunk≠main), NEVER tags, NEVER promotes.
 
-Sequence (each step gated; any failure aborts before the push — trunk is never half-shipped):
+Base and target are ONE decision. A branch cut from a long-lived line and shipped into trunk would
+drag the entire line in behind it, as a single squash commit that reads like a small change — so
+ship follows the recorded base and refuses to retarget. Shipping a declared LINE into trunk is
+refused outright, even under autonomy: auto-trunk: a long divergence meeting the branch that
+promotes is an integration event of the same weight as a promotion, and stays human.
+
+Sequence (each step gated; any failure aborts before the push — the target is never half-shipped):
   a. autonomy gate      repo must grant auto-trunk (no --force override)
-  b. preconditions      trunk CI alive+green · no new migrations on branch · trunk checkout clean
-  c. B0 sync            merge trunk INTO the branch; non-generated conflict → abort (human merge);
+  b. preconditions      target CI alive+green · no new migrations on branch · trunk checkout clean
+                        (an integration line with NO runs at all borrows trunk's verdict, advisory —
+                        an ungated line is a normal early state; a RED line still blocks)
+  c. B0 sync            merge the target INTO the branch; non-generated conflict → abort (human merge);
                         generated-only conflict → repo's .colab/hooks/pre-ship regenerates, else abort
-  d. B1 squash          re-check CI green, then squash-merge branch → trunk (Closes every claimed issue)
-  e. B2 push            push trunk (COLAB_SHIP=1 in env so a pre-push-guard lets it through)
+  d. B1 squash          re-check CI green, then squash-merge branch → target (Closes every claimed issue).
+                        Into trunk that happens in the main checkout; into a line it happens in an
+                        EPHEMERAL worktree, so the main checkout never leaves trunk.
+  e. B2 push            push the target (COLAB_SHIP=1 in env so a pre-push-guard lets it through)
   f. B3 teardown        colab worktree rm (releases claims + ports + ✅ comments) unless --keep-worktree.
                         The BRANCH IS KEPT — pass --delete-branch to remove it (local + remote).
   g. B4 verify + h.     confirm each issue auto-closed; post "🚢 Shipped to <trunk>" per issue
@@ -2454,14 +2557,14 @@ Options:
  * every failure is a warning — a protected branch or a missing remote must not fail a ship that
  * already succeeded.
  */
-function handleShippedBranch(repoAbs, trunk, branch, { deleteBranch = false, worktreeKept = false } = {}) {
+function handleShippedBranch(repoAbs, trunk, branch, { deleteBranch = false, worktreeKept = false, integration = [] } = {}) {
   if (!branch) return;
   if (!deleteBranch) {
     print(`  keeping branch ${branch} (default; --delete-branch to remove it, or \`colab doctor\` to list what has accumulated)`);
     return;
   }
-  if (branch === trunk || branch === 'main') { // belt-and-braces; cmdShip already refuses trunk
-    warn(`refusing to delete "${branch}" — it is the trunk or main`);
+  if (branch === trunk || branch === 'main' || integration.includes(branch)) { // belt-and-braces; cmdShip already refuses these
+    warn(`refusing to delete "${branch}" — it is the trunk, main, or a declared integration line`);
     return;
   }
   if (worktreeKept) {
@@ -2524,6 +2627,28 @@ function cmdShip(argv) {
   if (!trunk) throw new UserError('Could not determine trunk branch (set project.yml trunk:)');
   if (sess.branch === trunk) throw new UserError(`Refusing: --branch is the trunk itself (${trunk}) — nothing to ship`);
 
+  // ---- the merge TARGET is the base the session was cut from, not trunk ----
+  const integration = resolveIntegration(repoAbs, doc, trunk);
+  // A declared line is never ship's cargo. Merging weeks of divergence into the branch that
+  // promotes is an integration event of the same weight as a promotion, and `autonomy: auto-trunk`
+  // grants no part of it — that field is about ordinary session branches.
+  if (integration.includes(sess.branch)) {
+    process.stderr.write(`✗ Refusing to ship "${sess.branch}" — it is a declared integration line (project.yml integration:).\n`);
+    process.stderr.write(`  Merging a long-lived line into ${trunk} is a human act: it meets the branch that promotes, and\n`);
+    process.stderr.write('  autonomy: auto-trunk does not cover it. Do it by hand, with COLAB_HUMAN=1 for the push.\n');
+    return 1;
+  }
+  const target = resolveBase(st, repoAbs, sess.name, trunk);
+  if (target !== trunk && !integration.includes(target)) {
+    // The worktree records a base the repo no longer declares (the line was merged and dropped, or
+    // project.yml was edited mid-session). Fail closed: silently retargeting at trunk is the exact
+    // accident the recorded base exists to prevent.
+    throw new UserError(
+      `Worktree "${sess.name}" was cut from "${target}", which is no longer a declared base ` +
+      `(allowed: ${allowedBases(repoAbs, doc, trunk).join(', ')}). Re-declare it in project.yml ` +
+      '`integration:` or finish this merge by hand — ship will not retarget it at trunk for you.');
+  }
+
   // ---- (a) AUTONOMY GATE — granted by the repo file, never by the caller ----
   const autonomy = doc.autonomy ? String(doc.autonomy) : 'manual';
   if (autonomy !== 'auto-trunk') {
@@ -2535,20 +2660,34 @@ function cmdShip(argv) {
   // ---- (b) PRECONDITIONS (report each ✓/✗) ----
   const gh = isGhUsable(repoAbs);
   const checks = [];
-  // CI alive + green on trunk
+  // CI alive + green on the TARGET.
+  //
+  // On a declared line with NO runs at all, fall back to trunk's and say so. An ungated line is a
+  // normal early state (the audit warns rather than fails on it, project.schema.md), and blocking
+  // every ship into a line nobody has wired CI for would make the declared axis useless — which
+  // pushes the work back to the undeclared workarounds. A line that HAS runs and is red still ✗:
+  // once CI exists, it counts.
   let ciOk = false;
-  if (!gh) { checks.push(['✗', 'trunk CI green', 'gh not usable (no auth / no origin) — cannot confirm CI']); }
+  const ciLabel = `${target === trunk ? 'trunk' : 'line'} CI green`;
+  if (!gh) { checks.push(['✗', ciLabel, 'gh not usable (no auth / no origin) — cannot confirm CI']); }
   else {
-    const run = git.ghRunLatest(repoAbs, trunk);
-    if (!run) checks.push(['✗', 'trunk CI green', 'gh run list failed']);
-    else if (run.status === 'completed' && run.conclusion === 'success') { ciOk = true; checks.push(['✓', 'trunk CI green', `latest run success`]); }
-    else checks.push(['✗', 'trunk CI green', `latest run status=${run.status} conclusion=${run.conclusion || 'none'} (fail-to-start counts as not green)`]);
+    let run = git.ghRunLatest(repoAbs, target);
+    let via = target;
+    if (run && run.status === 'none' && target !== trunk) {
+      run = git.ghRunLatest(repoAbs, trunk);
+      via = `${trunk} (line "${target}" has no runs — ungated, advisory)`;
+    }
+    if (!run) checks.push(['✗', ciLabel, 'gh run list failed']);
+    else if (run.status === 'completed' && run.conclusion === 'success') { ciOk = true; checks.push(['✓', ciLabel, `latest run on ${via}: success`]); }
+    else checks.push(['✗', ciLabel, `latest run on ${via}: status=${run.status} conclusion=${run.conclusion || 'none'} (fail-to-start counts as not green)`]);
   }
-  // No new migrations on the branch
-  const migrations = newMigrations(repoAbs, trunk, sess.branch);
+  // No new migrations on the branch, measured against what it will merge into
+  const migrations = newMigrations(repoAbs, target, sess.branch);
   const migOk = migrations.length === 0;
-  checks.push([migOk ? '✓' : '✗', 'no new migrations', migOk ? 'none vs trunk' : `${migrations.length} present — human must run Phase B: ${migrations.join(', ')}`]);
-  // Trunk checkout clean + actually on trunk
+  checks.push([migOk ? '✓' : '✗', 'no new migrations', migOk ? `none vs ${target}` : `${migrations.length} present — human must run Phase B: ${migrations.join(', ')}`]);
+  // The main checkout is on trunk and clean. Required whatever the target is: it is the repo's
+  // at-rest invariant, and when the target is a line the merge happens in an ephemeral worktree
+  // precisely so that this stays true.
   const headBranch = git.git(['rev-parse', '--abbrev-ref', 'HEAD'], repoAbs).stdout;
   const onTrunk = headBranch === trunk;
   const dirty = git.dirtyTracked(repoAbs);
@@ -2559,7 +2698,8 @@ function cmdShip(argv) {
   const preOk = ciOk && migOk && treeOk;
 
   // ---- report the table ----
-  print(`ship ${shortRepo(repoAbs)} · branch ${sess.branch} → ${trunk}` + (opts.dry ? '  [DRY RUN]' : ''));
+  print(`ship ${shortRepo(repoAbs)} · branch ${sess.branch} → ${target}` +
+    (target === trunk ? '' : `  [declared line — NOT ${trunk}]`) + (opts.dry ? '  [DRY RUN]' : ''));
   print(`  issues: ${sess.issues.map((n) => '#' + n).join(' ') || '(none claimed)'}` + (sess.name ? ` · worktree ${sess.name}` : ''));
   print('');
   print(table(checks.map((c) => [c[0], c[1], c[2]]), ['', 'PRECONDITION', 'DETAIL']));
@@ -2567,7 +2707,7 @@ function cmdShip(argv) {
 
   if (opts.dry) {
     print(preOk ? '→ READY: preconditions pass. Re-run without --dry to ship.' : '→ NOT READY: fix the ✗ rows above.');
-    print('  Plan: B0 sync trunk→branch · B1 squash-merge → ' + trunk + ' · B2 push · B3 ' +
+    print(`  Plan: B0 sync ${target}→branch · B1 squash-merge → ` + target + ' · B2 push · B3 ' +
       (opts.keepWorktree ? 'keep worktree' : 'worktree rm') + ' + ' +
       (opts.deleteBranch && !opts.keepWorktree ? 'delete branch (local+remote)' : 'keep branch') +
       ' · B4 verify closed · post 🚢 summary');
@@ -2576,12 +2716,12 @@ function cmdShip(argv) {
     // A dry run is the last moment it can be caught, so it must be on screen there.
     print('  Squash subject: ' + (opts.message
       ? `${opts.message} [--message]`
-      : buildSquashMessage(repoAbs, trunk, sess.branch, sess.issues).split('\n')[0]));
+      : buildSquashMessage(repoAbs, target, sess.branch, sess.issues).split('\n')[0]));
     return preOk ? 0 : 1;
   }
   if (!preOk) { process.stderr.write('✗ Aborting: one or more preconditions failed (see ✗ above). Nothing was pushed.\n'); return 1; }
 
-  // ---- (c) B0: merge trunk INTO the branch (in the worktree, or an ephemeral one) ----
+  // ---- (c) B0: merge the TARGET into the branch (in the worktree, or an ephemeral one) ----
   const generated = [...DEFAULT_GENERATED, ...(Array.isArray(doc.generated) ? doc.generated.map(String) : [])];
   const hasPreShip = fs.existsSync(path.join(repoAbs, '.colab', 'hooks', 'pre-ship'));
   let branchDir = sess.wtPath && fs.existsSync(sess.wtPath) ? sess.wtPath : null;
@@ -2594,10 +2734,10 @@ function cmdShip(argv) {
   }
   const cleanupEphemeral = () => { if (ephemeral) git.git(['worktree', 'remove', '--force', branchDir], repoAbs); };
 
-  print('B0: syncing trunk into the branch …');
-  git.git(['fetch', 'origin', trunk], branchDir);
-  let mergeRef = `origin/${trunk}`;
-  if (!git.git(['rev-parse', '--verify', '--quiet', mergeRef], branchDir).ok) mergeRef = trunk;
+  print(`B0: syncing ${target} into the branch …`);
+  git.git(['fetch', 'origin', target], branchDir);
+  let mergeRef = `origin/${target}`;
+  if (!git.git(['rev-parse', '--verify', '--quiet', mergeRef], branchDir).ok) mergeRef = target;
   const merge = git.git(['merge', '--no-edit', mergeRef], branchDir);
   if (!merge.ok) {
     const uf = git.git(['diff', '--name-only', '--diff-filter=U'], branchDir).stdout.split('\n').filter(Boolean);
@@ -2608,7 +2748,7 @@ function cmdShip(argv) {
       return 1;
     }
     if (hasPreShip) {
-      const hk = runHook(repoAbs, 'pre-ship', { wtPath: branchDir, name: sess.name || sess.branch, branch: sess.branch, ports: [], trunk, issues: sess.issues });
+      const hk = runHook(repoAbs, 'pre-ship', { wtPath: branchDir, name: sess.name || sess.branch, branch: sess.branch, ports: [], trunk, base: target, issues: sess.issues });
       const committed = hk.ran && hk.ok && git.git(['commit', '--no-edit'], branchDir).ok;
       if (!committed) {
         git.git(['merge', '--abort'], branchDir); cleanupEphemeral();
@@ -2622,18 +2762,41 @@ function cmdShip(argv) {
       return 1;
     }
   } else {
-    print('  branch is in sync with trunk.');
+    print(`  branch is in sync with ${target}.`);
   }
 
-  // ---- (d) B1: re-verify CI, then squash-merge into trunk ----
+  // ---- (d) B1: re-verify CI, then squash-merge into the target ----
   if (gh) {
-    const run2 = git.ghRunLatest(repoAbs, trunk);
+    let run2 = git.ghRunLatest(repoAbs, target);
+    // Same fallback as the precondition: an ungated line borrows trunk's verdict rather than
+    // blocking. The two must agree, or a ship passes the table and dies at the re-check.
+    if (run2 && run2.status === 'none' && target !== trunk) run2 = git.ghRunLatest(repoAbs, trunk);
     if (!(run2 && run2.status === 'completed' && run2.conclusion === 'success')) {
       cleanupEphemeral();
-      process.stderr.write('✗ B1: trunk CI is no longer green — aborting before merge. Nothing pushed.\n');
+      process.stderr.write(`✗ B1: CI for ${target} is no longer green — aborting before merge. Nothing pushed.\n`);
       return 1;
     }
   }
+  // WHERE the squash happens. Into trunk it is the main checkout, which is on trunk by invariant
+  // (and was just verified to be). Into a declared line it must NOT be: checking the main checkout
+  // out onto a long-lived line is the very state that made this axis necessary — everything reading
+  // that working tree would serve the line, and a merge is not a reason to break the invariant for
+  // even a moment. So the line is merged in an ephemeral worktree that nothing else reads.
+  let targetDir = repoAbs;
+  let ephemeralTarget = false;
+  if (target !== trunk) {
+    targetDir = fs.mkdtempSync(path.join(os.tmpdir(), 'colab-ship-target-'));
+    const addT = git.git(['worktree', 'add', targetDir, target], repoAbs);
+    if (!addT.ok) {
+      cleanupEphemeral();
+      try { fs.rmdirSync(targetDir); } catch (_) {}
+      process.stderr.write(`✗ B1: could not check out "${target}" to merge into: ${addT.stderr.split('\n')[0]}. Nothing pushed.\n`);
+      return 1;
+    }
+    ephemeralTarget = true;
+  }
+  const cleanupTarget = () => { if (ephemeralTarget) git.git(['worktree', 'remove', '--force', targetDir], repoAbs); };
+
   let commitMsg;
   if (opts.message) {
     // --message overrides the subject/body, but Closes is spliced in as its own paragraph — never
@@ -2642,40 +2805,41 @@ function cmdShip(argv) {
     commitMsg = squash.spliceCloses(opts.message, sess.issues);
   } else {
     // Preserve the branch's crafted commit (subject + footers); insert Closes above the footers.
-    commitMsg = buildSquashMessage(repoAbs, trunk, sess.branch, sess.issues);
+    commitMsg = buildSquashMessage(repoAbs, target, sess.branch, sess.issues);
   }
 
-  print(`B1: squash-merging ${sess.branch} → ${trunk} …`);
-  const sq = git.git(['merge', '--squash', sess.branch], repoAbs);
+  print(`B1: squash-merging ${sess.branch} → ${target} …`);
+  const sq = git.git(['merge', '--squash', sess.branch], targetDir);
   if (!sq.ok) {
-    git.git(['merge', '--abort'], repoAbs); cleanupEphemeral();
+    git.git(['merge', '--abort'], targetDir); cleanupEphemeral(); cleanupTarget();
     process.stderr.write(`✗ B1: squash-merge failed: ${sq.stderr.split('\n')[0]}. Nothing pushed.\n`);
     return 1;
   }
-  const commit = git.run('git', ['commit', '-m', commitMsg], { cwd: repoAbs });
+  const commit = git.run('git', ['commit', '-m', commitMsg], { cwd: targetDir });
   if (!commit.ok) {
-    git.git(['reset', '--hard', `origin/${trunk}`], repoAbs); cleanupEphemeral();
+    git.git(['reset', '--hard', `origin/${target}`], targetDir); cleanupEphemeral(); cleanupTarget();
     // if there was genuinely nothing to commit, say so plainly
-    process.stderr.write(`✗ B1: commit failed (${commit.stderr.split('\n')[0] || 'nothing to commit?'}). Trunk reset, nothing pushed.\n`);
+    process.stderr.write(`✗ B1: commit failed (${commit.stderr.split('\n')[0] || 'nothing to commit?'}). ${target} reset, nothing pushed.\n`);
     return 1;
   }
-  const sha = git.git(['rev-parse', '--short', 'HEAD'], repoAbs).stdout;
+  const sha = git.git(['rev-parse', '--short', 'HEAD'], targetDir).stdout;
   print(`  committed ${sha}: ${commitMsg}`);
 
-  // B1 has landed the squash on trunk → the worktree's branch is now merged. Record it before B3,
+  // B1 has landed the squash on the target → the worktree's branch is now merged. Record it before B3,
   // so a --keep-worktree entry survives with status=merged (and doctor treats it as a sweep candidate).
   if (sess.name) state.mutate((st) => { if (st.worktrees[sess.name]) st.worktrees[sess.name].status = 'merged'; });
 
-  // ---- (e) B2: push trunk with COLAB_SHIP=1 (the sanctioned-path signal for pre-push-guard) ----
-  print(`B2: pushing ${trunk} …`);
-  const push = git.run('git', ['push', 'origin', trunk], { cwd: repoAbs, env: { ...process.env, COLAB_SHIP: '1' } });
+  // ---- (e) B2: push the target with COLAB_SHIP=1 (the sanctioned-path signal for pre-push-guard) ----
+  print(`B2: pushing ${target} …`);
+  const push = git.run('git', ['push', 'origin', target], { cwd: targetDir, env: { ...process.env, COLAB_SHIP: '1' } });
   if (!push.ok) {
-    process.stderr.write(`✗ B2: push failed: ${push.stderr.split('\n')[0]}. Trunk committed locally at ${sha} but NOT pushed — resolve and push by hand (COLAB_HUMAN=1).\n`);
-    cleanupEphemeral();
+    process.stderr.write(`✗ B2: push failed: ${push.stderr.split('\n')[0]}. ${target} committed locally at ${sha} but NOT pushed — resolve and push by hand (COLAB_HUMAN=1).\n`);
+    cleanupEphemeral(); cleanupTarget();
     return 1;
   }
   print('  pushed.');
   cleanupEphemeral();
+  cleanupTarget();
 
   // ---- (f) B3: teardown the worktree (releases claims + ports + ✅ comments) ----
   const worktreeKept = !!(sess.name && opts.keepWorktree);
@@ -2689,22 +2853,123 @@ function cmdShip(argv) {
 
   // B3 (cont.) — the shipped branch. Kept by default; --delete-branch opts in. MUST come after the
   // worktree removal above: git refuses to delete a branch checked out in a worktree.
-  handleShippedBranch(repoAbs, trunk, sess.branch, { deleteBranch: opts.deleteBranch, worktreeKept });
+  handleShippedBranch(repoAbs, target, sess.branch, { deleteBranch: opts.deleteBranch, worktreeKept, integration });
 
   // ---- (g/h) B4 verify auto-close + post 🚢 summary per issue ----
   if (gh) {
     for (const num of sess.issues) {
       const info = git.ghIssueView(repoAbs, num, ['state']);
-      if (info && info.state !== 'CLOSED') warn(`#${num} did not auto-close (state=${info.state}) — the Closes trailer needs a push to the DEFAULT branch; close it by hand if trunk isn't default`);
+      if (info && info.state !== 'CLOSED') warn(`#${num} did not auto-close (state=${info.state}) — the Closes trailer needs a push to the DEFAULT branch; close it by hand if ${target} isn't default`);
       const shipSess = sessionCommentSuffix(sess.session, sess.sessionName); // markdown link when both present
-      const r = git.ghIssueComment(repoAbs, num, `🚢 Shipped to ${trunk} by colab ship — ${sha}${shipSess}`);
+      // Name the branch it actually landed on. An issue whose code is on a long-lived line is NOT
+      // in trunk, and a comment saying otherwise would be read as "this is in the next release".
+      const onLine = target === trunk ? '' : ` (a declared integration line — NOT yet in ${trunk})`;
+      const r = git.ghIssueComment(repoAbs, num, `🚢 Shipped to ${target} by colab ship — ${sha}${onLine}${shipSess}`);
       if (!r.ok) warn(`could not post ship comment on #${num}`);
     }
   }
 
   print('');
-  print(`✓ Shipped ${sess.branch} → ${trunk} @ ${sha}${sess.issues.length ? ' (' + sess.issues.map((n) => '#' + n).join(' ') + ')' : ''}`);
+  print(`✓ Shipped ${sess.branch} → ${target} @ ${sha}${sess.issues.length ? ' (' + sess.issues.map((n) => '#' + n).join(' ') + ')' : ''}`);
+  if (target !== trunk) print(`  "${target}" is a declared line: this work is NOT in ${trunk} until a human merges the line.`);
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// landed — "has this branch's work landed on its base?", the one shared answer.
+//
+// code-sweep sorts candidates into wrap / teardown-only / claim-only / blocked, and code-wrap
+// Phase B decides the same thing for one branch. Both used to decide it by prose and judgement,
+// and the obvious rule (count the commits ahead) misreports every squash-merge — see lib/landed.js
+// for the measurement and for exactly what the rule does and does not cover.
+//
+// It reads; it never acts. Teardown stays a separate, deliberate command, because a rule that both
+// decides and deletes is one bug away from deleting on an `unknown`.
+// ---------------------------------------------------------------------------
+
+const HELP_LANDED = `colab landed [--repo <path>] [--worktree <name> | --branch <br>] [--base <br>] [--all] [--json]
+
+Has this branch's work already landed on its base? The shared answer behind code-sweep's buckets
+and code-wrap Phase B, so the two stop deciding it by eye.
+
+  landed    the base already contains this content — teardown, do NOT re-merge
+  cargo     genuine unmerged work — a full wrap
+  unknown   no confident answer — treat as cargo and look by hand (never torn down)
+
+The base is the branch's RECORDED base (\`colab worktree new --base\`), else the repo's trunk from
+.github/project.yml. It is never defaulted to "main". --base overrides for an ad-hoc question.
+
+Why "commits ahead" is not the rule: a squash-merge mints a new sha, so a shipped branch's own
+commits are never ancestors of the base and a count-only test calls every branch we have ever
+shipped unfinished. The mirror rule (diff only) fails when the base moved on underneath. Both
+failures were measured on real worktrees. So the answer comes from content — does merging this
+branch change the base's tree at all — which stays correct across squashes and later base movement.
+
+LIMIT, stated rather than rounded up: if the base has REWRITTEN the branch's work, the merge
+conflicts and no content answer exists. That reports \`unknown\`, never \`landed\`.
+
+  --worktree <name>   ask about a worktree's branch, using its recorded base
+  --branch <br>       ask about a branch by name
+  --all               every worktree of this repo, as a table
+  --base <br>         compare against this ref instead
+  --json              machine-readable
+No network: fetch first if the base ref may be stale.
+`;
+
+/** Trunk for `landed` — project.yml, then the LOCAL origin/HEAD ref. Never "main", never network. */
+function landedBaseTrunk(repoAbs) {
+  const doc = projectDoc(repoAbs);
+  if (doc && doc.trunk) return String(doc.trunk);
+  const head = git.git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], repoAbs);
+  if (head.ok && head.stdout) return head.stdout.replace(/^origin\//, '');
+  throw new UserError(
+    'Could not determine the base: no .github/project.yml `trunk:` and no local origin/HEAD. ' +
+    'Pass --base <branch>. (It is never assumed to be "main" — guessing the base is how a branch ' +
+    'gets measured against the wrong one.)');
+}
+
+function cmdLanded(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--repo': 'repo', '--worktree': 'worktree', '--branch': 'branch', '--base': 'base' },
+    flags: { '--all': 'all', '--json': 'json', '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help) return print(HELP_LANDED);
+  const repoAbs = resolveRepo(opts);
+  if (!git.repoRoot(repoAbs)) throw new UserError(`${repoAbs} is not a git repo`);
+  const st = state.loadState();
+  const trunk = opts.base ? String(opts.base) : landedBaseTrunk(repoAbs);
+
+  const ask = (branch, wtName) => {
+    const base = opts.base ? String(opts.base) : resolveBase(st, repoAbs, wtName, trunk);
+    return { worktree: wtName || null, ...landed.landedState(repoAbs, base, branch) };
+  };
+
+  let rows;
+  if (opts.all) {
+    rows = Object.values(st.worktrees)
+      .filter((w) => w.repo === repoAbs)
+      .map((w) => ask(w.branch, w.name));
+    if (!rows.length) { print('No worktrees for this repo.'); return 0; }
+  } else if (opts.worktree) {
+    const wt = st.worktrees[opts.worktree];
+    if (!wt) throw new UserError(`No worktree "${opts.worktree}" in state`);
+    rows = [ask(wt.branch, wt.name)];
+  } else if (opts.branch) {
+    const wt = Object.values(st.worktrees).find((w) => w.repo === repoAbs && w.branch === opts.branch);
+    rows = [ask(opts.branch, wt ? wt.name : null)];
+  } else {
+    throw new UserError('landed needs --worktree <name>, --branch <br>, or --all');
+  }
+
+  if (opts.json) { print(JSON.stringify(rows, null, 2)); return 0; }
+  print(table(
+    rows.map((r) => [r.branch, r.base, r.state, `${r.commitsAhead === null ? '?' : r.commitsAhead} ahead`, r.method, r.why]),
+    ['BRANCH', 'BASE', 'VERDICT', 'COMMITS', 'BY', 'WHY'],
+  ));
+  // Exit code carries the answer for one branch, so a script can branch on it without parsing:
+  // 0 = landed, 1 = cargo or unknown (i.e. "do not tear this down"). --all is informational only.
+  if (opts.all) return 0;
+  return landed.hasCargo(rows[0]) ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -2958,11 +3223,15 @@ Commands:
   port free <port> | --worktree N | --claim I
   ports [--json]                                                      list ports + reserved set
 
-  worktree new <branch> [--issues N,M,K] [--ports N] [--name X] [--trunk T] [--repo P]
+  worktree new <branch> [--issues N,M,K] [--ports N] [--name X] [--trunk T] [--base B] [--repo P]
   worktree rm <name> [--force] [--repo P]
   worktrees [--json]
 
-  ship [--worktree N | --branch B] [--message M] [--keep-worktree] [--dry]   code-wrap Phase B → trunk
+  ship [--worktree N | --branch B] [--message M] [--keep-worktree] [--dry]   code-wrap Phase B →
+                                        the branch's recorded base (trunk, or a declared line)
+  landed [--worktree N | --branch B | --all] [--base B] [--json]   has this work already landed?
+                                        (the shared rule behind code-sweep's buckets — correct
+                                        across squash merges, where "commits ahead" is not)
   promote [--repo P] [--message M] [--dry]   trunk → main (--no-ff); gated by deploy + promotion; never tags
   doctor [--prune] [--ttl H] [--json]   heal dead worktrees / orphan + stale claims / orphan ports
   release-notes [<range>] [--repo P] [--out F] [--headline "..."]   grouped Markdown release summary
@@ -2992,6 +3261,7 @@ function main(argv) {
     case 'worktree': return cmdWorktree(rest);
     case 'worktrees': return cmdWorktrees(rest);
     case 'ship': return cmdShip(rest);
+    case 'landed': return cmdLanded(rest);
     case 'promote': return cmdPromote(rest);
     case 'doctor': return cmdDoctor(rest);
     case 'release-notes': return cmdReleaseNotes(rest);

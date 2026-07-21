@@ -126,6 +126,20 @@ in Tier B, `dev` in Tiers A and C. When our internal docs say "merge về trunk"
 luôn sống", they mean the role. Read `project.yml` to learn which branch that is in a given
 repo. Never create a branch literally named `trunk`.
 
+**Trunk is the primary integration point, and not always the only one.** A repo may declare
+additional long-lived lines in `project.yml`
+[`integration:`](project.schema.md#integration--optional) — a branch accumulating work for a
+release weeks out. Sessions may be cut from a declared line and ship back into it, and it is
+guarded exactly as trunk is. What it never gets is a path to production: **nothing in the
+promote, tag or deploy path reads that field**, so the only way work on a line reaches users
+is a human merging the line into trunk and then promoting. That merge is an integration
+event of a promotion's weight, and tooling refuses to perform it.
+
+This is a second *development* axis, not a second trunk. `trunk:` stays tier-locked, because
+on Tiers A and C trunk **is** the production spine — the branch promotion consumes. Declaring
+a long-lived line as trunk would aim the promotion path straight at it, which is the opposite
+of what the line is for.
+
 ---
 
 ## 3. `.github/project.yml` — the marker
@@ -152,6 +166,8 @@ closed enum was tried and immediately failed on a Capacitor app that was neither
 nor a mobile-native project.
 
 Optional toolchain keys (`node:`, `php:`, …) may be added — see [§7](#7-ci-and-toolchain).
+A repo that keeps a long-lived line declares it in `integration:` — a development-side axis
+with no path to production ([§2](#2-tiers), [schema](project.schema.md#integration--optional)).
 
 Mirror the tier as a GitHub **topic** (`tier-a` / `tier-b` / `tier-c`) so `gh repo list --topic tier-a`
 gives a fleet-wide view. The file is the source of truth; the topic is for discovery.
@@ -184,7 +200,24 @@ up next.
 checked out in live worktrees, and renaming breaks active sessions for no benefit. Apply the
 convention to new branches only.
 
-**Never** branch off another feature branch. Always branch off the current trunk.
+**Never** branch off another feature branch. Always branch off the current trunk — or off a
+**declared integration line**, which is not the same thing. A feature branch is one session's
+work in flight, so branching off it couples two unfinished things and neither can land alone.
+A line declared in `project.yml` [`integration:`](project.schema.md#integration--optional) is
+the opposite: a stable, published integration point the team maintains, cut and merged like
+trunk. "Declared" is what separates them, and it is a commit in the repo, not a habit.
+
+The base is a **session fact**: recorded when the worktree is created, and the branch ships
+back into it. It is trunk unless you said otherwise:
+
+```sh
+colab worktree new feat/<slug>-N --issues N              # base = trunk
+colab worktree new feat/<slug>-N --issues N --base v2    # base = the declared line v2
+```
+
+Base and merge target are **one decision, not two.** A branch cut from a line and merged into
+trunk carries the entire line in with it, inside a single squash commit that reads like a small
+change. Say which branch you merged into whenever you report a session as done.
 
 **Commits** — Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `test:`,
 `perf:`). This is not decoration: [§6](#6-releases) builds the release summary by grouping on
@@ -204,6 +237,45 @@ these prefixes. A commit with no prefix is invisible in release notes.
   this for us; the habit must. We once merged for 12 straight hours into repos whose CI was
   silently dead (org billing lockout) — every run "failed" without starting, and nothing
   noticed.
+
+### Has it landed? — the one rule, because the obvious one is wrong
+
+Two jobs need this answer: clearing out finished work (which of these worktrees are spent?)
+and wrapping a session (is there still cargo on this branch, or did it already ship?). Decide
+it the same way in both places:
+
+```sh
+colab landed --worktree <name>     # landed · cargo · unknown
+colab landed --all                 # every worktree of this repo
+```
+
+**Never decide it by counting commits.** A squash-merge mints a new commit with a new sha, so
+a shipped branch's own commits are never ancestors of its base — and squash is how sessions
+merge. A count-only test therefore reports *every branch we have ever shipped* as unfinished,
+which invites re-merging finished work. The mirror test, comparing diffs, fails the opposite
+case: zero commits ahead but a non-empty diff, because the base moved on underneath. Both
+failures were measured on live worktrees, one of each, in a single sweep.
+
+Requiring **both** signals fixes those two and leaves one open — a squash *followed by* base
+movement satisfies both, and that state is common rather than exotic (five of seven shipped
+branches in one repo were in it). So the rule asks the question directly instead: **does
+merging this branch into its base change the base's tree at all?** That stays correct across
+squash merges and later base movement alike.
+
+Two things it is worth knowing about the rule:
+
+- **It is asked against the branch's base**, which is trunk only by default. A branch cut from
+  a declared line and measured against trunk looks like enormous unshipped cargo.
+- **`unknown` is a real answer, and it means cargo.** If the base has *rewritten* the branch's
+  work, the merge conflicts and no content answer exists. Verdicts never round up to `landed`:
+  telling someone their unmerged work is spent costs work, telling them to look again costs a
+  minute.
+
+**Git state and claim state are two signals, and neither replaces the other.** The
+`in-progress` label answers *"does someone believe they hold this"*, which is why it is the
+correct veto before teardown; git answers *"what state is this actually in"*. They disagree in
+both directions in practice — claims outliving finished work, and finished work never claimed.
+Do not collapse them.
 
 ---
 
@@ -582,7 +654,8 @@ gh issue edit N --add-assignee @me --add-label in-progress
 git checkout -b feat/<slug>-N origin/<trunk>      # trunk = main (B) or dev (A)
 
 # finishing work
-git checkout <trunk> && git merge --squash feat/<slug>-N
+colab landed --worktree <name>                    # landed → teardown, cargo → merge
+git checkout <base> && git merge --squash feat/<slug>-N   # base = trunk, or a declared line
 gh issue edit N --remove-label in-progress
 
 # releasing — TIER A ONLY

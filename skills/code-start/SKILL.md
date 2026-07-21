@@ -72,6 +72,11 @@ cat .github/project.yml        # tier, trunk, production, deploy, stack, ports
 - **File missing?** Treat the repo as **Tier B, trunk `main`**, say so in your
   report, and propose adding the file (`CONVENTIONS.md` §3). Do not invent a tier.
 - Never create a branch literally named `trunk`; never create `dev` in a Tier B repo.
+- **Note `integration:` if it is there.** It lists long-lived lines the team keeps
+  (work for a release weeks out). Your base is still **trunk** unless the task says
+  otherwise — but if the work belongs to such a line, that is a decision to take
+  now, at step 4, because the base is what the session ships back into. Never cut
+  from a branch that is not trunk and not declared there.
 
 ## 2. Load context from the feature's Issue — don't re-read the code
 
@@ -207,10 +212,21 @@ colab worktrees                            # if colab is installed — is a work
 
 This check is the deliberate price of unconditional release, not an oversight in it.
 
-## 4. Branch off trunk — worktree by default
+## 4. Branch off the base — worktree by default
 
 Name it per `CONVENTIONS.md` §4 — pattern, and the issue number(s) at the end.
 **Always branch off `<trunk>`, never off another feature branch.**
+
+**The base is a session fact — record it, do not leave it implied.** It is `<trunk>`
+in the ordinary case, and a **declared** `integration:` line when the work belongs to
+one (step 1). Nothing else is ever a base: a feature branch is one session's work in
+flight, while a declared line is a published integration point the team maintains.
+
+The base is also the branch's **merge target** — `colab ship` merges into what the
+worktree records, never into trunk-by-default. That is one decision, not two: a branch
+cut from a line and merged into trunk would carry the whole line in behind it, as a
+single squash commit that reads like a small change. So state your base in the report,
+and code-wrap will state which branch it merged into.
 
 **Why the naming rule is load-bearing downstream** (what §4 doesn't say): code-wrap's
 B1b harvests the issue set for the squash message from exactly two places — the
@@ -242,6 +258,8 @@ conditional rule is one agents skip.
 ```sh
 colab worktree new <type>/<slug>-$N --issues $N --ports 1 \
   --session "$SESSION_URL" --session-name "<label>"     # claims AND creates — one command
+#   … add --base <line> ONLY for a line declared in project.yml `integration:`;
+#   the base is recorded on the worktree and is what `colab ship` merges into.
 # … else fall back to plain git (then claim by hand, step 3):
 git worktree add -b <type>/<slug>-$N ../<slug>-$N origin/<trunk>
 ```
@@ -289,7 +307,9 @@ stop and move the work to a worktree.
   row holding this work. Confirm it stuck: `colab worktrees` (or `colab claims`)
   should show it, not a `—`. A name showing with **no URL behind it** is a half-fix,
   not a pass: repair it with `colab worktree tag <name> --session <url>` and say so.
-- Branch name, and the worktree path if you made one. If the step-3 check found an
+- Branch name, **the base it was cut from**, and the worktree path if you made one. Say
+  the base even when it is trunk — "cut from trunk" and "nobody recorded a base" read
+  identically otherwise, and only the first is a fact. If the step-3 check found an
   existing branch or worktree for this issue, say so and say what you did about it.
 - What you loaded from the Issue and your plan (checklist groups, file split if
   fanning out to sub-agents).
