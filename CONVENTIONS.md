@@ -325,10 +325,13 @@ colab doctor --prune     # free claims whose worktrees no longer exist
 
 ### Readiness — open and unclaimed is not enough
 
-An issue is **ready to start** when it is open, unclaimed, **and has no open blocker**.
-The third condition is the one that used to be uncomputable, because dependencies were
-written in prose: *"blocked by the other one"*, *"these five must queue behind each
-other"*. Prose does not block a parallel session, and no tool can read it. Measured on one
+An issue is **ready to start** when it is open, unclaimed, **and nothing it depends on is
+still missing**. That third condition is neither a boolean nor a matter of opinion — it is
+computed from the dependency graph and the state of what the graph names, and it has three
+values (*blocked* · *ready, with a note* · *ready*). The rule is below; first, the graph,
+because the condition used to be uncomputable when dependencies were written in prose:
+*"blocked by the other one"*, *"these five must queue behind each other"*. Prose does not
+block a parallel session, and no tool can read it. Measured on one
 repo: an epic tracking ~14 children by hand-edited checklist reported `subIssues.totalCount
 = 0` — the relationships a machine could act on simply did not exist.
 
@@ -359,13 +362,9 @@ exposes `blockedBy`, `blocking` and `issueDependenciesSummary` for *reading* onl
 a node id to the REST call, or an issue number to either, fails in ways that read like a
 permissions problem. Verified against the live API, both directions, add and remove.
 
-**Three states, and the third is not the second.** A consumer must distinguish *has an open
-blocker* · *checked, and free* · **not yet checked**. Absent relationship data means nobody
-has looked — it must never be read as "ready". That distinction is the whole value of
-recording this natively: a readiness check becomes a computation instead of a judgement.
-
-Two of those states read straight off the graph; **the third needs a marker of its own**,
-because "no blockers" and "nobody checked for blockers" are the same empty list:
+**"No blockers" and "nobody checked for blockers" are the same empty list**, so the second
+needs a marker of its own. Absent relationship data means nobody has looked — it must never
+be read as "ready":
 
 ```sh
 gh label create deps-checked --color 0E8A16 --description "Dependencies verified — no open blocker"
@@ -373,16 +372,63 @@ gh issue edit <N> --add-label deps-checked        # set it only after actually l
 gh issue edit <N> --remove-label deps-checked     # on any new blocker, or on reopening
 ```
 
-| graph says | label | state |
-|---|---|---|
-| an open `blockedBy` node | (ignored) | **blocked** — name the blocker |
-| empty | present | **free** — someone verified this |
-| empty | absent | **unchecked** — nobody looked; not ready |
-
 The label is *derived* state, so it is only ever as fresh as its last check: whoever adds a
 blocker removes it. Prefer leaving it off to leaving it wrong — an absent label costs one
 check, a stale one costs the wall you walk into. A prose note saying "checked, no blockers"
 does **not** count; that is the practice this section replaces, wearing a different hat.
+
+#### Readiness is not a boolean — read the blocker's state, not just its existence
+
+An open blocker used to end the question. That yes/no hides two situations that are not
+alike: a blocker **nobody has started**, where no code exists anywhere, and a blocker
+**whose code is written and pushed**, its session finished and stopped at the human merge
+gate. For the second, "blocked" is false in practice — the thing being waited for already
+exists, and only a merge stands between it and trunk. Reporting them identically parks work
+that could safely start.
+
+So the verdict has **three values**, plus the *unchecked* state above, which is not a kind
+of ready:
+
+| blocker state | what is actually true | verdict |
+|---|---|---|
+| no relationship data at all | nobody looked | **unchecked** — not ready |
+| open, nobody has started it | no code exists | **blocked** — name the blocker |
+| open, code pushed and unmerged | the dependency exists | **ready, with a note** |
+| closed, or its work is already on trunk | nothing blocks | **ready** |
+
+**The middle value is computed, never recorded.** The `blocked_by` edge stays exactly as
+true as it was: *this waits for that* does not stop being true because the blocker grew a
+branch. Consumers derive the verdict at read time from the relationship **plus** the
+blocker's state. The rejected alternatives are the load-bearing part of this rule:
+
+- **A second label for the soft case** — readable directly, and stale the moment the blocker
+  moves. That is the hazard `deps-checked` already carries, now doubled, with two markers
+  free to disagree about the same issue.
+- **Deleting the edge once the blocker's code is written** — it destroys a true fact for the
+  convenience of a display, and does not survive the blocker being reverted: the dependency
+  comes back, the edge does not, and nothing is left that knows the two are related.
+
+**A relationship is a fact; readiness is a judgement.** Recording a judgement where the
+facts live is how the two begin to contradict each other, and the graph is what everything
+else trusts.
+
+**An active session on the blocker is not evidence — a pushed branch with real commits is.**
+Measured: a session open ten minutes was already dead, having never claimed the issue it was
+opened for. A dependent started on that evidence waits for something that never arrives. An
+open session is intent. The same test rules out an *unpushed* branch, for the reason claims
+are authoritative only when they are visible from any machine: work on one laptop cannot be
+seen, reviewed or merged by anyone waiting on it. An empty pushed branch is not code either.
+
+**The judgement fails toward `blocked`, never toward `ready`.** A blocker whose state cannot
+be measured is blocked. This is the mirror of the landed rule
+([§4](#4-branches-and-commits)), which must never fail toward `landed`: both refuse to be
+optimistic, and each points its refusal at the verdict that costs work — there, destroying
+unmerged code; here, starting into a wall.
+
+The executable reference is `tools/lib/readiness.js` (`classify`, `isStartable`), which is
+pure — facts in, verdict out — and takes its "is the blocker's code written but unmerged?"
+answer from `tools/lib/landed.js` rather than counting commits a second time. Prose states
+the rule; the module is one implementation of it; the tests keep them from drifting apart.
 
 ### Provenance — who decided the work should exist
 

@@ -297,6 +297,25 @@ A worktree entry carries a `status`, backfilled-on-read (older/absent → `runni
   `worktree.removed` line carrying `livedMs` and the last `status`, so how long the worktree lived
   and whether it ever reached `merged` survive the record that is being deleted.
 
+## Readiness (`lib/readiness.js`) — a library, with no command of its own
+
+"Can this issue start right now?" has three answers, not two — `blocked`, `ready-with-a-note`,
+`ready` — because an open blocker whose code is already written and pushed is not blocking in
+practice; only the human merge gate stands between it and trunk. `CONVENTIONS.md` §5 (*Readiness*)
+is the rule; `lib/readiness.js` is the executable form of it, and `code-triage` §5.1 is the manual
+procedure that reaches the same verdicts by hand.
+
+It is **pure** — blocker facts in, verdict out, no git and no network — so a consumer computing
+"startable now" (a dashboard, a vendored copy) can feed it facts it gathered its own way. It takes
+the "written but unmerged?" half from `lib/landed.js` rather than counting commits a second time,
+and it fails toward `blocked` in the same way `landed` fails toward `cargo`: neither will give the
+optimistic answer from facts it could not measure. There is deliberately no `colab` subcommand —
+the gathering step is `gh` calls this CLI does not otherwise make.
+
+Evidence is a **pushed branch with real commits**. An active session on the blocker is not evidence
+(intent, not code — one measured session was already dead ten minutes in, having never claimed its
+issue), nor is an unpushed branch, nor an empty one.
+
 ## State & config files (machine-local)
 
 Everything lives under `~/.colab/` (override the directory with the `COLAB_HOME` env var):

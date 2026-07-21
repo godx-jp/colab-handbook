@@ -34,7 +34,7 @@ inputs that did not move, and re-derive a byte-identical answer.
 
 So the first thing this skill does is decide whether it needs to run at all.
 
-**The fingerprint — four inputs, three network calls:**
+**The fingerprint — five inputs, three network calls:**
 
 ```sh
 GITDIR="$(git rev-parse --path-format=absolute --git-common-dir)"
@@ -54,9 +54,11 @@ python3 -c 'import json,os,sys                                    # 4. claim dig
 r=os.path.realpath(sys.argv[1]); s=json.load(open(os.path.expanduser("~/.colab/state.json")))
 print(sorted(k for k,v in s.get("claims",{}).items() if os.path.realpath(v["repo"])==r),
       sorted(n for n,w in s.get("worktrees",{}).items() if os.path.realpath(w["repo"])==r))' "$REPO"
+git for-each-ref 'refs/remotes/origin/**' --format='%(refname) %(objectname)' \
+  | shasum -a 256 | cut -c1-16                                    # 5. remote heads (local, 0 calls)
 ```
 
-All four equal to the stored run ⇒ **report `nothing has changed since <ts>`, re-print the
+All five equal to the stored run ⇒ **report `nothing has changed since <ts>`, re-print the
 stored conclusion (§0.1), and stop.** Three calls instead of fifty. Input 2 is not an extra
 cost on a run that *does* proceed — §1 needs that list anyway.
 
@@ -89,6 +91,14 @@ cost on a run that *does* proceed — §1 needs that list anyway.
   *per issue*; input 3 is the entire graph in one query. Drop it and the fingerprint goes
   blind to precisely the data the §5 readiness gate turns on — a new blocker would be
   reported as `free (checked)` forever.
+- **Input 5 exists because §5.1 turned a branch push into a readiness signal.** A blocker
+  whose code gets pushed moves a dependent from `blocked` to soft-ready — and moves none of
+  inputs 1-4: trunk is untouched, the issues are untouched, the edge is untouched, and the
+  claim may live on another machine. Without this the new verdict would almost never be
+  discovered under a ping loop, which is the same blindness input 3 was added to fix. It
+  reads refs the fetch on input 1 already updated, so it costs no call. The price is honest:
+  any push to any branch forces a full pass. That is the right trade — a push is also
+  exactly what can hand a live worktree the files a group needs (§5, last gate).
 - **What is deliberately NOT in the fingerprint.** Trunk CI, live worktrees and live
   processes are volatile by nature and are never cached. So a matching fingerprint means
   *the backlog has not moved*; it never means *you may merge*. Nothing downstream may skip
@@ -102,8 +112,9 @@ cost on a run that *does* proceed — §1 needs that list anyway.
 
 §4 already argues this for dependency edges: *a sequence you worked out and left in a report
 is lost the moment the report scrolls away*. The same is true of the report itself. Write
-the §6 output into `$CACHE` alongside the fingerprint — the ranked **ready** groups, the
-**blocked** bucket with its named blockers, **taken**, and **close these**. Without it the
+the §6 output into `$CACHE` alongside the fingerprint — the ranked **ready** groups (with
+each soft-ready note, §5.1, or the re-print loses the one thing that made it startable),
+the **blocked** bucket with its named blockers, **taken**, and **close these**. Without it the
 short-circuit is useless: it would announce that nothing changed and have nothing to show.
 
 Record the **scope** of the conclusion with it (see code-sweep's scoped mode; triage's
@@ -280,9 +291,13 @@ relationship is the part the readiness gate above (and any other tool) reads.
   one to reach the same conclusion (§0.2). Check `blockedBy` first; do not file a duplicate.
 - **Record only what you actually determined.** A sequence you inferred from titles is
   a guess; leave it unwritten and say so in the report.
-- **Clearing one is equally part of the job.** If a blocker has landed, remove the
-  now-false edge (`-X DELETE …/dependencies/blocked_by/<db-id>`) — a stale blocker
-  makes ready work look blocked forever, and nothing else in the family removes it.
+- **Remove an edge only when the edge is false — not because the blocker moved.** Delete
+  (`-X DELETE …/dependencies/blocked_by/<db-id>`) when the dependency never existed, or
+  stopped existing because the work was descoped or redesigned. **Do not delete it because
+  the blocker's code landed**: the two issues really are related, the readiness gate reads
+  the blocker's state for itself (§5.1), and an edge deleted for a display's convenience
+  does not come back if the blocker is reverted. Editing a fact to change what a report
+  prints is how the graph stops being trustworthy.
 - **Triage still never claims and never touches trunk.** Writing relationships between
   issues is the one write this skill performs.
 
@@ -317,13 +332,12 @@ with the blocker named:
 - [ ] **Verifiably undone** — §2 passed against the code, not the tracker.
 - [ ] **Actionable** — the Issue says what "done" looks like. An Issue that is a
       question is blocked on an answer, not ready to code.
-- [ ] **No open blocker** — read the **relationship**, never the prose:
-      `gh issue view <N> --json blockedBy` → any node still `OPEN` blocks it. Prose
-      saying "depends on the other one" is an explanation, not a record; it blocks
-      nothing and no tool can act on it (`CONVENTIONS.md` §5, *Readiness*).
-      **Empty is not "free" — it is "nobody looked".** Report those three states
-      apart: `blocked by #N` · `free (checked)` · `dependencies unchecked`. Collapsing
-      the last into the first two is how a group gets started into a wall.
+- [ ] **Nothing it depends on is still missing** — read the **relationship**, never
+      the prose: `gh issue view <N> --json blockedBy` (`CONVENTIONS.md` §5,
+      *Readiness*). Prose saying "depends on the other one" is an explanation, not a
+      record; it blocks nothing and no tool can act on it.
+      **An open blocker is not automatically a blocker** — judge its state, per §5.1.
+      **And empty is not "free" — it is "nobody looked".**
 - [ ] **Trunk CI is alive AND green** — `gh run list --branch <trunk> -L 1`. A
       failure that never started (billing lockout, runner outage) counts as dead.
       If you cannot merge when you finish, you are not ready to start
@@ -332,6 +346,53 @@ with the blocker named:
       `git branch -a --list '*<n>*'` after `git fetch --prune`. A clean label does
       not prove clean ground: claims are released unconditionally at wrap, so an
       abandoned branch can exist with no claim on it at all.
+
+### 5.1 An open blocker is not one verdict — look at what state it is in
+
+`blockedBy` returning an open node used to end the question. It hides two situations
+that behave nothing alike: a blocker **nobody has started**, and a blocker **whose code
+is written and pushed**, its session over and stopped at the human merge gate. In the
+second the dependency already exists — reporting it as `blocked` parks a session for
+nothing (`CONVENTIONS.md` §5, *Readiness*).
+
+So for each open blocker, ask what evidence exists that its work is real:
+
+```sh
+gh issue view <B> --json state,number                      # closed → clears, full stop
+git fetch --prune --quiet
+git branch -r --list "*-<B>"                               # its branch, by trailing number (§3)
+colab landed --branch origin/<that-branch>                 # landed · cargo · unknown
+```
+
+Ask about the **remote** ref, not a local one: a local branch may be ahead of what was
+pushed, and what was not pushed is not evidence. `--branch` takes any ref, so the blocker's
+branch need not be a worktree on this machine — which it usually is not.
+
+| what you find on the blocker | verdict for the dependent |
+|---|---|
+| closed, or its branch reports `landed` | **clears** — its work is on trunk; open is tracker lag |
+| a pushed branch reporting `cargo` | **soft** — the code exists, unmerged |
+| no branch, or `unknown`, or unpushed, or a branch with no commits | **blocked** |
+
+- **Any hard blocker outranks every soft one.** A group waiting on one unstarted issue
+  and one merge-ready issue is `blocked`, not `ready with a note`.
+- **An active session on the blocker is not evidence.** Nor is a claim, an assignee, or
+  someone saying they are on it. Measured: a session open ten minutes was already dead,
+  having never claimed the issue it was opened for — a dependent started on that would
+  be waiting for something that never arrives. An open session is intent; a **pushed
+  branch with real commits** is evidence. Unpushed does not count either: nobody waiting
+  on it can see, review or merge it.
+- **When you cannot tell, say `blocked`.** This gate fails toward blocked exactly as
+  `colab landed` fails toward cargo — each refuses the optimistic answer, because that
+  is the one that costs a session.
+- **Do not record the soft verdict anywhere.** It is computed fresh each run, from the
+  edge plus the blocker's state, and it is stale the moment the blocker moves. §4 says
+  why: a relationship is a fact, readiness is a judgement, and the graph holds facts.
+  The executable form of this table is `tools/lib/readiness.js` if a tool needs it.
+
+Report the four states apart — `blocked by #N` · `soft: waiting on #N (code pushed,
+unmerged)` · `free (checked)` · `dependencies unchecked`. Collapsing any of them into
+another is how a group gets started into a wall, or left in a queue it could have left.
 
 ## 6. Report — make it directly actionable
 
@@ -343,6 +404,22 @@ READY  fix/import-fixes-115-114-113   #115 #114 #113
        files: app/Import/*, tests/Import/*
        start: colab claim 115 114 113 --worktree import-fixes-115-114-113
 ```
+
+A **soft-ready** group is startable, so it belongs in the ready list — but it carries a
+line the plain ones do not, because a session picking it up needs to know both *what it
+is waiting on* and *that the code already exists*:
+
+```
+READY* fix/import-fixes-115-114-113   #115 #114 #113
+       note: waits on #98 — its code is written and pushed (origin/feat/parser-98,
+             cargo), unmerged at the human gate. Start now; do not re-write it.
+       why: blocks the payroll import; trunk CI green 2h ago
+       files: app/Import/*, tests/Import/*
+       start: colab claim 115 114 113 --worktree import-fixes-115-114-113
+```
+
+Name the branch in the note. Without it the operator cannot check the claim, and "the
+code exists somewhere" is the kind of reassurance that sends someone to write it twice.
 
 Then, briefly:
 
@@ -367,6 +444,9 @@ Hand the top group to **code-start**, which will re-verify the claim before taki
   re-closed issue.
 - Every open Issue is accounted for in exactly one bucket.
 - Every "ready" group passed all six gates, not just "nobody is assigned".
+- Every open blocker was judged on its **state** (§5.1), not on being open — and every
+  soft-ready group says what it waits on and names the branch the code is already on.
+- No `blocked_by` edge was deleted merely because its blocker's code landed.
 - Every "already shipped" call carries evidence (sha + `file:line`) — not a hunch.
 - Branch names carry all issue numbers in one trailing run.
 - Anything surprising — a stale claim, a dead trunk CI, an epic whose table
