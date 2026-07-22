@@ -3,7 +3,7 @@
  * notify.js — OPTIONAL, best-effort event push to an external observer.
  *
  * Configure `notifyUrl` in ~/.colab/config.json and the state-changing commands (claim, release,
- * ship, worktree new, worktree rm) each POST one small JSON event as they succeed. Leave it unset
+ * ship, worktree new, worktree rm, readiness) each POST one small JSON event as they succeed. Leave it unset
  * and this module makes no network call of any kind — that is the default and it is absolute.
  *
  * ── What this is NOT ──────────────────────────────────────────────────────────────────────────
@@ -58,6 +58,11 @@ const ACTION_KIND = Object.freeze({
   'ship': 'worktree.state-changed',
   'worktree-new': 'worktree.appeared',
   'worktree-rm': 'worktree.removed',
+  // readiness reports a PROVIDER-SIDE fact (the deps-checked label colab now writes, #45), so a
+  // dropped event costs the provider's read-after-write lag, not one tick. The receiver has agreed
+  // this kind and ingests it as an optimistic "ready" hint that bridges that lag (#46); payload is
+  // { state: 'checked' | 'unchecked' } — 'unchecked' (--clear) drops the hint, 'checked' applies it.
+  'readiness': 'readiness.marked',
 });
 
 /** Actions this module knows how to report. Exported so a caller can be checked against it. */

@@ -568,8 +568,8 @@ const HELP_READINESS = `colab readiness <issue> [--clear] [--repo <path>]
 Own the readiness marker (§5) — the deps-checked label meaning "dependencies verified,
 no open blocker". Making colab the writer (rather than a raw \`gh issue edit\`) is the point:
 the write is journaled like every other colab action, the label name comes from one place
-(tools/lib/labels.js, shared with the audit), and the observer event can later fall out of
-the same pushEvent() path the other state changes use.
+(tools/lib/labels.js, shared with the audit), and the observer event falls out of the same
+pushEvent() path the other state changes use (kind readiness.marked, agreed with the receiver).
 
   colab readiness <N>            add deps-checked    (set ONLY after actually looking)
   colab readiness <N> --clear    remove deps-checked (a new blocker, or the issue reopened)
@@ -607,13 +607,11 @@ function cmdReadiness(argv) {
     ? `Cleared ${labels.READINESS_LABEL} on #${num} in ${shortRepo(repoAbs)} — readiness is now UNCHECKED`
     : `Marked #${num} in ${shortRepo(repoAbs)} ${labels.READINESS_LABEL} — verified: no open blocker`);
 
-  // The observer event is the deliberate not-yet. colab is now the writer, so emitting it is one
-  // line here —
-  //   pushEvent('readiness', { repo: repoAbs, issue: num, payload: { state: opts.clear ? 'unchecked' : 'checked' } });
-  // — but its KIND must be agreed with the receiver before it enters notify.js's ACTION_KIND, whose
-  // vocabulary is CLOSED by design. An unknown action is already inert (notify() returns 'skipped',
-  // pinned by notify.test.js), so adding the kind prematurely is the failure the closed map exists to
-  // prevent, not a shortcut around it. Sequenced with the receiver's ingest — issue #45 §1/§2.
+  // colab is now the writer of the deps-checked marker, so it owns the event too. The receiver has
+  // agreed the kind `readiness.marked` and ingests this as an optimistic "ready" hint that bridges
+  // the provider's read-after-write lag (#46 §1, following #45 §1). Best-effort as ever: unset
+  // notifyUrl is silence, a dead receiver costs nothing, and the label above is already written.
+  pushEvent('readiness', { repo: repoAbs, issue: num, payload: { state: opts.clear ? 'unchecked' : 'checked' } });
   return 0;
 }
 
@@ -3065,6 +3063,17 @@ function cmdShip(argv) {
     issue: sess.issues.length === 1 ? sess.issues[0] : undefined,
     payload: { state: 'merged', branch: sess.branch, target, sha, issues: sess.issues },
   });
+
+  // A per-issue merge-completion event is the deliberate not-yet (#46 §2, following #45 §2). The
+  // ship event above is worktree-scoped — for a group it carries every issue in one payload — but
+  // the receiver wants to flip a single issue to done the instant its merge lands, without waiting
+  // for the eventually-consistent read. The proposed shape is one event per entry in sess.issues,
+  // kind `issue.merged`, payload { repo, issue, sha } (the merge commit is the evidence):
+  //   for (const num of sess.issues) pushEvent('issue-merged', { repo: repoAbs, issue: num, payload: { sha } });
+  // It is parked, not forgotten, for one reason: unlike readiness.marked, the receiver's ingest for
+  // this kind is NOT built yet, so it is the "sequenced together" case — the kind + one-per-issue vs.
+  // fan-out shape must be agreed with the receiver, then BOTH sides land in the same change. Adding
+  // it to notify.js's ACTION_KIND before that is the exact drift the closed vocabulary prevents.
 
   // ---- (f) B3: teardown the worktree (releases claims + ports + ✅ comments) ----
   const worktreeKept = !!(sess.name && opts.keepWorktree);

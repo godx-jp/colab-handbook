@@ -398,7 +398,8 @@ Where `colab` is installed, `colab readiness` is the owner of this write and the
 edit` is the portable fallback that does the identical label change. Owning it in colab is not
 cosmetic: the write is journaled like every other action, the label name has one source
 (`tools/lib/labels.js`, shared with the audit), and it is the single site the observer event
-(§ notify) will emit from once its kind is agreed with the receiver.
+(§ notify, kind `readiness.marked`) emits from — the receiver has agreed the kind and reads it
+as an optimistic "ready" hint bridging the provider's read-after-write lag.
 
 The label is *derived* state, so it is only ever as fresh as its last check: whoever adds a
 blocker removes it. Prefer leaving it off to leaving it wrong — an absent label costs one
