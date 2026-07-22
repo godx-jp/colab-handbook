@@ -10,10 +10,20 @@
  * It is not a transport anyone may depend on. The observers this exists for already discover every
  * one of these facts on their own, by polling ~/.colab/state.json on a timer; the push only sharpens
  * the timestamp from "within a tick" to "the second it happened", and records which host did it. So
- * there is deliberately no retry, no queue, no response-body read, and no error surfaced. A dropped
- * event costs an observer one tick of latency, and nothing else. Anything that would make the push
- * load-bearing — a caller that waits on it, a receiver that needs it — is a design error upstream,
- * not a missing feature here.
+ * there is deliberately no retry, no queue, no response-body read, and no error surfaced. Anything
+ * that would make the push load-bearing — a caller that waits on it, a receiver that needs it — is a
+ * design error upstream, not a missing feature here.
+ *
+ * ── What a dropped event actually costs — and it is NOT one tick for every kind ────────────────
+ * For a COLAB-LOCAL fact (a worktree, a port, a claim — all in ~/.colab/state.json) the fallback is
+ * that state file, polled on a timer, so a lost event costs one tick and nothing else. But some
+ * events report a PROVIDER-SIDE fact colab does not keep locally: a label it wrote (deps-checked,
+ * in-progress), an issue it closed. There the fallback is not state.json — it is re-reading the
+ * provider, which is eventually consistent: measured on a live fleet, a label written via the REST
+ * API was still absent from a fresh GraphQL read EIGHT MINUTES later. So a dropped event for a
+ * provider-side fact costs minutes of staleness, not a tick. This is still acceptable under
+ * best-effort — the push is a latency optimisation, never the system of record — but the cost is
+ * "the provider's read-after-write lag", not "one poll", and a receiver must be built for that.
  *
  * ── Why a detached child process, and not just fetch() ────────────────────────────────────────
  * The CLI ends at `process.exit(main(...))`, a hard exit that kills in-flight sockets. An

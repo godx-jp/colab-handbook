@@ -15,7 +15,10 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-const { CONVENTION_LABELS, conventionLabelNames, missingConventionLabels } = require('./labels.js');
+const {
+  CONVENTION_LABELS, conventionLabelNames, missingConventionLabels,
+  READINESS_LABEL, readinessLabelArgs,
+} = require('./labels.js');
 
 test('the convention set is exactly the three labels §9 provisions, in canonical order', () => {
   assert.deepStrictEqual(conventionLabelNames(), ['in-progress', 'deps-checked', 'agent-filed']);
@@ -48,6 +51,20 @@ test('empty / null / undefined input reports the whole set (a bare repo, or unre
   assert.deepStrictEqual(missingConventionLabels([]), all);
   assert.deepStrictEqual(missingConventionLabels(null), all);
   assert.deepStrictEqual(missingConventionLabels(undefined), all);
+});
+
+test('the readiness marker name is one of the convention labels, not a second literal', () => {
+  // `colab readiness`, the audit and the provisioner must all target the SAME string; if this
+  // name ever drifts from the set, a readiness write lands a label the audit never checks.
+  assert.equal(READINESS_LABEL, 'deps-checked');
+  assert.ok(conventionLabelNames().includes(READINESS_LABEL));
+});
+
+test('readinessLabelArgs maps set⇒add and clear⇒remove against the one marker name', () => {
+  assert.deepStrictEqual(readinessLabelArgs(), ['--add-label', 'deps-checked']);
+  assert.deepStrictEqual(readinessLabelArgs({}), ['--add-label', 'deps-checked']);
+  assert.deepStrictEqual(readinessLabelArgs({ clear: false }), ['--add-label', 'deps-checked']);
+  assert.deepStrictEqual(readinessLabelArgs({ clear: true }), ['--remove-label', 'deps-checked']);
 });
 
 test('label OBJECTS count as present, not as always-missing', () => {

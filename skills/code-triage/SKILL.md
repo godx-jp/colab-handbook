@@ -361,10 +361,14 @@ ready? Run §2 and the §5 gate against it alone, then leave the answer **where 
 reads it** — either a `blocked_by` edge naming the blocker, or the `deps-checked` label:
 
 ```sh
-gh issue edit <N> --add-label deps-checked      # verified: no open blocker
+colab readiness <N>              # verified: no open blocker  (clear it again with --clear)
+gh issue edit <N> --add-label deps-checked      # … the raw form, if colab is not installed
 ```
 
-That converts *unchecked* into *checked-and-free*, which is the one distinction the gate
+Prefer `colab readiness`: colab owns the write, so it is journaled like every other action,
+takes the label name from one place, and is the single site the observer event will emit
+from once its kind is agreed. The raw `gh` edit is the portable fallback and does the exact
+same label write. That converts *unchecked* into *checked-and-free*, which is the one distinction the gate
 cannot make for itself — an empty `blockedBy` is identical whether someone checked or
 nobody did. A prose comment saying "no blockers" does not do this; it is unreadable to
 the gate, which is the whole reason this convention exists.

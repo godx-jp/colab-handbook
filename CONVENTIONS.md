@@ -390,9 +390,15 @@ be read as "ready":
 
 ```sh
 gh label create deps-checked --color 0E8A16 --description "Dependencies verified — no open blocker"
-gh issue edit <N> --add-label deps-checked        # set it only after actually looking
-gh issue edit <N> --remove-label deps-checked     # on any new blocker, or on reopening
+colab readiness <N>           # set it only after actually looking (raw: gh issue edit <N> --add-label deps-checked)
+colab readiness <N> --clear   # on any new blocker, or on reopening (raw: --remove-label deps-checked)
 ```
+
+Where `colab` is installed, `colab readiness` is the owner of this write and the raw `gh issue
+edit` is the portable fallback that does the identical label change. Owning it in colab is not
+cosmetic: the write is journaled like every other action, the label name has one source
+(`tools/lib/labels.js`, shared with the audit), and it is the single site the observer event
+(§ notify) will emit from once its kind is agreed with the receiver.
 
 The label is *derived* state, so it is only ever as fresh as its last check: whoever adds a
 blocker removes it. Prefer leaving it off to leaving it wrong — an absent label costs one

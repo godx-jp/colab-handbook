@@ -27,6 +27,23 @@ function conventionLabelNames() {
   return CONVENTION_LABELS.map((l) => l.name);
 }
 
+// The readiness marker, named once. CONVENTIONS.md §5 (Readiness) is the prose source; the
+// audit, the provisioner and now `colab readiness` all read the name from HERE rather than
+// spelling the string themselves — a second literal is a second thing to typo, and a readiness
+// write that targets `deps_checked` while the audit checks `deps-checked` fails silently, which
+// is the whole class of bug this single list exists to make impossible.
+const READINESS_LABEL = 'deps-checked';
+
+// The `gh issue edit` label arguments for owning the readiness marker. Pure, so the mapping
+// "set ⇒ add, clear ⇒ remove" is pinned by a test without a network call: the command is a thin
+// shell around ghIssueEdit(repo, num, readinessLabelArgs(...)), and the part worth getting right
+// is exactly this arg vector.
+function readinessLabelArgs({ clear } = {}) {
+  return clear
+    ? ['--remove-label', READINESS_LABEL]
+    : ['--add-label', READINESS_LABEL];
+}
+
 // Given the label names a repo actually has, return the convention labels it is missing,
 // in the canonical order. Tolerant of null/undefined (a repo whose labels could not be
 // read is handled by the caller, not here) and of label objects vs bare strings.
@@ -37,4 +54,7 @@ function missingConventionLabels(present) {
   return conventionLabelNames().filter((n) => !have.has(n));
 }
 
-module.exports = { CONVENTION_LABELS, conventionLabelNames, missingConventionLabels };
+module.exports = {
+  CONVENTION_LABELS, conventionLabelNames, missingConventionLabels,
+  READINESS_LABEL, readinessLabelArgs,
+};

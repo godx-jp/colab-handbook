@@ -297,7 +297,7 @@ A worktree entry carries a `status`, backfilled-on-read (older/absent → `runni
   `worktree.removed` line carrying `livedMs` and the last `status`, so how long the worktree lived
   and whether it ever reached `merged` survive the record that is being deleted.
 
-## Readiness (`lib/readiness.js`) — a library, with no command of its own
+## Readiness (`lib/readiness.js`) — a pure classifier, plus one command that owns the marker
 
 "Can this issue start right now?" has three answers, not two — `blocked`, `ready-with-a-note`,
 `ready` — because an open blocker whose code is already written and pushed is not blocking in
@@ -309,8 +309,14 @@ It is **pure** — blocker facts in, verdict out, no git and no network — so a
 "startable now" (a dashboard, a vendored copy) can feed it facts it gathered its own way. It takes
 the "written but unmerged?" half from `lib/landed.js` rather than counting commits a second time,
 and it fails toward `blocked` in the same way `landed` fails toward `cargo`: neither will give the
-optimistic answer from facts it could not measure. There is deliberately no `colab` subcommand —
-the gathering step is `gh` calls this CLI does not otherwise make.
+optimistic answer from facts it could not measure. The **classifier** deliberately has no command —
+computing the verdict needs facts gathered by `gh` reads this CLI does not otherwise make. But the
+one input a human supplies, the `deps-checked` marker meaning "I looked, no open blocker", **is**
+now owned by a command: `colab readiness <N>` (and `--clear`). Owning the write in colab makes it
+journaled like every other action, gives the label name a single source (`lib/labels.js`, shared
+with the audit), and is the site the observer event will emit from once its kind is agreed with the
+receiver. The marker lives on GitHub, so the command refuses when `gh` is unusable rather than write
+a mark no other machine can see; there is no local-only fallback.
 
 Evidence is a **pushed branch with real commits**. An active session on the blocker is not evidence
 (intent, not code — one measured session was already dead ten minutes in, having never claimed its
@@ -569,6 +575,7 @@ Run `colab <cmd> --help` for full detail.
 |---|---|
 | `claim <issue>... [--worktree N] [--branch B] [--session S] [--session-name S] [--force] [--repo P]` | claim one or many issues (atomic; onto one worktree). **Enforced** — see *Claim lifecycle* below |
 | `release <issue> [--repo P]` | release a single issue; siblings + worktree survive |
+| `readiness <issue> [--clear] [--repo P]` | own the `deps-checked` marker (§5): add it after verifying no open blocker, `--clear` on a new blocker or reopen. Journaled; refuses when `gh` is unusable (the marker has no local-only form) |
 | `claims [--json] [--sync [--prune]]` | list (grouped by worktree); `--sync` **adds** claims found on GitHub (assigned + in-progress); `--prune` also **removes** local claims GitHub no longer shows |
 | `port alloc [--count N] [--range A-B \| --at p1,p2,...] [--worktree N \| --claim I \| --label S]` | allocate consecutive free ports, or pin exact ports with `--at` |
 | `port free <port> \| --worktree N \| --claim I` | free ports |

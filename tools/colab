@@ -21,6 +21,7 @@ const procs = require('./lib/procs');
 const landed = require('./lib/landed');
 const notify = require('./lib/notify');
 const journal = require('./lib/journal');
+const labels = require('./lib/labels');
 const {
   HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
   parseArgs, table, shortRepo,
@@ -555,6 +556,64 @@ function cmdRelease(argv) {
   } else if (out.wtName) {
     print(`  worktree "${out.wtName}" still has ${out.remaining} claim(s)`);
   }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// readiness — colab owns the deps-checked marker (CONVENTIONS.md §5)
+// ---------------------------------------------------------------------------
+
+const HELP_READINESS = `colab readiness <issue> [--clear] [--repo <path>]
+
+Own the readiness marker (§5) — the deps-checked label meaning "dependencies verified,
+no open blocker". Making colab the writer (rather than a raw \`gh issue edit\`) is the point:
+the write is journaled like every other colab action, the label name comes from one place
+(tools/lib/labels.js, shared with the audit), and the observer event can later fall out of
+the same pushEvent() path the other state changes use.
+
+  colab readiness <N>            add deps-checked    (set ONLY after actually looking)
+  colab readiness <N> --clear    remove deps-checked (a new blocker, or the issue reopened)
+
+Runs the label edit for you:  gh issue edit N --add-label deps-checked  (or --remove-label).
+The marker lives on GitHub, visible from any machine to the readiness gate that reads it, so
+without a usable gh + remote this command REFUSES (exit 1) rather than report a success that
+wrote nothing anyone can see — there is deliberately no local-only fallback.
+
+The label is DERIVED state, only ever as fresh as this last check: whoever adds a blocker
+clears it. Prefer leaving it off to leaving it wrong (CONVENTIONS.md §5).
+`;
+
+function cmdReadiness(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--repo': 'repo' },
+    flags: { '--clear': 'clear', '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help || opts._.length === 0) return print(HELP_READINESS);
+  const num = normIssueNum(opts._[0]);
+  const repoAbs = opts.repo ? resolveRepo(opts) : (git.repoRoot(process.cwd()) || null);
+  if (!repoAbs) throw new UserError('not inside a git repo — pass --repo <path>');
+
+  // No local fallback, on purpose. A claim can degrade to local-only because it also has a fast
+  // local copy; the readiness marker has only one home — the provider, where the gate that reads it
+  // can see it from any machine (CONVENTIONS.md §5). Writing it "local-only" would be invisible to
+  // the one reader it exists for, so absent gh this command refuses instead of faking success.
+  if (!isGhUsable(repoAbs)) {
+    throw new UserError(`gh not usable here (no gh auth or no origin remote) — the ${labels.READINESS_LABEL} marker lives on GitHub and cannot be written local-only`);
+  }
+
+  const r = git.ghIssueEdit(repoAbs, num, labels.readinessLabelArgs({ clear: opts.clear }));
+  if (!r.ok) throw new UserError(`gh edit #${num} failed (${r.stderr.split('\n')[0] || r.code})`);
+  print(opts.clear
+    ? `Cleared ${labels.READINESS_LABEL} on #${num} in ${shortRepo(repoAbs)} — readiness is now UNCHECKED`
+    : `Marked #${num} in ${shortRepo(repoAbs)} ${labels.READINESS_LABEL} — verified: no open blocker`);
+
+  // The observer event is the deliberate not-yet. colab is now the writer, so emitting it is one
+  // line here —
+  //   pushEvent('readiness', { repo: repoAbs, issue: num, payload: { state: opts.clear ? 'unchecked' : 'checked' } });
+  // — but its KIND must be agreed with the receiver before it enters notify.js's ACTION_KIND, whose
+  // vocabulary is CLOSED by design. An unknown action is already inert (notify() returns 'skipped',
+  // pinned by notify.test.js), so adding the kind prematurely is the failure the closed map exists to
+  // prevent, not a shortcut around it. Sequenced with the receiver's ingest — issue #45 §1/§2.
   return 0;
 }
 
@@ -3383,6 +3442,7 @@ Three independent capabilities (each works standalone):
 Commands:
   claim <issue> [<issue>...] [--worktree N] [--branch B] [--repo P]   claim issue(s)
   release <issue> [--repo P]                                          release one issue
+  readiness <issue> [--clear] [--repo P]                             own the deps-checked marker (§5)
   claims [--json] [--sync]                                            list / reconcile with GitHub
 
   port alloc [--count N] [--range A-B] [--worktree N|--claim I|--label S]
@@ -3427,6 +3487,7 @@ function main(argv) {
   switch (cmd) {
     case 'claim': return cmdClaim(rest);
     case 'release': return cmdRelease(rest);
+    case 'readiness': return cmdReadiness(rest);
     case 'claims': return cmdClaims(rest);
     case 'port': return cmdPort(rest);
     case 'ports': return cmdPorts(rest);
