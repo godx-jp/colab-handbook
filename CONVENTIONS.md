@@ -777,6 +777,22 @@ stating, because both are deliberate:
   as something to re-copy. This is a data-safety rule, not a tidiness one: the advice attached to
   "looks copied" is `--force`, so misattributing a repo's own workflow means overwriting it.
 
+### Labels reconcile too — not just stamped files
+
+Stamps track *file* drift, but the convention **labels** ([§9](#9-adopting-this) step 3)
+drift the same way and leave no file to stamp. A repo that adopted before a label entered
+the set never gains it on its own, and the check that label powers then silently cannot
+fire — the readiness column that never fills, the provenance that reads every issue as
+human-filed. So the label set is reconciled on the same loop:
+
+- **The audit reports the gap.** An adopted repo (one with a `project.yml`) missing any
+  convention label is a finding — provided the audit can read the label set at all. Labels
+  live on GitHub, so a remote-less or offline audit stays silent rather than claim a label
+  is missing it simply could not see.
+- **Sync back-fills it.** Provisioning the full set is idempotent (`|| true`), so it is safe
+  to re-run on every sync, not only at first adoption. That is the mechanism by which a
+  label added in a later handbook version reaches a repo that adopted earlier.
+
 ### The fleet registry is private
 
 The list of repos the audit sweeps lives at `~/.colab/repos.txt` — machine-local, never
@@ -799,17 +815,32 @@ here.
    (Tier C)? **Deploying by hand does not make a repo Tier B** — the question is whether
    production exists, not whether shipping is automated ([§2](#2-tiers)).
 2. **Write `.github/project.yml`** ([§3](#3-githubprojectyml--the-marker)).
-3. **Create the labels** — they will not exist yet:
+3. **Create the labels — the whole set, not a subset.** They will not exist yet. All
+   three are required, because each powers a check that silently *cannot fire* while its
+   label is absent — and a check that never fires reads exactly like one that always
+   passes:
    ```sh
-   gh label create in-progress  --color FBCA04 --description "Claimed by an active session"
-   gh label create deps-checked --color 0E8A16 --description "Dependencies verified — no open blocker"
-   gh label create agent-filed  --color C5DEF5 --description "Filed by an agent on its own initiative — not human-approved"
+   gh label create in-progress  --color FBCA04 --description "Claimed by an active session"  2>/dev/null || true
+   gh label create deps-checked --color 0E8A16 --description "Dependencies verified — no open blocker"  2>/dev/null || true
+   gh label create agent-filed  --color C5DEF5 --description "Filed by an agent on its own initiative — not human-approved"  2>/dev/null || true
    ```
-   The second is optional-but-cheap: without it a readiness check can never tell *free*
-   from *nobody looked*. The third must exist **before** any agent files an issue here,
-   not after — absence of the label means *a human filed this*, so a repo where the label
-   does not exist reports every agent-filed issue as human-approved
-   ([§5](#5-claiming-work--how-to-say-im-on-this)).
+   The `|| true` makes this **idempotent** — partial adoption is the normal case, so
+   re-running must be safe. What each absence costs:
+   - **`in-progress`** must exist before the first claim; without it the claim cannot land
+     (and `colab claim` keeps a *local* claim while GitHub holds nothing — a collision
+     reached from underneath, [§5](#5-claiming-work--how-to-say-im-on-this)).
+   - **`deps-checked`** is not optional: without it a readiness check can never tell *free*
+     from *nobody looked*, so the column silently never fills — worse than an absent
+     feature, because a board keeps advising "run triage to fill it" and triage is a no-op.
+   - **`agent-filed`** must exist **before** any agent files an issue — absence means *a
+     human filed this*, so a repo lacking it reports every agent-filed issue as
+     human-approved ([§5](#5-claiming-work--how-to-say-im-on-this)).
+
+   This full set is provisioned again on every sync, not only at adoption: a repo that
+   adopted at an older handbook version — before a label entered the set — never
+   back-filled it on its own, so [§8](#8-conformance-and-reconciliation)'s reconciliation
+   creates any convention label the repo is missing, and the audit reports the gap as a
+   finding rather than leaving an empty column to be noticed by eye.
 4. **Add the tier topic** — `gh repo edit <owner>/<repo> --add-topic tier-b` (or
    `tier-c` / `tier-a`)
 5. **Add the handbook pointer to the repo's `CLAUDE.md`** — copy

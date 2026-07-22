@@ -106,15 +106,22 @@ On the path most sessions take, the failure is quiet:
   nothing. That is precisely the collision `CONVENTIONS.md` §5 exists to prevent,
   reached from underneath.
 
-So **pull §9's step 3 forward, ahead of the claim**:
+So **pull §9's step 3 forward, ahead of the claim** — and provision the **whole label
+set** while you are there, not just the claim label:
 
 ```sh
-gh label create in-progress --color FBCA04 \
-  --description "Claimed by an active session" 2>/dev/null || true
+gh label create in-progress  --color FBCA04 --description "Claimed by an active session"  2>/dev/null || true
+gh label create deps-checked --color 0E8A16 --description "Dependencies verified — no open blocker"  2>/dev/null || true
+gh label create agent-filed  --color C5DEF5 --description "Filed by an agent on its own initiative — not human-approved"  2>/dev/null || true
 ```
 
-Then claim, then work §9 from its step 1. The `|| true` keeps it safe on a repo that
-already has the label — which matters, because partial adoption is the normal case.
+Only `in-progress` is ordering-critical (the claim below needs it), but the set is three
+cheap idempotent lines, and creating a subset is the exact bug this leads to: a
+`deps-checked` never created leaves a readiness column that can never fill, and nothing
+downstream can tell *free* from *nobody looked*. Create the set, not the claim label
+alone. Then claim, then work §9 from its step 1. The `|| true` keeps every line safe on a
+repo that already has the label — which matters, because partial adoption is the normal
+case.
 
 **No GitHub remote at all?** There is no label and no claim to be made. Take
 code-start's notes-file path; §9's steps 3 and 4 and the GitHub half of 7 do not
@@ -263,6 +270,20 @@ and the audit is what catches it:
   audit reports a tier mismatch, fixing `project.yml` is part of this work.
 - Toolchain pins must still agree between `project.yml` and the manifest.
 - A workflow may trigger on branches that no longer exist — CI passing on nothing.
+- **A convention label may have been added since this repo adopted.** The label set
+  is part of the model, and a repo that adopted at an older version never back-filled
+  a label introduced later — so the check that label powers silently cannot fire (a
+  readiness column that never leaves "nobody looked", provenance that reads every issue
+  as human-filed). The audit now reports this as `missing convention label(s): …`.
+  Back-fill it here — the same idempotent set adoption creates, safe to re-run:
+  ```sh
+  gh label create in-progress  --color FBCA04 --description "Claimed by an active session"  2>/dev/null || true
+  gh label create deps-checked --color 0E8A16 --description "Dependencies verified — no open blocker"  2>/dev/null || true
+  gh label create agent-filed  --color C5DEF5 --description "Filed by an agent on its own initiative — not human-approved"  2>/dev/null || true
+  ```
+  This is a GitHub-side change, not a committed one, so it needs no entry in §8's
+  commit — but note it in the Issue so the back-fill is recorded. A remote-less repo
+  has no labels to create; say so rather than leave it looking undone.
 
 Fix what is genuinely wrong; **report what you are unsure about** rather than
 guessing. A `project.yml` that contradicts reality is worse than one that admits it.

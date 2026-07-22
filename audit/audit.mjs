@@ -52,6 +52,9 @@ import { createRequire } from "node:module";
 // CommonJS because the CLI is; `createRequire` is how ESM consumes it.
 const require = createRequire(import.meta.url);
 const stamp = require("../tools/lib/stamp.js");
+// The convention-label set is shared with adoption/sync (they provision what this reports),
+// so the three surfaces cannot drift about what the full set is. See tools/lib/labels.js.
+const { missingConventionLabels } = require("../tools/lib/labels.js");
 const {
   handbookInfo, templateNames, templateChangedSince, cmpParts, cmpSemver,
   parseWorkflowStamp, parseClaudeStamp, workflowProvenance, unstampedFinding, looksLikeHandbookClaude,
@@ -463,6 +466,30 @@ function listRemoteBranches(slug) {
   }
 }
 
+// Labels live on GitHub, not in the working tree, so this is the audit's one check that
+// needs the tracker. `null` means "could not determine" — no remote, no auth, gh absent,
+// API error — and the caller stays SILENT on it rather than warning: unlike branches
+// (every git repo has them), labels are a GitHub-only concept and a remote-less or
+// offline audit legitimately cannot see them. A warn per offline repo would be noise,
+// and we cannot assert a label is missing when we could not read the set at all.
+function listRemoteLabels(slug) {
+  try {
+    const out = runGh(["api", `repos/${slug}/labels`, "--paginate", "--jq", ".[].name"]);
+    return out.split("\n").map((s) => s.trim()).filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+// github.com/owner/name, git@github.com:owner/name.git → "owner/name". Non-GitHub or
+// unparseable remotes return null, so a local-only repo (or a self-hosted git remote)
+// contributes no label finding — matching the skill's "no remote" branch.
+function githubSlugFromRemote(url) {
+  if (!url) return null;
+  const m = String(url).trim().match(/github\.com[:/]+([^/]+)\/(.+?)(?:\.git)?\/?$/);
+  return m ? `${m[1]}/${m[2]}` : null;
+}
+
 // A uniform accessor so every check below is written once and works for both a local
 // path and a remote slug.
 function makeSource(target) {
@@ -513,6 +540,19 @@ function makeSource(target) {
           return false;
         }
       },
+      // A local checkout has no labels of its own — they live on its GitHub remote, if it
+      // has one. Resolve the origin slug and read them there; a repo with no GitHub origin
+      // returns null and contributes no label finding.
+      labels: () => {
+        let url;
+        try {
+          url = execFileSync("git", ["-C", root, "remote", "get-url", "origin"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+        } catch {
+          return null;
+        }
+        const slug = githubSlugFromRemote(url);
+        return slug ? listRemoteLabels(slug) : null;
+      },
     };
   }
   return {
@@ -524,6 +564,7 @@ function makeSource(target) {
     branches: () => listRemoteBranches(target.slug),
     currentBranch: () => null,
     isLinkedWorktree: () => false,
+    labels: () => listRemoteLabels(target.slug),
   };
 }
 
@@ -641,6 +682,32 @@ function auditRepo(target, ctx) {
     if (tier === "B" && trunk !== "main") fail(`tier B requires trunk "main", found ${JSON.stringify(trunk)}`);
     // C uses A's two-branch split: main = what is live, dev = where sessions land.
     if (tier === "C" && trunk !== "dev") fail(`tier C requires trunk "dev", found ${JSON.stringify(trunk)} — C uses the same split as A (main = what is live, dev = where sessions land)`);
+  }
+
+  // ---- convention labels present on the tracker ---------------------------
+  // A convention label absent from an adopted repo is a check that can never fire: the
+  // claim (`in-progress`) cannot land, the readiness column (`deps-checked`) can never
+  // leave "nobody looked", provenance (`agent-filed`) reads every filed issue as human-
+  // approved. It happens when a repo adopted at an OLDER handbook version, before a label
+  // entered the set, and nothing back-filled it — so a repo missing the label passes clean
+  // while a downstream board keeps advising "run triage to fill the column", a no-op.
+  //   Gated on `cfg`: an undescribed repo already fails above, and labels are meaningless
+  // without adoption. `labels()` is null for a remote-less or offline audit (see
+  // listRemoteLabels) — we stay silent there, since we cannot assert a label is missing
+  // when we could not read the set. A warn, not a fail: the fix is one `gh label create`,
+  // it breaks no build and it does not make the descriptor lie.
+  if (cfg) {
+    const labels = src.labels();
+    if (labels) {
+      const missing = missingConventionLabels(labels);
+      if (missing.length) {
+        warn(
+          `missing convention label(s): ${missing.join(", ")} — a repo adopted before a ` +
+          `label entered the set never back-filled it, so the check it powers can never ` +
+          `fire. Create each (\`gh label create\`, see CONVENTIONS.md §9) or run handbook-sync`,
+        );
+      }
+    }
   }
 
   // ---- deploy workflow presence -------------------------------------------
