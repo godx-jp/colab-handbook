@@ -3064,16 +3064,14 @@ function cmdShip(argv) {
     payload: { state: 'merged', branch: sess.branch, target, sha, issues: sess.issues },
   });
 
-  // A per-issue merge-completion event is the deliberate not-yet (#46 §2, following #45 §2). The
-  // ship event above is worktree-scoped — for a group it carries every issue in one payload — but
-  // the receiver wants to flip a single issue to done the instant its merge lands, without waiting
-  // for the eventually-consistent read. The proposed shape is one event per entry in sess.issues,
-  // kind `issue.merged`, payload { repo, issue, sha } (the merge commit is the evidence):
-  //   for (const num of sess.issues) pushEvent('issue-merged', { repo: repoAbs, issue: num, payload: { sha } });
-  // It is parked, not forgotten, for one reason: unlike readiness.marked, the receiver's ingest for
-  // this kind is NOT built yet, so it is the "sequenced together" case — the kind + one-per-issue vs.
-  // fan-out shape must be agreed with the receiver, then BOTH sides land in the same change. Adding
-  // it to notify.js's ACTION_KIND before that is the exact drift the closed vocabulary prevents.
+  // Then, PER ISSUE, a merge-completion event (#46 §2, following #45 §2). The ship event above is
+  // worktree-scoped — for a group it carries every issue in one payload — but the receiver flips a
+  // single issue to done the instant its merge lands, without waiting for the eventually-consistent
+  // read. One-per-issue (not a fan-out field) was the agreed shape: kind `issue.merged`, the merge
+  // commit as evidence. repo and issue ride the envelope like every other event; the sha is the only
+  // per-event delta, so it alone is the payload. A dropped one costs the provider's read-after-write
+  // lag, same class as readiness — best-effort, never load-bearing.
+  for (const num of sess.issues) pushEvent('issue-merged', { repo: repoAbs, issue: num, payload: { sha } });
 
   // ---- (f) B3: teardown the worktree (releases claims + ports + ✅ comments) ----
   const worktreeKept = !!(sess.name && opts.keepWorktree);

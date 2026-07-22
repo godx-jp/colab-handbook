@@ -63,6 +63,12 @@ const ACTION_KIND = Object.freeze({
   // this kind and ingests it as an optimistic "ready" hint that bridges that lag (#46); payload is
   // { state: 'checked' | 'unchecked' } — 'unchecked' (--clear) drops the hint, 'checked' applies it.
   'readiness': 'readiness.marked',
+  // issue-merged is the PER-ISSUE companion to ship (#46 §2). `ship` reports one worktree state
+  // change carrying every issue in its payload; this fires once per issue so the receiver can flip a
+  // single issue to done the instant its merge lands, ahead of the eventually-consistent read. The
+  // sha (a payload field) is the evidence; repo and issue ride the envelope. Agreed one-per-issue,
+  // not a fan-out — the shape the receiver ingests.
+  'issue-merged': 'issue.merged',
 });
 
 /** Actions this module knows how to report. Exported so a caller can be checked against it. */
