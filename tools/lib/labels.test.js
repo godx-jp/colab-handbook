@@ -17,7 +17,7 @@ const assert = require('node:assert');
 
 const {
   CONVENTION_LABELS, conventionLabelNames, missingConventionLabels,
-  READINESS_LABEL, readinessLabelArgs,
+  READINESS_LABEL, readinessLabelArgs, readinessMissingLabelHint,
 } = require('./labels.js');
 
 test('the convention set is exactly the three labels §9 provisions, in canonical order', () => {
@@ -71,4 +71,25 @@ test('label OBJECTS count as present, not as always-missing', () => {
   // gh can return {name,...}; the diff must read the name, or it flags labels that exist.
   const present = [{ name: 'in-progress' }, { name: 'deps-checked' }, { name: 'agent-filed' }];
   assert.deepStrictEqual(missingConventionLabels(present), []);
+});
+
+test('readinessMissingLabelHint fires exactly when the repo lacks deps-checked (#49)', () => {
+  // The whole point of #49: a readiness ADD that fails because the label was never back-filled
+  // must be diagnosed, not passed off as gh's raw "not found". So when the label is absent, the
+  // hint names the label and the fix (handbook-sync); when it is present, there is no hint.
+  const hint = readinessMissingLabelHint(['in-progress', 'bug']);
+  assert.match(hint, /deps-checked/);
+  assert.match(hint, /handbook-sync/);
+  assert.equal(readinessMissingLabelHint(['in-progress', 'deps-checked', 'agent-filed']), null);
+  // Objects, not just strings — gh label reads can arrive either shape (mirrors the test above).
+  assert.equal(readinessMissingLabelHint([{ name: 'deps-checked' }]), null);
+});
+
+test('readinessMissingLabelHint returns null when the label set could not be READ', () => {
+  // null present ≠ empty set. A read we did not get (no gh, no remote, network) must fall back to
+  // the generic gh error, NEVER assert "the label is missing" — that would misdiagnose every
+  // offline failure as an adoption gap. Distinct from [] / bare repo, which genuinely lacks it.
+  assert.equal(readinessMissingLabelHint(null), null);
+  assert.equal(readinessMissingLabelHint(undefined), null);
+  assert.match(readinessMissingLabelHint([]), /deps-checked/);
 });
