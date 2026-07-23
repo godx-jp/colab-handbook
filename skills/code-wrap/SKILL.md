@@ -308,6 +308,12 @@ is a human integration event of a promotion's weight.
   said `(#N)` (`CONVENTIONS.md` §4).
 - One `Closes #N` per issue the branch carried — the set you harvested in B1b, not
   just the "main" one.
+- **A long-lived tracking/memory issue is `Refs #N`, not `Closes #N`.** If the branch
+  claimed an issue used as external memory for a whole domain — a checklist of still-open
+  items you touched but did not complete — reference it, don't close it, or you bury its
+  knowledge behind a closed-issue lookup (`CONVENTIONS.md` §5, *Tracking issues*). Through
+  the blessed door this is automatic for an issue carrying the `tracking` label, or opt in
+  per-ship with `colab ship --refs <N>`; the claim is still released either way.
 - *(Machine-specific automation — migrate the trunk DB, restart the trunk dev
   server — hooks in here: `.colab/hooks/`. It is the one moment trunk may go down;
   keep the window short.)*

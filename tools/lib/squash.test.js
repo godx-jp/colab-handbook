@@ -234,3 +234,47 @@ test('spliceCloses skips issues the message already closes, and handles a subjec
   assert.strictEqual(squash.spliceCloses('fix: x', [7, 8]), 'fix: x\n\nCloses #7, Closes #8');
   assert.strictEqual(squash.spliceCloses('fix: x', []), 'fix: x');
 });
+
+// --- issue #48: a claimed tracking/memory issue is Ref'd, not Closed ---------
+//
+// A long-lived memory issue is claimed to signal work in its domain but not completed by the branch.
+// Closing it buries its accumulated knowledge and its still-open checklist. `ship` passes such an
+// issue on the `refs` list; the message must say `Refs #N` (which GitHub does not auto-close) rather
+// than `Closes #N`. Claim release is unconditional in the CLI — only the keyword changes here.
+
+test('a ref issue gets Refs #N, a close issue gets Closes #N, in one paragraph', () => {
+  const msg = composeSquashMessage([c('feat: a domain fix')], [17], [48]);
+  const [subject, blank, refline] = msg.split('\n');
+  assert.strictEqual(subject, 'feat: a domain fix');
+  assert.strictEqual(blank, '');
+  assert.strictEqual(refline, 'Closes #17, Refs #48');
+});
+
+test('a refs-only ship still emits the reference paragraph, and never a Closes for it', () => {
+  const msg = composeSquashMessage([c('chore: hygiene in the area')], [], [48]);
+  assert.match(msg, /\bRefs #48\b/);
+  assert.ok(!/\bCloses #48\b/.test(msg), 'a tracking issue must never be closed');
+});
+
+test('an issue named in BOTH lists is Ref\'d, never Closed — refs wins', () => {
+  const msg = squash.spliceCloses('fix: x', [48], [48]);
+  assert.strictEqual(msg, 'fix: x\n\nRefs #48');
+});
+
+test('spliceCloses does not emit Refs #N when the text already Closes it (pure layer cannot un-close)', () => {
+  // ship warns about this after the push; here we must at least not print both keywords for one issue.
+  const out = squash.spliceCloses('feat: x\n\nCloses #48', [], [48]);
+  assert.strictEqual(out, 'feat: x\n\nCloses #48');
+  assert.ok(!/\bRefs #48\b/.test(out));
+});
+
+test('an existing Refs #N in the carried text is not duplicated', () => {
+  const commits = [c('chore: touch the domain', 'Refs #48')];
+  const msg = composeSquashMessage(commits, [], [48]);
+  assert.strictEqual(msg.match(/Refs #48\b/g).length, 1);
+});
+
+test('refs defaults to empty: the two-arg form is unchanged (backward compatible)', () => {
+  assert.strictEqual(composeSquashMessage([c('feat: a thing')], [17, 21]).split('\n')[2], 'Closes #17, Closes #21');
+  assert.strictEqual(squash.spliceCloses('fix: x', [7, 8]), 'fix: x\n\nCloses #7, Closes #8');
+});

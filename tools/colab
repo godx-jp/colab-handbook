@@ -2690,11 +2690,11 @@ function branchCommits(mainRoot, trunk, branch) {
  * at fault: `Closes #N` per claimed issue, the other subjects as bullets, `chore(sync)` filtered,
  * Co-Authored-By / Claude-Session trailers preserved.
  */
-function buildSquashMessage(mainRoot, trunk, branch, issues) {
-  return squash.composeSquashMessage(branchCommits(mainRoot, trunk, branch), issues);
+function buildSquashMessage(mainRoot, trunk, branch, closes, refs = []) {
+  return squash.composeSquashMessage(branchCommits(mainRoot, trunk, branch), closes, refs);
 }
 
-const HELP_SHIP = `colab ship [--repo <path>] [--worktree <name> | --branch <br>] [--message "<msg>"] [--keep-worktree] [--delete-branch] [--dry]
+const HELP_SHIP = `colab ship [--repo <path>] [--worktree <name> | --branch <br>] [--message "<msg>"] [--refs <N[,M]>] [--keep-worktree] [--delete-branch] [--dry]
 
 The ONE sanctioned door for code-wrap Phase B: squash-merge a session branch into the BASE IT WAS
 CUT FROM — trunk for an ordinary session, or the declared integration line recorded on its worktree
@@ -2715,9 +2715,10 @@ Sequence (each step gated; any failure aborts before the push — the target is 
                         an ungated line is a normal early state; a RED line still blocks)
   c. B0 sync            merge the target INTO the branch; non-generated conflict → abort (human merge);
                         generated-only conflict → repo's .colab/hooks/pre-ship regenerates, else abort
-  d. B1 squash          re-check CI green, then squash-merge branch → target (Closes every claimed issue).
-                        Into trunk that happens in the main checkout; into a line it happens in an
-                        EPHEMERAL worktree, so the main checkout never leaves trunk.
+  d. B1 squash          re-check CI green, then squash-merge branch → target (Closes every claimed issue,
+                        except a REFERENCED one — see --refs / the "tracking" label below — which gets
+                        Refs #N and stays open). Into trunk that happens in the main checkout; into a
+                        line it happens in an EPHEMERAL worktree, so the main checkout never leaves trunk.
   e. B2 push            push the target (COLAB_SHIP=1 in env so a pre-push-guard lets it through)
   f. B3 teardown        colab worktree rm (releases claims + ports + ✅ comments) unless --keep-worktree.
                         The BRANCH IS KEPT — pass --delete-branch to remove it (local + remote).
@@ -2743,7 +2744,12 @@ Options:
   --repo <path>       repo root (default: git root of cwd)
   --worktree <name>   the session worktree to ship (its branch + claims are used)
   --branch <br>       ship by branch name (its worktree, if any, is found in state)
-  --message "<msg>"   subject for the squash commit (Closes trailer is always appended)
+  --message "<msg>"   subject for the squash commit (Closes/Refs trailer is always spliced in)
+  --refs <N[,M]>      reference these claimed issues (Refs #N) instead of closing them — for a
+                      long-lived memory/tracking issue the branch touched but did not complete.
+                      Comma-separated; each must be a claimed issue on the branch. An issue carrying
+                      the "tracking" label is treated this way automatically, no flag needed. The
+                      claim is still released either way — only Closes→Refs changes.
   --keep-worktree     do not remove the worktree after shipping
   --delete-branch     delete the branch (local + remote) after shipping — off by default
   --dry               print the plan + precondition table and change NOTHING
@@ -2828,7 +2834,7 @@ function resolveShipSession(st, repoAbs, opts) {
 
 function cmdShip(argv) {
   const opts = parseArgs(argv, {
-    values: { '--repo': 'repo', '--worktree': 'worktree', '--branch': 'branch', '--message': 'message' },
+    values: { '--repo': 'repo', '--worktree': 'worktree', '--branch': 'branch', '--message': 'message', '--refs': 'refs' },
     flags: { '--keep-worktree': 'keepWorktree', '--delete-branch': 'deleteBranch', '--dry': 'dry', '-h': 'help', '--help': 'help' },
   });
   if (opts.help) return print(HELP_SHIP);
@@ -2874,6 +2880,30 @@ function cmdShip(argv) {
   // ---- (b) PRECONDITIONS (report each ✓/✗) ----
   const gh = isGhUsable(repoAbs);
   const checks = [];
+
+  // Which claimed issues are REFERENCED (Refs #N), not closed (#48). A long-lived memory/tracking
+  // issue is claimed to signal work in its domain but not completed by the branch — closing it would
+  // bury its accumulated knowledge and still-open checklist. Two sources, unioned:
+  //   • --refs N[,M]   explicit, per-ship
+  //   • TRACKING_LABEL on the issue   declarative, durable across every session touching the domain
+  // The claim is still released unconditionally (B3, unchanged) — only Closes→Refs changes (#48).
+  const refsFromFlag = new Set(
+    String(opts.refs || '').split(',').map((s) => s.trim().replace(/^#/, '')).filter(Boolean).map(Number),
+  );
+  for (const n of refsFromFlag) {
+    if (!sess.issues.includes(n)) warn(`--refs #${n} is not a claimed issue on this branch — ignored`);
+  }
+  const refsSet = new Set(sess.issues.filter((n) => refsFromFlag.has(n)));
+  if (gh) {
+    for (const num of sess.issues) {
+      if (refsSet.has(num)) continue;
+      const info = git.ghIssueView(repoAbs, num, ['labels']);
+      const names = info && Array.isArray(info.labels) ? info.labels.map((l) => l.name) : [];
+      if (names.includes(labels.TRACKING_LABEL)) refsSet.add(num);
+    }
+  }
+  const closeIssues = sess.issues.filter((n) => !refsSet.has(n));
+  const refsIssues = sess.issues.filter((n) => refsSet.has(n));
   // CI alive + green on the TARGET.
   //
   // On a declared line with NO runs at all, fall back to trunk's and say so. An ungated line is a
@@ -2914,7 +2944,7 @@ function cmdShip(argv) {
   // ---- report the table ----
   print(`ship ${shortRepo(repoAbs)} · branch ${sess.branch} → ${target}` +
     (target === trunk ? '' : `  [declared line — NOT ${trunk}]`) + (opts.dry ? '  [DRY RUN]' : ''));
-  print(`  issues: ${sess.issues.map((n) => '#' + n).join(' ') || '(none claimed)'}` + (sess.name ? ` · worktree ${sess.name}` : ''));
+  print(`  issues: ${sess.issues.map((n) => '#' + n + (refsSet.has(n) ? ' (ref — kept open)' : '')).join(' ') || '(none claimed)'}` + (sess.name ? ` · worktree ${sess.name}` : ''));
   print('');
   print(table(checks.map((c) => [c[0], c[1], c[2]]), ['', 'PRECONDITION', 'DETAIL']));
   print('');
@@ -2930,7 +2960,8 @@ function cmdShip(argv) {
     // A dry run is the last moment it can be caught, so it must be on screen there.
     print('  Squash subject: ' + (opts.message
       ? `${opts.message} [--message]`
-      : buildSquashMessage(repoAbs, target, sess.branch, sess.issues).split('\n')[0]));
+      : buildSquashMessage(repoAbs, target, sess.branch, closeIssues, refsIssues).split('\n')[0]));
+    if (refsIssues.length) print(`  Refs (kept open, NOT closed): ${refsIssues.map((n) => '#' + n).join(' ')}`);
     return preOk ? 0 : 1;
   }
   if (!preOk) { process.stderr.write('✗ Aborting: one or more preconditions failed (see ✗ above). Nothing was pushed.\n'); return 1; }
@@ -3016,10 +3047,10 @@ function cmdShip(argv) {
     // --message overrides the subject/body, but Closes is spliced in as its own paragraph — never
     // concatenated. Appending it welded ` — Closes #N` onto whatever the message ended with, which
     // for any message carrying a trailer block corrupted the last trailer's value.
-    commitMsg = squash.spliceCloses(opts.message, sess.issues);
+    commitMsg = squash.spliceCloses(opts.message, closeIssues, refsIssues);
   } else {
-    // Preserve the branch's crafted commit (subject + footers); insert Closes above the footers.
-    commitMsg = buildSquashMessage(repoAbs, target, sess.branch, sess.issues);
+    // Preserve the branch's crafted commit (subject + footers); insert Closes/Refs above the footers.
+    commitMsg = buildSquashMessage(repoAbs, target, sess.branch, closeIssues, refsIssues);
   }
 
   print(`B1: squash-merging ${sess.branch} → ${target} …`);
@@ -3071,7 +3102,10 @@ function cmdShip(argv) {
   // commit as evidence. repo and issue ride the envelope like every other event; the sha is the only
   // per-event delta, so it alone is the payload. A dropped one costs the provider's read-after-write
   // lag, same class as readiness — best-effort, never load-bearing.
-  for (const num of sess.issues) pushEvent('issue-merged', { repo: repoAbs, issue: num, payload: { sha } });
+  //
+  // Only for CLOSED issues (#48): `issue.merged` tells the receiver to flip an issue to done, which
+  // is exactly wrong for a tracking issue the branch merely referenced — its work is not complete.
+  for (const num of closeIssues) pushEvent('issue-merged', { repo: repoAbs, issue: num, payload: { sha } });
 
   // ---- (f) B3: teardown the worktree (releases claims + ports + ✅ comments) ----
   const worktreeKept = !!(sess.name && opts.keepWorktree);
@@ -3087,16 +3121,24 @@ function cmdShip(argv) {
   // worktree removal above: git refuses to delete a branch checked out in a worktree.
   handleShippedBranch(repoAbs, target, sess.branch, { deleteBranch: opts.deleteBranch, worktreeKept, integration });
 
-  // ---- (g/h) B4 verify auto-close + post 🚢 summary per issue ----
+  // ---- (g/h) B4 verify + post summary per issue ----
   if (gh) {
     for (const num of sess.issues) {
+      const isRef = refsSet.has(num);
       const info = git.ghIssueView(repoAbs, num, ['state']);
-      if (info && info.state !== 'CLOSED') warn(`#${num} did not auto-close (state=${info.state}) — the Closes trailer needs a push to the DEFAULT branch; close it by hand if ${target} isn't default`);
+      // A closed issue must have auto-closed; a ref'd (tracking) issue must have STAYED open. The
+      // second check catches the one case the pure layer cannot fix: a carried commit body that
+      // literally says `Closes #N` for a ref issue — GitHub honours it and closes the memory issue.
+      if (!isRef && info && info.state !== 'CLOSED') warn(`#${num} did not auto-close (state=${info.state}) — the Closes trailer needs a push to the DEFAULT branch; close it by hand if ${target} isn't default`);
+      if (isRef && info && info.state === 'CLOSED') warn(`#${num} was meant to stay open (Refs, tracking issue) but is CLOSED — a commit body likely carries "Closes #${num}"; reopen it by hand`);
       const shipSess = sessionCommentSuffix(sess.session, sess.sessionName); // markdown link when both present
       // Name the branch it actually landed on. An issue whose code is on a long-lived line is NOT
       // in trunk, and a comment saying otherwise would be read as "this is in the next release".
       const onLine = target === trunk ? '' : ` (a declared integration line — NOT yet in ${trunk})`;
-      const r = git.ghIssueComment(repoAbs, num, `🚢 Shipped to ${target} by colab ship — ${sha}${onLine}${shipSess}`);
+      const body = isRef
+        ? `🔖 Referenced by colab ship (kept open — tracking issue) — ${sha}${onLine}${shipSess}`
+        : `🚢 Shipped to ${target} by colab ship — ${sha}${onLine}${shipSess}`;
+      const r = git.ghIssueComment(repoAbs, num, body);
       if (!r.ok) warn(`could not post ship comment on #${num}`);
     }
   }
@@ -3460,8 +3502,8 @@ Commands:
   worktree rm <name> [--force] [--repo P]
   worktrees [--json]
 
-  ship [--worktree N | --branch B] [--message M] [--keep-worktree] [--dry]   code-wrap Phase B →
-                                        the branch's recorded base (trunk, or a declared line)
+  ship [--worktree N | --branch B] [--message M] [--refs N,M] [--keep-worktree] [--dry]   code-wrap
+                                        Phase B → the branch's recorded base (trunk, or a declared line)
   landed [--worktree N | --branch B | --all] [--base B] [--json]   has this work already landed?
                                         (the shared rule behind code-sweep's buckets — correct
                                         across squash merges, where "commits ahead" is not)

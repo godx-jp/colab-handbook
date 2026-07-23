@@ -610,6 +610,36 @@ judgement, which is not the same thing as the judgement.
   external memory — anyone resuming should get full context from `gh issue view N` without
   re-reading the codebase.
 
+### Tracking issues — claimed but referenced, not closed
+
+Most issues are a unit of work: a branch completes them, and the merge closes them with
+`Closes #N`. But a repo may keep a **long-lived memory / tracking issue** — external memory
+for a whole domain, holding accumulated decisions and gotchas plus a checklist of still-open
+items. A session doing a small hygiene fix in that domain legitimately **claims** the tracking
+issue (to signal work in the area) and **references** it, but does not complete it: its
+checklist still has open items.
+
+Closing such an issue at merge would bury its knowledge and its still-open items behind a
+closed-issue lookup. So a tracking issue is **referenced, not closed** — the merge message says
+`Refs #N` (which GitHub links but does not auto-close) instead of `Closes #N`. Two ways to say
+which issues these are, and they compose:
+
+- **A `tracking` label on the issue** — declarative and durable. Any session that claims a
+  labelled issue references it automatically. This is the robust choice: the property lives on
+  the long-lived issue, so every session touching the domain honours it without having to know.
+- **`colab ship --refs <N[,M]>`** — explicit, per-ship, for an issue not labelled.
+
+**The claim is released unconditionally either way** — exactly as for a closed issue (a stale
+claim blocks others; §5 *Rules*). Only the keyword changes: `Refs` instead of `Closes`. The
+`tracking` label is deliberately **not** in the convention label set (§9): its absence breaks no
+check — every issue simply closes as before — so adoption does not provision it and the audit
+does not report it missing. A repo that wants the behaviour creates the label and applies it.
+
+One edge the tool cannot fix by itself: if a commit *body* on the branch literally writes
+`Closes #N` for a tracking issue, GitHub closes it on merge regardless — a message keyword
+cannot un-close it. `colab ship` detects this after the push (the referenced issue reads
+`CLOSED`) and warns you to reopen it by hand. Do not write `Closes #<tracking>` in a commit body.
+
 ---
 
 ## 6. Releases
