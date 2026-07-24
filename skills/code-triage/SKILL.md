@@ -91,6 +91,12 @@ cost on a run that *does* proceed — §1 needs that list anyway.
   *per issue*; input 3 is the entire graph in one query. Drop it and the fingerprint goes
   blind to precisely the data the §5 readiness gate turns on — a new blocker would be
   reported as `free (checked)` forever.
+- **Pass owner/name to `gh api graphql` as variables, never inline.** Input 3 uses
+  `-F owner="${NWO%%/*}" -F name="${NWO##*/}"` with a parameterised `query($owner,$name)`
+  for a reason past style: a query with the repo spelled into the text
+  (`repository(owner:"…",name:"…")`) puts the repo name in the command itself and trips the
+  privacy backstop. The variable form keeps the name out of the argv — copy it in every
+  `gh api graphql` call this skill has or gains.
 - **Input 5 exists because §5.1 turned a branch push into a readiness signal.** A blocker
   whose code gets pushed moves a dependent from `blocked` to soft-ready — and moves none of
   inputs 1-4: trunk is untouched, the issues are untouched, the edge is untouched, and the
@@ -506,6 +512,36 @@ bucket — ready, blocked, taken, or close-it. A number that quietly falls off t
 list gets re-triaged from scratch next time, which is how the same work gets
 discovered three times.
 
+### Then persist each verdict — the report is not the only consumer
+
+A ranked report is what a *human* reads. The other consumer is event-driven
+(§0): its status column moves only on a write this skill journals, and §4's
+marker write is the one this whole-repo path forgot — so a flawless pass can
+leave every verdict printed and none of it persisted, and the consumer stays
+blind despite a fully-correct run. Do the §4 write here too, once per group,
+keyed to which verdict §5.1 returned — this is the §4 rule lifted into the
+whole-repo path, not a new one:
+
+- **free (checked)** — no open blocker at all → write the marker for every
+  member, exactly as single-issue mode does (§4):
+  ```sh
+  for N in 115 114 113; do colab readiness "$N"; done   # deps-checked + readiness.marked event
+  ```
+- **soft-ready** — startable, but its blocker is still open (code pushed,
+  unmerged; §5.1) → **do not** write the marker. `deps-checked` means *no open
+  blocker*, which is false here, and §5 rejected a second label for the soft
+  case for exactly this reason: it is a read-time judgement, recomputed each run
+  from the edge plus the blocker's state, never persisted. The report line
+  carries the soft verdict; the graph does not.
+- **blocked** — leave the marker unset, and clear a stale one
+  (`colab readiness <N> --clear`) if a blocker opened since it was last set
+  (§0.2 computes that staleness). Empty is the right machine state for "not
+  free"; a `deps-checked` sitting on a now-blocked issue is the lie §5 warns of.
+
+Prefer `colab readiness` over a raw `gh` edit for the reason §4 gives: colab
+owns the write, so it is journaled and the `readiness.marked` event fires from
+the same site — the single signal the event-driven consumer actually receives.
+
 Hand the top group to **code-start**, which will re-verify the claim before taking it.
 
 ## Verify complete
@@ -520,6 +556,12 @@ Hand the top group to **code-start**, which will re-verify the claim before taki
   evidence comment naming the collision, and the label removed anywhere it stopped being
   true. A group that exists only in this report is the failure §3 describes.
 - Every open Issue is accounted for in exactly one bucket.
+- The verdicts were **persisted, not only printed**: every free group got its
+  `colab readiness` marker, every blocked group was left unset (or cleared if
+  stale), soft-ready was left unmarked — and, where an event sink is configured,
+  the `readiness.marked` events are present in the feed, not merely the
+  `deps-checked` labels on GitHub. A pass that feeds an event-driven consumer
+  verifies its sink, not only its GitHub writes.
 - Every "ready" group passed all six gates, not just "nobody is assigned".
 - Every open blocker was judged on its **state** (§5.1), not on being open — and every
   soft-ready group says what it waits on and names the branch the code is already on.
