@@ -577,7 +577,9 @@ pushEvent() path the other state changes use (kind readiness.marked, agreed with
 Runs the label edit for you:  gh issue edit N --add-label deps-checked  (or --remove-label).
 The marker lives on GitHub, visible from any machine to the readiness gate that reads it, so
 without a usable gh + remote this command REFUSES (exit 1) rather than report a success that
-wrote nothing anyone can see — there is deliberately no local-only fallback.
+wrote nothing anyone can see — there is deliberately no local-only fallback. Likewise, if the
+repo never got the deps-checked label (adopted before it entered the set), the add REFUSES with
+an actionable message pointing at handbook-sync — never a success on a write that did not land.
 
 The label is DERIVED state, only ever as fresh as this last check: whoever adds a blocker
 clears it. Prefer leaving it off to leaving it wrong (CONVENTIONS.md §5).
@@ -602,7 +604,15 @@ function cmdReadiness(argv) {
   }
 
   const r = git.ghIssueEdit(repoAbs, num, labels.readinessLabelArgs({ clear: opts.clear }));
-  if (!r.ok) throw new UserError(`gh edit #${num} failed (${r.stderr.split('\n')[0] || r.code})`);
+  if (!r.ok) {
+    // The doubly-silent failure of #49: a repo that adopted the conventions before `deps-checked`
+    // entered the set never back-filled it, so the ADD hits a label that does not exist. gh's raw
+    // error ("'deps-checked' not found") sends an operator re-running triage, which re-prints its
+    // cached verdict WITHOUT retrying — nothing ever moves. Name the cause and its fix instead.
+    // Only on ADD: clearing a label the repo lacks already leaves readiness UNCHECKED, the goal.
+    const hint = opts.clear ? null : labels.readinessMissingLabelHint(git.ghListLabels(repoAbs));
+    throw new UserError(hint || `gh edit #${num} failed (${r.stderr.split('\n')[0] || r.code})`);
+  }
   print(opts.clear
     ? `Cleared ${labels.READINESS_LABEL} on #${num} in ${shortRepo(repoAbs)} — readiness is now UNCHECKED`
     : `Marked #${num} in ${shortRepo(repoAbs)} ${labels.READINESS_LABEL} — verified: no open blocker`);

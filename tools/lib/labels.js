@@ -68,7 +68,26 @@ function missingConventionLabels(present) {
   return conventionLabelNames().filter((n) => !have.has(n));
 }
 
+// A readiness ADD (`gh issue edit --add-label deps-checked`) fails for one recurring, diagnosable
+// reason: the repo adopted the conventions before `deps-checked` entered the set and never
+// back-filled it, so the label the write targets does not exist. Given the labels the repo
+// actually has, return an actionable message naming that cause and its fix — or null, meaning
+// "not this cause, use the generic error". Two nulls, deliberately different:
+//   - `present` is null → the label set could not be READ (no gh, no remote, network). We must
+//     not guess the cause from a read we did not get; fall back to the raw gh error.
+//   - the readiness label IS present → the ADD failed for some other reason; not ours to explain.
+// This is where the doubly-silent failure of #49 is made loud: never report success on a write
+// that did not land, and when it did not land for this reason, say precisely why and what fixes it.
+function readinessMissingLabelHint(present) {
+  if (!present) return null;
+  if (!missingConventionLabels(present).includes(READINESS_LABEL)) return null;
+  return `this repo has no \`${READINESS_LABEL}\` label, so readiness cannot be marked — it adopted `
+    + `the conventions before that label entered the set and never back-filled it. Run handbook-sync `
+    + `(§7) to create the convention label set, then re-run the command.`;
+}
+
 module.exports = {
   CONVENTION_LABELS, conventionLabelNames, missingConventionLabels,
-  READINESS_LABEL, readinessLabelArgs, TRACKING_LABEL,
+  READINESS_LABEL, readinessLabelArgs, readinessMissingLabelHint,
+  TRACKING_LABEL,
 };

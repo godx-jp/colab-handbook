@@ -40,8 +40,9 @@ job, and the two must agree.
 
 ### `trunk` — required
 
-The branch sessions merge into. Must be `dev` when `tier: A` **or** `tier: C`,
-`main` when `tier: B`. Any other value is a finding.
+The branch sessions merge into. Must be `dev` when `tier: C`; `main` when
+`tier: B`. On `tier: A` it is `dev` **or**, when `deploy: tag`, `main` (see the
+exception below). Any other value is a finding.
 
 This holds for hand-deployed Tier A repos too (`deploy: manual`), and the shape
 earns its keep there rather than being ceremony: `main` is **what is currently
@@ -54,6 +55,18 @@ Tier C keeps the identical split for the identical reason. There `main` is
 literally what is live — the promotion deploys it — so collapsing the branches
 would remove the only moment at which anyone decides to ship.
 
+**The exception: a tag-gated Tier A may run a single trunk `main`.** When
+`deploy: tag`, the **tag** is the deliberate release artifact, so the tag itself
+marks the release boundary — the last `v*.*.*` is "what shipped and when", the
+job the `dev` → `main` split does on a hand-deployed repo. A second branch
+marking the same boundary is then redundant, so such a repo may land day-to-day
+work on `main` and cut releases by tag (a release script fast-forwards a
+long-lived release branch an external poller redeploys, or a workflow ships on
+the tag). The tier is defined by the promotion **gate** — a version tag — not by
+the trunk **name**. This applies **only** to `deploy: tag`: `manual` and
+`push-main` have no tag to mark the boundary, so they keep the `dev`/`main`
+split, and `main` on either of those is still a finding.
+
 ### `production` — required
 
 The production URL as a string, or `null`. Must be non-null when `tier: A` or
@@ -65,10 +78,15 @@ The production URL as a string, or `null`. Must be non-null when `tier: A` or
 test is "does a deploy target exist today?" ([CONVENTIONS.md §9](CONVENTIONS.md#9-adopting-this));
 `deploy` only describes the mechanism a Tier A repo uses.
 
-- `tag` — pushing a `v*.*.*` tag deploys. A deploy workflow must exist.
+- `tag` — pushing a `v*.*.*` tag deploys. The tag's path to production must be
+  committed: either an **in-repo deploy workflow** (`.github/workflows/deploy-*.yml`
+  firing on the tag), **or**, when an **external** deployer ships it — a GitOps
+  poller that fast-forwards a release branch on the tag, with no in-repo workflow
+  by design — a [`runbook:`](#runbook--required-when-an-out-of-ci-deploy-has-no-workflow)
+  documenting that path.
 - `manual` — production exists, but shipping is a **human running a documented
   procedure** (rsync + `docker compose up -d --build`, an upload, a console
-  action) with no workflow and no tag trigger. Requires [`runbook:`](#runbook--required-when-deploy-manual).
+  action) with no workflow and no tag trigger. Requires [`runbook:`](#runbook--required-when-an-out-of-ci-deploy-has-no-workflow).
 - `none` — nothing deploys. Required value for `tier: B`.
 - `push-main` — a push to `main` **is** the deploy. The required value for
   [`tier: C`](#tier--required), and a finding on `tier: A` — see below.
@@ -94,7 +112,7 @@ provide. Options:
    Choose this when the site has earned a release ritual someone will actually
    honour.
 3. **If shipping really is run by hand**, say so → `deploy: manual` plus
-   [`runbook:`](#runbook--required-when-deploy-manual). Not a downgrade — an
+   [`runbook:`](#runbook--required-when-an-out-of-ci-deploy-has-no-workflow). Not a downgrade — an
    accurate description, which is always worth more than a flattering one.
 
 A tag ritual nobody honours is worse than no tag ritual: it puts a gate in the
@@ -114,20 +132,31 @@ verification-only. On a `manual` repo, promotion is the deliberate "I am about
 to deploy" act, so it needs `COLAB_HUMAN=1` — exactly like `push-main`, and
 `promotion: main-loop` cannot lower it. See [`promotion`](#promotion--optional).
 
-### `runbook` — required when `deploy: manual`
+### `runbook` — required when an out-of-CI deploy has no workflow
 
 ```yaml
 runbook: docs/deploy.md
 ```
 
-Repo-relative path to the committed document describing the hand-deploy: the
-hosts, the commands, the order, and how to verify it worked. The audit checks
-that the path actually exists.
+Repo-relative path to the committed document describing how production is
+reached: the hosts, the commands or the external system, the order, and how to
+verify it worked. The audit checks that the path actually exists.
 
-It is required because an unwritten hand-deploy is how a repo ends up with
-exactly one person who can ship it. Automated deploys document themselves in
-the workflow file; a manual one has to be written down or it is not knowledge,
-it is folklore. Omit the key on any other `deploy` value.
+Required in the two cases where the deploy runs **outside** CI, so no workflow
+file documents it:
+
+- `deploy: manual` — a **human** runs the procedure. Always required.
+- `deploy: tag` **with no in-repo deploy workflow** — an **external** deployer
+  runs it (a GitOps poller fast-forwards a release branch on the tag). Required
+  there because the tag's path to production is otherwise written down nowhere. A
+  `deploy: tag` repo whose own CI holds the deploy job documents itself in that
+  workflow and needs no runbook.
+
+It is required because an out-of-CI deploy nobody wrote down is how a repo ends
+up with exactly one person — or one poller nobody can find — able to ship it.
+Automated in-repo deploys document themselves in the workflow file; anything else
+has to be written down or it is not knowledge, it is folklore. Omit the key when
+an in-repo deploy workflow already answers "how does this reach production?".
 
 ### `stack` — required
 

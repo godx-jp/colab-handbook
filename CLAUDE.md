@@ -23,7 +23,9 @@ that one ever disagree, `CONVENTIONS.md` wins — and report the discrepancy.
   - **B** — no production. 0 gates. Trunk `main`.
   - **C** — live; the `dev` → `main` promotion **is** the deploy. 1 gate.
     Trunk `dev`, `deploy: push-main`.
-  - **A** — live; promotion verifies and a **tag** deploys. 2 gates. Trunk `dev`.
+  - **A** — live; promotion verifies and a **tag** deploys. 2 gates. Trunk `dev`
+    — **or `main`** when `deploy: tag`: the tag marks the release boundary, so a
+    single-trunk `main` (no `dev`) is allowed for tag-gated A, and only for it.
 
   C is A minus the tag. It is *not* "worse than B" — B has no production at all.
   Never treat a tier as a quality score, and never "upgrade" a repo's tier to be

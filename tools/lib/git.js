@@ -135,6 +135,17 @@ function ghIssueComment(repo, issueNum, body) {
 }
 
 /**
+ * The label names defined on a repo's tracker (`gh label list`), or null on any failure (gh
+ * missing, no remote, network). Null means "could not read" — never "empty set", the same
+ * contract as ghIssueView: a caller must not read absence as proof a label is missing.
+ */
+function ghListLabels(repo) {
+  const r = run('gh', ['label', 'list', '--limit', '500', '--json', 'name', '-q', '.[].name'], { cwd: repo });
+  if (!r.ok) return null;
+  return r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+}
+
+/**
  * Latest CI run for a branch: { status, conclusion } (e.g. {status:'completed', conclusion:'success'}),
  * or null if gh fails. An empty history returns {status:'none', conclusion:null} — treated as NOT green
  * by the caller, which is also how a billing-style fail-to-start (no run created) reads.
@@ -162,6 +173,6 @@ function ghAssignedIssues(repo) {
 
 module.exports = {
   run, git, repoRoot, mainRepoRoot, originUrl, detectTrunk, worktreeList, dirtyTracked,
-  ghAvailable, ghIssueEdit, ghAssignedIssues,
+  ghAvailable, ghIssueEdit, ghListLabels, ghAssignedIssues,
   ghCurrentLogin, ghIssueView, ghIssueComment, ghRunLatest,
 };
