@@ -376,6 +376,23 @@ the gate, which is the whole reason this convention exists.
 **Set it only after looking, and check it has not gone stale before trusting it** — the
 label carries no expiry of its own, so §0.2 derives one from the timeline.
 
+**Confirm the label actually landed — an exit code is not evidence it did.** A repo that
+adopted the conventions before `deps-checked` entered the set never back-filled it, so the
+marking write targets a label that does not exist. `colab readiness` now diagnoses that
+case loudly (it names the missing label and tells you to run handbook-sync) rather than
+reporting a success that wrote nothing — but the raw `gh` fallback does not, and no command
+can prove the *write* took from its own exit status alone. So after marking, read the label
+back and treat empty as un-marked, not as done:
+
+```sh
+gh issue view <N> --json labels -q '.labels[].name' | grep -qx deps-checked \
+  || echo "readiness did NOT land on #<N> — the label set is likely un-adopted; run handbook-sync (§7)"
+```
+
+An issue whose readiness "succeeded" but shows no `deps-checked` is the doubly-silent
+failure this guards: the card never promotes and the next triage re-prints its cached
+verdict without retrying. Surface it — do not trust the command's exit code over the tracker.
+
 Single-issue mode is also a **scope**, and §0.1's coverage rule applies to it: a conclusion
 reached about one issue answers for that issue and no other, no matter how still the repo
 has been since.
