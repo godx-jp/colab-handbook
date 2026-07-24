@@ -103,6 +103,22 @@ there. So the counter-pressure has to be here:
 - **This is not licence to distill less.** The content is worth keeping — location
   and unboundedness are what's wrong. Move it; never drop it.
 
+#### A *new rule* is a follow-up unit, not a line in this session's diff
+
+A2 covers docs your work made **wrong** — the domain moved, the deploy changed, a
+gotcha surfaced. It does not cover a session that *concluded something new*: a rule
+about how people work, a decision with alternatives that were weighed. Those go on an
+Issue now and get written by a claimed unit of their own (`CONVENTIONS.md` §5,
+*Writing a conclusion down*). Two reasons, and the second is the one agents miss:
+
+- The reasoning needs a home a reader can find, and a squash commit body is not one.
+- Normative prose is the most-contended file in a repo. Slipping an unclaimed rewrite
+  of it into an unrelated feature's diff is exactly the parallel-branch collision the
+  claim model exists to prevent — with nothing claimed, so nothing can warn anyone.
+
+Do not use this to postpone A2's actual job. "This doc is now wrong" is this session;
+"here is something new we decided" is the next one.
+
 **Touched `CLAUDE.md`? Re-check its pointer section against `ls docs/`.** An index
 that omits half the docs is worse than no index, because a reader trusts it and
 stops looking. Measured: one repo's pointer section lists a session-notes file and

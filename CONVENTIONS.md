@@ -227,6 +227,16 @@ Base and merge target are **one decision, not two.** A branch cut from a line an
 trunk carries the entire line in with it, inside a single squash commit that reads like a small
 change. Say which branch you merged into whenever you report a session as done.
 
+**The main checkout stays on trunk at rest — so a worktree is the default, not a preference.**
+Things outside your session read that working tree: a dev server, a symlink, a scheduled job.
+None of them learn that you branched it. A session branched a repo's main checkout to do a
+chore; that repo ran always-on from the tree, so the live app served unmerged feature-branch
+code until a human noticed by eye. Leaving the tree merely *dirty* is the same fault with a
+wider blast radius — an uncommitted file there blocks every other session's trunk merge in
+that repo, including sessions touching files you never opened. A plain branch is still allowed
+on a repo nothing reads from; taking it means **you** own returning the checkout to trunk
+before you wrap.
+
 **Commits** — Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `test:`,
 `perf:`). This is not decoration: [§6](#6-releases) builds the release summary by grouping on
 these prefixes. A commit with no prefix is invisible in release notes.
@@ -579,6 +589,64 @@ vocabulary and is true by construction, and it still does not close the hole: th
 exists only *after* someone has claimed, so it cannot inform the decision to claim — the
 one moment the group must be readable. It records a human having acted on triage's
 judgement, which is not the same thing as the judgement.
+
+### Writing a conclusion down — the decision and the document are two units
+
+A session can produce nothing but a conclusion. A discussion that settles a rule, a review
+that finds a gotcha, a wrap that learns something outliving its feature — the output is
+prose, and the natural next move is to write it into the docs tree. That tree is also where
+other sessions are merging, and nothing above says how the write reaches trunk without
+colliding. **It reaches it as two units, in this order: the decision lands on an Issue now;
+the document is a separate claimed unit after.**
+
+**Step 1 — the conclusion goes on an Issue immediately, before any file is touched.** A
+comment needs no branch, no worktree and no clean tree; it collides with nobody and is
+readable the second it is posted. It is also the part that must survive — the document is
+the durable *form* of the decision, not the decision.
+[Provenance](#provenance--who-decided-the-work-should-exist) already assumes this shape:
+`Filed-by: boss (via discussion session <name>)` describes a decision captured by a session
+that wrote no code.
+
+**Step 2 — the write is its own coding unit**: own Issue, claim, branch off trunk in a
+worktree, wrapped normally. A conclusion worth documenting changes how people work, which
+makes it the *most* consequential kind of doc change, not a typo exempt from ceremony. Being
+a unit is what gives it a claim, and the claim is what makes it visible to everyone else.
+
+Decoupling removes the collision rather than scheduling around it: while the discussion runs
+there is nothing on disk to conflict with, and by the time anything is written the work is
+claimed and can be ordered against whoever else holds the file.
+
+**The collision unit is the file — the hunk, really — and never the folder.** This is worth
+stating because "the docs tree is being merged right now" is alarming and wrong: two sessions
+each *adding* a new file under one tree cannot conflict, and treating the folder as the unit
+either serialises work that never needed it or gets dismissed wholesale. Ask the tree who
+holds the file instead:
+
+```sh
+git fetch --prune origin
+git log --all --not origin/<trunk> --source --format='%S' -- <path> | sort -u
+```
+
+Every ref printed is editing that file and has not landed. Empty output — or a path that does
+not exist yet — is clean ground, and the write can go on its own branch immediately. Non-empty
+output is a [group](#grouping--issues-that-must-share-one-branch) arriving by file rather than
+by issue: same file, so same branch, or sequence after theirs lands. The two checks are not
+interchangeable, which is why this one is written down — the `group:` label and the
+`in-progress` label are both keyed to *issues*, so neither can see a live branch editing your
+file under an issue number unrelated to yours. For shared prose that is the ordinary case.
+
+Two rules already stated apply here with unusual force, because prose hides their failure:
+
+- **Never write the final artifact in the main checkout** ([§4](#4-branches-and-commits)). A
+  throwaway draft in a git-ignored scratch directory is fine — it is invisible to git. The
+  committed version belongs on a branch, in a worktree.
+- **Sequence; never batch** ([Has it landed?](#has-it-landed--the-one-rule-because-the-obvious-one-is-wrong)).
+  Two doc branches landing in the same window get wrapped one at a time, each re-checked
+  against the trunk the other just moved. Then read the region before resolving any prose
+  conflict: **a branch that never touched a line still carries the old line as diff context**,
+  so taking its side wholesale silently reverts the other session's edit while looking like a
+  clean resolution. Measured, on two adjacent edits to one paragraph — the correct resolution
+  was their union, not either side.
 
 ### Rules
 
@@ -951,6 +1019,15 @@ true; when reality changes, change this file in the same PR.
 none of which exist. *Config drifts silently when it is copied rather than referenced.* The
 audit tool exists to catch exactly this.
 
+**A conclusion that only ever existed in chat.** A session settled a batch of rules and went
+straight to implementing them. Three branches, zero Issues — so nothing was claimed and no
+parallel session could see the work was taken; the branch names carried no issue numbers; the
+merge messages could not say `Closes #N` because there was nothing to close. The code landed
+fine. What was lost was the argument behind it: which options were rejected, and why each rule
+came out the way it did. *Work that was only agreed to in a room is undocumented the moment
+the room closes.* This is why the decision goes on an Issue before any file is touched
+([§5](#5-claiming-work--how-to-say-im-on-this)).
+
 **A silent version default.** Covered in [§7](#7-ci-and-toolchain). Worth repeating: the bug
 was invisible because nothing looked wrong — CI was green the whole time.
 
@@ -965,6 +1042,9 @@ gh issue list --label agent-filed                 # filed by an agent — no hum
 gh issue list --label group:<key>                 # must share one branch — start them together
 gh issue edit N --add-assignee @me --add-label in-progress
 git checkout -b feat/<slug>-N origin/<trunk>      # trunk = main (B) or dev (A)
+
+# editing a file that already exists — who else is holding it, by file not by issue
+git log --all --not origin/<trunk> --source --format='%S' -- <path> | sort -u
 
 # finishing work
 colab landed --worktree <name>                    # landed → teardown, cargo → merge
