@@ -126,16 +126,20 @@ function harvestTrailers(commits) {
  * Compose the full squash message.
  *
  * @param {Array<{subject:string, body?:string}>} commits  NEWEST-FIRST, merge commits already excluded
- * @param {Array<number|string>} issues                    claimed issue numbers to close
+ * @param {Array<number|string>} closes                    claimed issue numbers to CLOSE (`Closes #N`)
+ * @param {Array<number|string>} refs                       claimed issue numbers to REFERENCE but keep
+ *                                                          open (`Refs #N`) — long-lived memory/tracking
+ *                                                          issues the branch touched but did not complete
  * @returns {string} the commit message
  *
  * Layout — subject, then body blocks in this order:
- *   Closes #N, Closes #M     only for issues not already referenced in the assembled text
+ *   Closes #N, Refs #M       one paragraph: Closes for completed issues, Refs for tracking ones,
+ *                            each skipped if the assembled text already references it that way
  *   - other subjects         every commit except the chosen one, newest-first, sync-noise dropped
  *   <chosen commit's body>   verbatim
  *   <harvested trailers>     only those not already present above
  */
-function composeSquashMessage(commits, issues = []) {
+function composeSquashMessage(commits, closes = [], refs = []) {
   const list = Array.isArray(commits) ? commits.filter(Boolean) : [];
   if (list.length === 0) return '';
 
@@ -170,32 +174,54 @@ function composeSquashMessage(commits, issues = []) {
     assembled += (TRAILER_RE.test(lastLine) ? '\n' : '\n\n') + extraTrailers.join('\n');
   }
 
-  return spliceCloses(assembled, issues);
+  return spliceCloses(assembled, closes, refs);
 }
 
 /**
- * Insert `Closes #N` as its own paragraph directly under the subject, skipping any number the
- * message already closes.
+ * Insert an issue-reference paragraph directly under the subject: `Closes #N` for issues the branch
+ * completes, `Refs #N` for long-lived memory/tracking issues it touched but must NOT close (#48).
+ * Each number is skipped if the message already references it that way.
  *
  * Never append: a message whose last paragraph is a trailer block (`Co-Authored-By:`,
  * `Claude-Session:`) is the normal case, and gluing ` — Closes #N` onto the end corrupts the final
  * trailer's VALUE. GitHub still auto-closes, so nothing fails loudly — but a `Claude-Session:` URL
  * with text welded to it no longer resolves, and the commit is immutable once pushed.
  *
+ * `refs` wins over `closes` for a number named in both — a tracking issue must never be closed,
+ * even if it was also passed on the close path. The two lists therefore ship disjoint.
+ *
+ * One thing this pure layer CANNOT do: if a carried commit body literally says `Closes #N` for a
+ * number in `refs`, GitHub will still close it on merge — adding `Refs #N` does not un-close it.
+ * `colab ship` detects that after the push (the ref issue reads CLOSED) and warns; here we simply
+ * do not emit a redundant `Refs #N` when a `Closes #N` for it already sits in the text.
+ *
  * Exported so every caller composes the same way. The composed path always did this correctly; the
  * `--message` override concatenated instead, which is exactly the drift a shared helper prevents.
  */
-function spliceCloses(message, issues = []) {
-  const missing = (issues || [])
-    .map((n) => String(n).replace(/^#/, ''))
-    .filter((n) => n && !new RegExp(`[Cc]loses #${n}\\b`).test(message));
-  if (!missing.length) return message;
+function spliceCloses(message, closes = [], refs = []) {
+  const norm = (arr) => (arr || []).map((n) => String(n).replace(/^#/, '')).filter(Boolean);
+  const refNums = norm(refs);
+  const refSet = new Set(refNums);
 
-  const closesLine = missing.map((n) => `Closes #${n}`).join(', ');
+  const missingCloses = norm(closes)
+    .filter((n) => !refSet.has(n)) // refs wins — a tracking issue is never closed
+    .filter((n) => !new RegExp(`[Cc]loses #${n}\\b`).test(message));
+  const missingRefs = refNums
+    // Skip a ref already referenced. Also skip one the message already CLOSES: this layer only adds
+    // text, so it cannot un-close it — ship warns after the push instead of us emitting both keywords.
+    .filter((n) => !new RegExp(`[Rr]efs #${n}\\b`).test(message) && !new RegExp(`[Cc]loses #${n}\\b`).test(message));
+
+  const parts = [
+    ...missingCloses.map((n) => `Closes #${n}`),
+    ...missingRefs.map((n) => `Refs #${n}`),
+  ];
+  if (!parts.length) return message;
+
+  const refLine = parts.join(', ');
   const nl = message.indexOf('\n');
   const head = nl === -1 ? message : message.slice(0, nl);
   const rest = nl === -1 ? '' : message.slice(nl + 1).replace(/^\n+/, '');
-  return rest ? `${head}\n\n${closesLine}\n\n${rest}` : `${head}\n\n${closesLine}`;
+  return rest ? `${head}\n\n${refLine}\n\n${rest}` : `${head}\n\n${refLine}`;
 }
 
 module.exports = {

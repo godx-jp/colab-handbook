@@ -34,6 +34,20 @@ function conventionLabelNames() {
 // is the whole class of bug this single list exists to make impossible.
 const READINESS_LABEL = 'deps-checked';
 
+// The marker for a long-lived MEMORY / TRACKING issue (CONVENTIONS.md §5, Tracking issues).
+// A tracking issue is external memory for a whole domain — accumulated decisions and gotchas plus
+// a checklist of still-open items — that a hygiene session legitimately CLAIMS (to signal work in
+// the area) and REFERENCES, but does not complete. `colab ship` reads this name and emits `Refs #N`
+// instead of `Closes #N` for any claimed issue that carries it, so shipping a small fix in the
+// domain does not bury the memory behind a closed-issue lookup.
+//
+// Deliberately NOT in CONVENTION_LABELS: those are the labels whose absence makes a check silently
+// impossible (a claim that cannot land, a readiness column that can never fill). This one is opt-in
+// per repo and per issue — its absence just means every issue closes as before, which is the
+// correct default. So adoption/sync do not force-provision it and the audit does not report its
+// absence. A repo that wants the behaviour creates the label and applies it to its tracking issues.
+const TRACKING_LABEL = 'tracking';
+
 // The `gh issue edit` label arguments for owning the readiness marker. Pure, so the mapping
 // "set ⇒ add, clear ⇒ remove" is pinned by a test without a network call: the command is a thin
 // shell around ghIssueEdit(repo, num, readinessLabelArgs(...)), and the part worth getting right
@@ -75,4 +89,5 @@ function readinessMissingLabelHint(present) {
 module.exports = {
   CONVENTION_LABELS, conventionLabelNames, missingConventionLabels,
   READINESS_LABEL, readinessLabelArgs, readinessMissingLabelHint,
+  TRACKING_LABEL,
 };
