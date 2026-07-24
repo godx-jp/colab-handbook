@@ -273,6 +273,19 @@ gh issue view $N --json labels -q '.labels[].name|select(startswith("group:"))'
   do not read absence as clearance.
 - **Found one → continue it, or ask.** Do not open a second branch on an issue
   that already has one; you will each merge over the other's work.
+- **Editing files that already exist? Ask who holds them — by file, not by issue.**
+  Every check above is keyed to *your issue number* or to a `group:` label, and both
+  are blind to a live branch editing your file under an unrelated issue. For shared
+  prose (`CONVENTIONS.md`, a skill, a README) that is the ordinary case, not the
+  exotic one:
+  ```sh
+  git log --all --not origin/<trunk> --source --format='%S' -- <path> | sort -u
+  ```
+  Every ref printed is editing that file and has not landed. Empty output — or a path
+  that does not exist yet — is clean ground. Non-empty means group onto their branch,
+  or sequence after it lands; never a parallel branch on a file someone else is
+  holding (`CONVENTIONS.md` §5, *Writing a conclusion down*). Needs the `git fetch`
+  above to be meaningful.
 
 This check is the deliberate price of unconditional release, not an oversight in it.
 
