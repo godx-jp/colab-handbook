@@ -678,7 +678,18 @@ function auditRepo(target, ctx) {
     if ("stack" in cfg && (cfg.stack === null || cfg.stack === "")) warn("stack is empty — set a free-form string describing the stack");
 
     // ---- tier <-> trunk coherence ------------------------------------------
-    if (tier === "A" && trunk !== "dev") fail(`tier A requires trunk "dev", found ${JSON.stringify(trunk)}`);
+    // The canonical Tier A shape is the dev/main split — sessions land on dev, main is the release
+    // branch — which buys a place for the expensive suite to run at promotion time. But a TAG-GATED
+    // A may run a SINGLE trunk `main`: when a version tag gates production, the tag itself marks the
+    // release boundary, so a second branch marking the same boundary (dev vs main) is redundant. The
+    // tier is defined by the promotion GATE (a deliberate release artifact — the tag), not the trunk
+    // NAME, so `main` is coherent here — and ONLY here. `deploy: manual`/`push-main` have no tag to
+    // mark the boundary, so they keep the dev split and its promotion as the ship-ward act.
+    if (tier === "A" && trunk !== "dev" && !(deploy === "tag" && trunk === "main")) {
+      fail(deploy === "tag"
+        ? `tier A with deploy: tag requires trunk "dev" or "main", found ${JSON.stringify(trunk)}`
+        : `tier A requires trunk "dev", found ${JSON.stringify(trunk)} — only a tag-gated A (deploy: tag) may run a single trunk "main"`);
+    }
     if (tier === "B" && trunk !== "main") fail(`tier B requires trunk "main", found ${JSON.stringify(trunk)}`);
     // C uses A's two-branch split: main = what is live, dev = where sessions land.
     if (tier === "C" && trunk !== "dev") fail(`tier C requires trunk "dev", found ${JSON.stringify(trunk)} — C uses the same split as A (main = what is live, dev = where sessions land)`);
@@ -717,12 +728,25 @@ function auditRepo(target, ctx) {
   const runbook = cfg && "runbook" in cfg ? cfg.runbook : null;
 
   if (tier === "A") {
-    // An automated path to production must be IN the repo; a manual one must be WRITTEN
-    // DOWN in it. Either way the answer to "how does this reach production?" is committed.
-    if (deploy !== "manual" && !deployWorkflows.length) fail("tier A but no .github/workflows/deploy-*.yml — the path to production is not in the repo (use deploy: manual + runbook: if it really ships by hand)");
+    // The answer to "how does this reach production?" must be committed. A CI-driven deploy commits
+    // it as an in-repo deploy-*.yml; a deploy that runs OUTSIDE CI must instead be WRITTEN DOWN in a
+    // runbook: — the same invariant, honoured two ways. Two shapes deploy outside CI:
+    //   - deploy: manual              → a human runs the runbook.
+    //   - deploy: tag with no workflow → an EXTERNAL deployer (a GitOps poller fast-forwards a
+    //                                    release branch on the tag, or the like) ships it; the
+    //                                    runbook documents that path. A deploy: tag repo whose own
+    //                                    CI holds the deploy job keeps its deploy-*.yml and needs no
+    //                                    runbook — the workflow already commits the answer.
+    const externalTagDeploy = deploy === "tag" && !deployWorkflows.length;
+    if (deploy === "manual") {
+      checkRunbook(src, runbook, fail, warn, "deploy: manual");
+    } else if (externalTagDeploy) {
+      checkRunbook(src, runbook, fail, warn, "deploy: tag deployed outside CI (an external GitOps poller)");
+    } else if (!deployWorkflows.length) {
+      fail("tier A but no .github/workflows/deploy-*.yml — the path to production is not in the repo (use deploy: manual + runbook: if it ships by hand, or deploy: tag + runbook: when a GitOps poller deploys the tag from outside CI)");
+    }
     if (production === null || production === "") fail("tier A but production is null — set the live URL, or drop to tier B");
     if (deploy === "none") fail('tier A with deploy: none is contradictory — use "tag" or "manual"');
-    if (deploy === "manual") checkRunbook(src, runbook, fail, warn);
     // A TIER MISMATCH, not a bad mechanism. push-main is a perfectly good way to deploy;
     // it just cannot satisfy tier A's contract, which is that a deliberate release artifact
     // gates production. Here every push to main reaches users, so that gate does not exist.
@@ -907,14 +931,18 @@ function checkIntegration(cfg, trunk, branches, fail, warn) {
 //                         ADVISORY naming both possibilities. We would rather under-report
 //                         than invent a violation — the same reason `branches === null`
 //                         downgrades the trunk check to "unverified".
-function checkRunbook(src, runbook, fail, warn) {
+// `why` names the deploy shape that OWES the runbook, so the finding reads honestly whether the
+// caller is `deploy: manual` (a human runs it) or `deploy: tag` deployed OUTSIDE CI (a GitOps
+// poller runs it). Both share the same invariant: the deploy runs off no in-repo workflow, so the
+// path to production must be WRITTEN DOWN or nobody but its author can ship it.
+function checkRunbook(src, runbook, fail, warn, why = "deploy: manual") {
   if (runbook === null || runbook === "") {
-    fail("deploy: manual requires runbook: — name the committed doc that describes the hand-deploy (e.g. docs/deploy.md), or nobody but you can ship");
+    fail(`${why} requires runbook: — name the committed doc that describes how production is reached (e.g. docs/deploy.md), or nobody but you can ship`);
     return;
   }
   const path = String(runbook).trim().replace(/^\.\//, "");
   if (src.readFile(path) !== null) return;
-  if (src.kind === "local") fail(`runbook "${runbook}" does not exist in the repo — deploy: manual points at a doc that is not there`);
+  if (src.kind === "local") fail(`runbook "${runbook}" does not exist in the repo — ${why} points at a doc that is not there`);
   else warn(`runbook "${runbook}" not found via the API — either it is missing, or the read failed (permissions/branch); verify in a checkout`);
 }
 

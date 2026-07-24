@@ -67,12 +67,16 @@ trust. Write the suite first, then split.
 |---|---|---|---|
 | Has production | no | yes | yes |
 | Gates between merge and users | 0 | 1 | 2 |
-| Trunk (where sessions merge) | `main` | `dev` | `dev` |
+| Trunk (where sessions merge) | `main` | `dev` | `dev` — or `main`, tag-gated¹ |
 | Release branch | — | `main` (= what is live) | `main` |
 | CI on trunk | fast | fast | fast |
 | CI on `main` | — | full suite | full suite |
 | Tags | optional | optional | required, `v*.*.*` |
 | Deploy trigger | none | the `dev` → `main` promotion | tag push — or a human running the repo's runbook |
+
+¹ A tag-gated Tier A (`deploy: tag`) may collapse the split and run a single trunk
+`main`: the tag marks the release boundary, so the second branch is redundant —
+see the *tag-gated Tier A* paragraph below.
 
 **A, B and C are labels, not grades.** Read down the table naively and `C` looks
 like a worse `B` — it is not. `B` has no production at all: a tier B repo cannot
@@ -101,6 +105,22 @@ is **what is currently running on the host**, `dev` is where sessions land, and 
 preserves the meaning of `main` in the absence of a workflow — it is the only record
 of what shipped and when.
 
+**A tag-gated Tier A may instead run a single trunk `main`.** When `deploy: tag`,
+the **tag** is the deliberate release artifact, and the tag itself marks the release
+boundary — the last `v*.*.*` is "what shipped and when", the exact job the `dev` →
+`main` split does on a hand-deployed repo. A second branch marking the same boundary
+is then redundant, so such a repo may land day-to-day work on `main` and cut releases
+by tag. This is common in tag-gated GitOps: a release script cuts `vX.Y.Z` and
+fast-forwards a long-lived **release branch** that an external poller watches and
+redeploys, so the deploy runs **outside** the repo's CI and there is **no in-repo
+deploy workflow** by design. The tier is set by the promotion **gate** — a version
+tag — not by the trunk **name** and not by where the deploy job runs. This variant is
+specific to `deploy: tag`: `manual` and `push-main` have no tag to mark the boundary,
+so they keep the `dev`/`main` split. Wherever the deploy runs outside CI — a `manual`
+hand-deploy or a `tag` deployed by an external poller — the path to production must be
+committed as a [`runbook:`](project.schema.md#runbook--required-when-an-out-of-ci-deploy-has-no-workflow),
+since no workflow file records it.
+
 **Tier C exists because a tag ritual nobody honours is worse than no tag ritual.** A
 live but low-stakes site — a brochure page, an internal dashboard — gains nothing from
 cutting versions, and a repo forced to pretend it does ends up with a `main` that
@@ -122,9 +142,9 @@ the descriptor simply stops claiming a gate it never had. Migrating to a tag tri
 alternatives when the site has genuinely earned them.
 
 **"Trunk" is a role, not a branch name.** It means *the branch sessions merge into* — `main`
-in Tier B, `dev` in Tiers A and C. When our internal docs say "merge về trunk" or "trunk
-luôn sống", they mean the role. Read `project.yml` to learn which branch that is in a given
-repo. Never create a branch literally named `trunk`.
+in Tier B, `dev` in Tier C, and `dev` **or** (tag-gated) `main` in Tier A. When our internal
+docs say "merge về trunk" or "trunk luôn sống", they mean the role. Read `project.yml` to learn
+which branch that is in a given repo. Never create a branch literally named `trunk`.
 
 **Trunk is the primary integration point, and not always the only one.** A repo may declare
 additional long-lived lines in `project.yml`
@@ -149,7 +169,7 @@ guessing, without an API call, and even when the repo has no GitHub remote at al
 
 ```yaml
 tier: B                  # A = live, tag deploys · C = live, promotion deploys · B = no production
-trunk: main              # dev (tiers A, C) · main (tier B)
+trunk: main              # dev (tier C; tier A) · main (tier B; or tier A when deploy: tag)
 production: null         # url, or null for tier B
 deploy: none             # tag · manual (tier A) · push-main (tier C) · none (tier B)
 stack: capacitor-vite    # free-form; describe the repo honestly
@@ -627,6 +647,12 @@ git tag v1.2.0 && git push origin v1.2.0     # ← this is what deploys
 Pushing the tag is the deploy trigger. Pushing `main` is **not** — that only runs the full
 test suite. This separation lets you promote code and decide to ship it later.
 
+**Single-trunk (tag-gated) Tier A** has no `dev` → `main` promotion — work already lives on
+`main`. A release is just: **tag `main`.** The tag is still the whole gate; landing work on
+`main` did not deploy it. Where the deploy is an external GitOps poller, tagging is what the
+release script keys off — it fast-forwards the watched release branch — so the tag remains the
+one deliberate ship-ward act, exactly as above.
+
 **Tier C.** A release is: **merge `dev` → `main`. That is the deploy.**
 
 ```sh
@@ -885,6 +911,9 @@ does a tag gate production (A), or does the promotion itself deploy (C)?
    - **Tier A** — `tier: A`, `trunk: dev`, real `production:` URL, and `deploy: tag`, or
      `deploy: manual` plus `runbook: <path>` for a hand-deployed repo. Not `push-main`:
      a fine mechanism, but it cannot meet A's release-gate contract — that shape is C.
+     *Tag-gated single-trunk variant:* if you go `deploy: tag`, you may keep `trunk: main`
+     and **skip steps 2–3** (no `dev` branch) — the tag marks the release boundary
+     ([§2](#2-tiers)). Add `runbook: <path>` when a poller deploys the tag from outside CI.
 6. Swap the topic to `tier-c` / `tier-a`; update the internal project table (ports, prod URL).
 7. **Tier A only:** tag the first release. (On a `manual` repo, tags are still worth
    cutting: they name what you deployed. Nothing fires from them.) On C there is nothing

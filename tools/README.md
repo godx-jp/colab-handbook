@@ -567,6 +567,15 @@ WT="$1"; shift
 # ... clone DB into <db>_wt_<name>, rewrite $WT/.env, etc.
 ```
 
+> **Gotcha — the ignore rule must be `node_modules`, not `node_modules/`.** The trailing
+> slash matches a **directory only**, and this symlink is a *file*. So a repo whose
+> `.gitignore` uses the common `node_modules/` form does **not** ignore the link:
+> `git status` in every Node worktree then shows `?? node_modules`
+> (`git check-ignore -v node_modules` confirms no rule matches), which trains people to
+> tune out `git status` and quietly weakens "the worktree is clean" as the end-of-session
+> check that wrap and teardown rely on. Drop the trailing slash — `node_modules` (no slash)
+> matches both a real directory and this symlink, and the untracked entry disappears.
+
 ## Command reference
 
 Run `colab <cmd> --help` for full detail.
