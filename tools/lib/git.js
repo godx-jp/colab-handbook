@@ -76,6 +76,22 @@ function detectTrunk(repo) {
   return null;
 }
 
+/**
+ * Does a branch name resolve to a ref in this repo — locally, or as origin's copy?
+ *
+ * The local check alone is not enough: a session on another machine pushed the branch, and a claim
+ * naming it is perfectly healthy here. False in this function therefore means "nothing anywhere
+ * knows this name", which is the only claim strong enough to refuse a ship over. A falsy branch
+ * (null = "no branch") is false without asking git.
+ */
+function branchExists(repo, branch) {
+  if (!branch || typeof branch !== 'string') return false;
+  for (const ref of [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]) {
+    if (git(['rev-parse', '--verify', '--quiet', ref], repo).ok) return true;
+  }
+  return false;
+}
+
 /** List worktree paths registered in a repo (porcelain). */
 function worktreeList(repo) {
   const r = git(['worktree', 'list', '--porcelain'], repo);
@@ -172,7 +188,7 @@ function ghAssignedIssues(repo) {
 }
 
 module.exports = {
-  run, git, repoRoot, mainRepoRoot, originUrl, detectTrunk, worktreeList, dirtyTracked,
+  run, git, repoRoot, mainRepoRoot, originUrl, detectTrunk, branchExists, worktreeList, dirtyTracked,
   ghAvailable, ghIssueEdit, ghListLabels, ghAssignedIssues,
   ghCurrentLogin, ghIssueView, ghIssueComment, ghRunLatest,
 };

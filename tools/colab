@@ -22,6 +22,7 @@ const landed = require('./lib/landed');
 const notify = require('./lib/notify');
 const journal = require('./lib/journal');
 const labels = require('./lib/labels');
+const records = require('./lib/records');
 const {
   HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
   parseArgs, table, shortRepo,
@@ -227,7 +228,9 @@ function wtStatus(wt) { return (wt && wt.status) || 'running'; }
 
 /** The exact claim-comment body. Keep in lockstep with CLAIM_RE/parseSessionField and the README. */
 function claimCommentBody(wtName, branch, session, sessionName) {
-  const base = `${CLAIM_MARK} — worktree \`${wtName || '-'}\` · branch \`${branch}\` · host \`${HOST}\` · ${nowISO()}`;
+  // `-` for "no branch", matching the worktree field beside it. It used to be the word `trunk`,
+  // which read as a branch name that never existed (#53).
+  const base = `${CLAIM_MARK} — worktree \`${wtName || '-'}\` · branch \`${branch || '-'}\` · host \`${HOST}\` · ${nowISO()}`;
   return base + sessionCommentSuffix(session, sessionName); // no-identity body stays EXACTLY as before
 }
 
@@ -434,7 +437,9 @@ them automatically (see tools/README.md "Claim lifecycle").
 Options:
   --repo <path>       repo root (default: git root of cwd)
   --worktree <name>   attach these claims to a worktree entity (ports live on the worktree)
-  --branch <name>     branch these claims are worked on (informational; default: trunk)
+  --branch <name>     branch these claims are worked on. Default: none (null) — a claim held on
+                      the trunk checkout has no branch. Never the word "trunk": that is a role,
+                      and a record holding it resolves to no ref (refused, exit 1)
   --session <url>     Claude session URL recorded on the claim + comment (default: COLAB_SESSION env)
   --session-name <s>  short human label shown in tables/messages (default: COLAB_SESSION_NAME env)
   --force             take over a claim held by another worktree / GitHub user (logged, never silent)
@@ -448,7 +453,13 @@ function cmdClaim(argv) {
   if (opts.help || opts._.length === 0) return print(HELP_CLAIM);
   const repoAbs = resolveRepo(opts);
   const nums = opts._.map(normIssueNum);
-  const branch = opts.branch || 'trunk';
+  // No branch is `null`, never the word "trunk". That literal used to be the default here, and it
+  // reached state.json as though it were a branch name: `ship` then matched no claims and merged
+  // with no `Closes #N` (#53). Refuse it at the front door too — the message is better here than
+  // from the state guard, and `--branch trunk` is always a mistake.
+  const branch = opts.branch ? String(opts.branch).trim() : null;
+  const bp = records.branchProblem(branch);
+  if (bp) throw new UserError(`--branch ${opts.branch}: ${bp}`);
   const wtName = opts.worktree || null;
   const session = resolveSession(opts);
   const sessionName = resolveSessionName(opts);
@@ -468,8 +479,11 @@ function cmdClaim(argv) {
   // ---- claim locally (idempotent on same worktree; --force overwrites a different holder) ----
   const res = state.mutate((st) => {
     if (wtName && !st.worktrees[wtName]) {
-      // allow claiming onto a worktree name that will be created later (informational link)
-      st.worktrees[wtName] = { name: wtName, repo: repoAbs, branch, path: null, ports: [], host: HOST, session, sessionName, status: 'running', created: nowISO() };
+      // A stub for a worktree that will be created later. It exists so the claim is not read as an
+      // orphan; `colab worktree new` overwrites it with the real record. `status: pending` is what
+      // makes the null path HONEST rather than a record claiming a directory it does not have —
+      // doctor knows the difference, and a stub that never becomes a worktree is reported as drift.
+      st.worktrees[wtName] = { name: wtName, repo: repoAbs, branch, path: null, ports: [], host: HOST, session, sessionName, status: records.PENDING, created: nowISO() };
     }
     const created = [], reclaimed = [];
     for (const num of nums) {
@@ -500,7 +514,8 @@ function cmdClaim(argv) {
   const kept = res.created.filter((n) => !lost.includes(n));
   if (kept.length) {
     print(`Claimed ${kept.map((n) => '#' + n).join(' ')} in ${shortRepo(repoAbs)}` +
-      (wtName ? ` → worktree "${wtName}" (branch ${branch})` : ` (trunk)`));
+      (wtName ? ` → worktree "${wtName}"${branch ? ` (branch ${branch})` : ' (no branch yet)'}`
+        : (branch ? ` (branch ${branch})` : ' (no worktree, no branch — the trunk checkout)')));
   }
   // One event per issue KEPT — not per command. An issue lost to the tie-break was never ours, and
   // reporting the group as claimed would tell an observer the opposite of what GitHub now says.
@@ -691,7 +706,9 @@ function syncClaims({ prune = false } = {}) {
       const key = claimKey(repoAbs, num);
       state.mutate((s) => {
         if (!s.claims[key]) {
-          s.claims[key] = { issue: issueTag(num), repo: repoAbs, worktree: null, branch: 'trunk', host: HOST, created: nowISO() };
+          // No branch is knowable from GitHub — an assignee + label says nothing about where the
+          // work sits. `null` says exactly that; the word "trunk" used to, and lied (#53).
+          s.claims[key] = { issue: issueTag(num), repo: repoAbs, worktree: null, branch: null, host: HOST, created: nowISO() };
           added.push(`+#${num} ${shortRepo(repoAbs)} (assigned+in-progress on GitHub, missing locally)`);
         }
       });
@@ -1016,6 +1033,10 @@ function cmdWorktreeNew(argv) {
   if (!git.repoRoot(repoAbs)) throw new UserError(`${repoAbs} is not a git repo`);
 
   const branch = opts._[0];
+  // "Never create a branch named `trunk`" is a convention (CONVENTIONS.md §4) that nothing used to
+  // enforce — this command would happily have created one, and recorded it (#53).
+  const bp = records.branchProblem(branch);
+  if (bp) throw new UserError(`branch "${branch}": ${bp}`);
   const name = opts.name || (branch.includes('/') ? branch.slice(branch.indexOf('/') + 1) : branch);
   const issues = opts.issues ? String(opts.issues).split(',').map(normIssueNum) : [];
   const portCount = opts.ports ? parseInt(opts.ports, 10) : 0;
@@ -1360,6 +1381,11 @@ Health-check the machine-local state and heal drift.
     auto-removed (they may be deliberate trunk claims). --prune removes them too and frees
     any ports they own.
   - Ports owned by a vanished worktree/claim are freed on --prune.
+  - A record nothing can ACT on is drift too: a branch that is a role word (\`trunk\`) or resolves
+    to no ref, or a worktree naming no directory. Not the same as DEAD — dead means the directory
+    is gone, these name none — which is why it went unreported while \`landed\` answered unknown and
+    \`ship\` merged with no \`Closes #N\`. --prune repairs only what a directory on disk proves
+    (adopting its path and its checked-out branch); a branch nothing can see is never guessed.
   - A \`running\` worktree whose branch has landed on trunk (tree-contained, incl. squash merges) AND
     holds NO live claims is flipped to \`merged\` (recorded on --prune). ANY live claim keeps it
     running (an unfinished group sibling). \`merged\` worktrees still on disk are sweep candidates;
@@ -1456,8 +1482,22 @@ function cmdDoctor(argv) {
   const config = state.loadConfig();
   const ttl = opts.ttl ? parseFloat(opts.ttl) : config.claimTTLHours;
 
-  const report = { deadWorktrees: [], orphanClaims: [], staleClaims: [], orphanPorts: [], prunedPorts: [],
+  const report = { deadWorktrees: [], orphanClaims: [], staleClaims: [], orphanPorts: [], brokenRecords: [], prunedPorts: [],
     mergedFlips: [], mergedSweep: [], mergedDirty: [], mergedHookFail: [], shippedBranches: [], ghostPorts: [], pruned: !!opts.prune };
+
+  // One answer per (repo, branch) — pass 5b asks about the same branch from a worktree and from each
+  // of its claims, and every miss costs two `git rev-parse` calls.
+  // NESTED, not a composite string key — for the reason spelled out above shippedBranches(): the
+  // only separator that cannot collide with a path or a ref name is NUL, and a raw NUL turns this
+  // file into "binary data". Nesting needs no separator, so the bug class is gone rather than dodged.
+  const refCache = new Map();
+  const resolves = (repo, branch) => {
+    if (!refCache.has(repo)) refCache.set(repo, new Map());
+    const byBranch = refCache.get(repo);
+    if (!byBranch.has(branch)) byBranch.set(branch, git.branchExists(repo, branch));
+    return byBranch.get(branch);
+  };
+  const repoLive = (r) => !!r && fs.existsSync(r) && !!git.repoRoot(r);
 
   const apply = (fn) => opts.prune ? state.mutate(fn) : fn(state.loadState());
 
@@ -1521,6 +1561,55 @@ function cmdDoctor(argv) {
         report.mergedFlips.push({ name: wt.name, repo: shortRepo(wt.repo), branch: wt.branch });
         if (opts.prune) wt.status = 'merged';
       }
+    }
+    // 5b. records nothing can ACT on (#53): a branch that is a role word or resolves to no ref, and
+    //     a worktree that names no directory. Neither shape is "dead" — dead means the directory is
+    //     GONE, and these records claim none — so pass 1 looked straight past them while `landed`
+    //     answered `unknown` and `ship` matched zero claims and merged with no `Closes #N`.
+    for (const wt of Object.values(st.worktrees)) {
+      const problems = [];
+      let repairTo = null;
+      const bp = records.branchProblem(wt.branch);
+      if (bp) problems.push(bp);
+      else if (wt.branch && repoLive(wt.repo) && !resolves(wt.repo, wt.branch)) {
+        problems.push(`branch "${wt.branch}" resolves to no ref in ${shortRepo(wt.repo)}`);
+      }
+      if (!wt.path) {
+        const expected = wt.repo ? path.join(wt.repo, worktreeSubdir(config), wt.name) : null;
+        if (expected && fs.existsSync(expected)) {
+          problems.push(`path is null while ${expected} exists on disk`);
+          repairTo = expected;
+        } else if (records.statusOf(wt) !== records.PENDING) {
+          problems.push(`path is null while status is "${records.statusOf(wt)}" — it names no directory`);
+        } else if (hoursSince(wt.created) > ttl) {
+          problems.push(`${records.PENDING} claim stub ${Math.round(hoursSince(wt.created))}h old — the worktree was never created`);
+        }
+      }
+      if (!problems.length) continue;
+      const entry = { kind: 'worktree', name: wt.name, repo: shortRepo(wt.repo), branch: wt.branch, problems, repaired: null };
+      // Repair ONLY what the disk proves: adopt the directory and the branch actually checked out in
+      // it. A branch nothing can see is never guessed — that record is reported and left alone.
+      if (opts.prune && repairTo) {
+        const head = git.git(['rev-parse', '--abbrev-ref', 'HEAD'], repairTo);
+        const real = head.ok ? head.stdout : '';
+        if (real && real !== 'HEAD' && !records.branchProblem(real)) {
+          wt.path = repairTo;
+          wt.branch = real;
+          if (records.statusOf(wt) === records.PENDING) wt.status = 'running';
+          for (const c of Object.values(st.claims)) {
+            if (c.worktree === wt.name && (!c.branch || records.branchProblem(c.branch))) c.branch = real;
+          }
+          entry.repaired = { path: repairTo, branch: real };
+        }
+      }
+      report.brokenRecords.push(entry);
+    }
+    for (const c of Object.values(st.claims)) {
+      const bp = records.branchProblem(c.branch) ||
+        (c.branch && repoLive(c.repo) && !resolves(c.repo, c.branch)
+          ? `branch "${c.branch}" resolves to no ref in ${shortRepo(c.repo)}` : null);
+      if (!bp) continue;
+      report.brokenRecords.push({ kind: 'claim', name: c.issue, repo: shortRepo(c.repo), branch: c.branch, problems: [bp], repaired: null });
     }
   });
 
@@ -1603,6 +1692,24 @@ function cmdDoctor(argv) {
     print(`${verb} ${report.orphanPorts.length} orphan port(s):`);
     for (const p of report.orphanPorts) print(`  ${p.port} owner=${p.owner}`);
   }
+  if (report.brokenRecords.length) {
+    issues += report.brokenRecords.length;
+    const healed = report.brokenRecords.filter((r) => r.repaired).length;
+    print(`Found ${report.brokenRecords.length} unusable record(s)${healed ? ` (${healed} repaired)` : ''} — a branch or path nothing can resolve:`);
+    for (const r of report.brokenRecords) {
+      print(`  ${r.kind} ${r.name} [${r.repo}]`);
+      for (const p of r.problems) print(`      ${p}`);
+      if (r.repaired) print(`      → repaired from disk: branch ${r.repaired.branch} · path ${r.repaired.path}`);
+    }
+    if (report.brokenRecords.some((r) => !r.repaired)) {
+      print('  These fail SILENTLY elsewhere: `landed` cannot classify the worktree, and `ship`');
+      print('  matches no claims — so a merge lands with no `Closes #N` and the issue stays open.');
+      print('  --prune repairs only what a directory on disk proves; a branch nothing can see is');
+      print('  never guessed. Repair the rest through the CLI, never by editing state.json:');
+      print('    colab release <N>  &&  colab claim <N> --branch <real-branch> [--worktree <name>]');
+      print('    colab worktree rm <name>        # if the worktree is genuinely finished');
+    }
+  }
   if (report.mergedFlips.length) {
     print(`${opts.prune ? 'Flipped' : 'Detected'} ${report.mergedFlips.length} worktree(s) running → merged (branch landed on trunk, no live claims):`);
     for (const w of report.mergedFlips) print(`  ${w.name} [${w.repo}] branch=${w.branch}`);
@@ -1625,6 +1732,7 @@ function cmdDoctor(argv) {
   // accumulates per shipped session BY DESIGN — this is a routine maintenance list a human works
   // through when they feel like it, not drift, and not a sign anything went wrong.
   const nothing = issues === 0 && report.staleClaims.length === 0 && report.orphanPorts.length === 0 &&
+    report.brokenRecords.length === 0 &&
     report.mergedFlips.length === 0 && report.mergedSweep.length === 0 && report.mergedDirty.length === 0;
   if (nothing) print('All healthy — nothing to prune.');
 
@@ -2857,6 +2965,24 @@ function cmdShip(argv) {
   if (!trunk) throw new UserError('Could not determine trunk branch (set project.yml trunk:)');
   if (sess.branch === trunk) throw new UserError(`Refusing: --branch is the trunk itself (${trunk}) — nothing to ship`);
 
+  // ---- the recorded branch must RESOLVE, before anything else is computed ----
+  // Everything downstream is keyed to this name: the claim lookup above, the migration diff, the
+  // squash. A worktree record holding a role word or a deleted branch fails all three quietly —
+  // the claim set comes back empty and the merge lands with no `Closes #N` (#53).
+  if (!git.branchExists(repoAbs, sess.branch)) {
+    const shown = sess.branch === null || sess.branch === undefined ? 'null (no branch)' : `"${sess.branch}"`;
+    process.stderr.write(`✗ Refusing: the branch recorded for this session is ${shown} — it resolves to no ref.\n`);
+    if (sess.name) {
+      process.stderr.write(`  Worktree "${sess.name}" cannot be shipped from a record nothing can act on. Repair it\n`);
+      process.stderr.write('  through the CLI (never by editing ~/.colab/state.json — other sessions write to it):\n');
+      process.stderr.write(`    colab doctor            # says what is broken, --prune repairs what it can prove\n`);
+      process.stderr.write(`    colab release <N> && colab claim <N> --branch <real-branch> --worktree ${sess.name}\n`);
+    } else {
+      process.stderr.write(`  Pass a branch that exists, or fetch it first.\n`);
+    }
+    return 1;
+  }
+
   // ---- the merge TARGET is the base the session was cut from, not trunk ----
   const integration = resolveIntegration(repoAbs, doc, trunk);
   // A declared line is never ship's cargo. Merging weeks of divergence into the branch that
@@ -2955,6 +3081,33 @@ function cmdShip(argv) {
   print(`ship ${shortRepo(repoAbs)} · branch ${sess.branch} → ${target}` +
     (target === trunk ? '' : `  [declared line — NOT ${trunk}]`) + (opts.dry ? '  [DRY RUN]' : ''));
   print(`  issues: ${sess.issues.map((n) => '#' + n + (refsSet.has(n) ? ' (ref — kept open)' : '')).join(' ') || '(none claimed)'}` + (sess.name ? ` · worktree ${sess.name}` : ''));
+
+  // ---- an empty claim set is SUSPICIOUS, not benign (#53) ----
+  // No claims means no `Closes #N`, which means every issue this branch fixes stays open with its
+  // code merged — the failure CONVENTIONS.md §4 measured at 26/30 issues. It was the quiet path:
+  // ship printed "(none claimed)" and carried on. It is now loud, and where the repo holds evidence
+  // that the claim lookup itself is broken — a claim naming a branch that resolves to nothing — it
+  // refuses, because then "no claims" is a lookup failure rather than a fact about the work.
+  const brokenClaims = Object.values(st.claims).filter((c) => c.repo === repoAbs &&
+    (records.branchProblem(c.branch) || (c.branch && !git.branchExists(repoAbs, c.branch))));
+  if (sess.issues.length === 0) {
+    warn('this branch resolves to ZERO claimed issues — the squash will carry NO `Closes #N`,');
+    warn('  so anything it fixes stays open with its code already merged (CONVENTIONS.md §4).');
+    if (brokenClaims.length) {
+      process.stderr.write(`✗ Refusing: ${brokenClaims.length} claim(s) in this repo name a branch that resolves to no ref,\n`);
+      for (const c of brokenClaims) {
+        process.stderr.write(`    ${c.issue}  branch ${c.branch === null ? 'null' : `"${c.branch}"`}${c.worktree ? ` · worktree ${c.worktree}` : ''}\n`);
+      }
+      process.stderr.write('  so "no claims" here is a broken lookup, not a fact about this branch. Repair, then re-run:\n');
+      process.stderr.write(`    colab release <N> && colab claim <N> --branch ${sess.branch}\n`);
+      process.stderr.write('  (through the CLI — several sessions write ~/.colab/state.json, so a hand edit can lose one.)\n');
+      return 1;
+    }
+    warn('  Nothing contradicts it, so ship continues. If this branch was meant to close an issue,');
+    warn(`  stop now and:  colab claim <N> --branch ${sess.branch}`);
+  } else if (brokenClaims.length) {
+    warn(`${brokenClaims.length} claim(s) in this repo name a branch that resolves to no ref — run \`colab doctor\``);
+  }
   print('');
   print(table(checks.map((c) => [c[0], c[1], c[2]]), ['', 'PRECONDITION', 'DETAIL']));
   print('');

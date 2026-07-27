@@ -146,6 +146,17 @@ in Tier B, `dev` in Tier C, and `dev` **or** (tag-gated) `main` in Tier A. When 
 docs say "merge về trunk" or "trunk luôn sống", they mean the role. Read `project.yml` to learn
 which branch that is in a given repo. Never create a branch literally named `trunk`.
 
+That includes never *recording* one. The word is a natural placeholder for "no branch — this
+work sits on the trunk checkout", and written into a field that names a branch it becomes a
+name nothing can resolve. We had one: a session's record read `branch: "trunk"` while the real
+branch was healthy, and the damage was invisible because each reader failed politely. The
+lifecycle check answered `unknown`; the merge tool matched claims **by branch name**, found
+none, reported `(none claimed)` and squashed anyway — so the commit carried **no `Closes #N`**
+and the issue stayed open with its code merged, which is the 26-of-30 failure above, reached
+by a path nothing was watching. **The absence of a branch is null, not a word.** A tool that
+stores this should refuse the role word on write, and should treat "this branch has no claimed
+issues" as suspicious rather than routine.
+
 **Trunk is the primary integration point, and not always the only one.** A repo may declare
 additional long-lived lines in `project.yml`
 [`integration:`](project.schema.md#integration--optional) — a branch accumulating work for a

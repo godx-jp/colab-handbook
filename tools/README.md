@@ -78,6 +78,12 @@ branch on it.
   whole group.
 - **Claiming and ports work without a worktree.** `colab claim 42` (a trunk claim) and
   `colab port alloc` are standalone.
+- **"No branch" is `null`, and never the word `trunk`.** A claim held on the trunk checkout has no
+  branch, and `trunk` is a *role* — the branch this repo merges into, `main` or `dev`. Recording the
+  role word as though it were a name is refused on write (`colab claim --branch trunk` exits 1, and
+  so does `colab worktree new trunk`), because everything downstream resolves that field as a ref:
+  `landed` answered `unknown` on it, and `ship` — which matches claims to a branch **by name** —
+  found none and merged with no `Closes #N`. See *Records that cannot be acted on*.
 - **A worktree owns its base, and the base is the merge target.** It is trunk unless
   `--base <line>` named a branch the repo declared in `project.yml` `integration:`. `ship`
   merges into the recorded base rather than resolving trunk afresh — base and target are one
@@ -116,8 +122,11 @@ On each successful claim (when `gh` is usable) colab posts **one** comment, in t
 stable, machine-greppable** format (the refusal path and future dashboards parse it — do not reword):
 
 ```
-🔒 Claimed — worktree `<name|->` · branch `<branch>` · host `<hostname>` · <ISO timestamp>
+🔒 Claimed — worktree `<name|->` · branch `<branch|->` · host `<hostname>` · <ISO timestamp>
 ```
+
+Both `worktree` and `branch` render as `-` when absent. `branch` used to render the word `trunk`
+for a claim that had none, which read as a branch name that never existed.
 
 On `release` / `worktree rm` it posts `✅ Released` — **unless the issue is already CLOSED**, in
 which case it stays silent (a `Closes #N` merge already ended the story). Comments are
@@ -476,7 +485,8 @@ Design notes, in case a future change is tempted to relax one:
       "path": "/abs/repo/.worktrees/...", "ports": [5230],
       "host": "machine", "session": "https://claude.ai/code/session_…",
       "sessionName": "colab-handbook",  // short human label (either/both/neither)
-      "status": "running",              // running → merged (killed = entry removed)
+      "status": "running",              // running → merged (killed = entry removed);
+                                        // `pending` = a claim stub, no directory yet
       "created": "<iso>"
     }
   },
@@ -484,7 +494,8 @@ Design notes, in case a future change is tempted to relax one:
     "/abs/repo#115": {
       "issue": "#115", "repo": "/abs/repo",
       "worktree": "import-fixes-115-114-113",   // or null for a trunk claim
-      "branch": "fix/...", "host": "machine",
+      "branch": "fix/...",                      // or null for "no branch" — NEVER the word `trunk`
+      "host": "machine",
       "session": "https://claude.ai/code/session_…",   // both inherited from the worktree
       "sessionName": "colab-handbook",
       "created": "<iso>"
@@ -503,9 +514,47 @@ Design notes, in case a future change is tempted to relax one:
 - `session`, `sessionName`, `status` and `base` are **backward-compatible**: entries written before
   they existed render as blank identity / `running` status, and a missing `base` falls back to the
   repo's trunk — no migration needed. See *Session identity* and *Worktree lifecycle* below.
+- **`branch` is a real branch name or `null`.** Null means "no branch" — a claim held on the trunk
+  checkout. Readers must tolerate it; it is not an error state, and it is what the word `trunk` used
+  to say badly. `status: "pending"` is likewise readable as "a stub, not a worktree": it is the one
+  status allowed a `null` path, written when a claim names a worktree that does not exist yet, and
+  replaced by the real record when `colab worktree new` runs.
 - **This file has readers outside this repo** — an internal dashboard joins worktrees and claims to
   live sessions straight from it. Treat the shape as a published contract: adding a field is safe,
   renaming or removing one breaks consumers you cannot grep for.
+
+### Records that cannot be acted on
+
+A worktree/claim pair was once found holding `{"branch": "trunk", "path": null}`. The real branch
+existed and was healthy; only the record was wrong — and it failed **silently in three places**:
+
+| command | what it did | why nothing caught it |
+|---|---|---|
+| `landed` | resolved the ref, got nothing, answered `unknown` | `unknown` is honest; a sweep simply could not bucket it |
+| `ship` | matched claims **by branch name**, found none, merged | `(none claimed)` was treated as benign, so **no `Closes #N`** |
+| `doctor` | reported nothing | "dead" means the directory is *gone*; this record named none |
+
+Three changes, one per failure:
+
+- **On write** (`lib/records.js`, hooked into `state.mutate` so no write site can forget): a role
+  word or an empty string is refused as a branch, and only a `pending` stub may carry a null path.
+  It judges **problems this mutation introduced**, not the file — a record already broken stays
+  writable, or `doctor` could not repair the very records it exists to find.
+- **`ship`** refuses outright when the session's recorded branch resolves to no ref, and treats an
+  empty claim set as suspicious rather than benign: it says loudly that the squash will carry no
+  `Closes #N`, and **refuses** when some claim in the repo names a branch that resolves to nothing —
+  because then "no claims" is a broken lookup, not a fact about the branch.
+- **`doctor`** reports both shapes. `--prune` repairs only what a directory on disk proves (adopting
+  its path and its checked-out branch, and the claims hanging off it); a branch nothing can see is
+  never guessed.
+
+Repair by hand goes **through the CLI**, never by editing `state.json` — several sessions write to
+it concurrently, so a read-modify-write there can lose another session's update:
+
+```sh
+colab release <N>
+colab claim <N> --branch <real-branch> [--worktree <name>]
+```
 
 ## Reserved ports — the design change
 
@@ -602,7 +651,7 @@ Run `colab <cmd> --help` for full detail.
 | `worktrees [--json]` | list worktrees (status + on-disk liveness) |
 | `ship [--worktree N \| --branch B] [--message M] [--keep-worktree] [--delete-branch] [--dry]` | code-wrap **Phase B**: squash-merge a session branch → trunk. The branch is **kept** unless `--delete-branch`. Gated by repo autonomy (see *Phase B autonomy ladder*) |
 | `promote [--repo P] [--message M] [--dry]` | **promotion** trunk → main (`--no-ff`). Gated by `deploy` + `promotion`; never tags/deploys directly (see *Promotion*) |
-| `doctor [--prune] [--ttl H] [--json]` | heal dead worktrees / orphan + stale claims / orphan ports; flip + sweep **merged** worktrees (see *Worktree lifecycle*); **list** shipped branches awaiting deletion (never deletes them) |
+| `doctor [--prune] [--ttl H] [--json]` | heal dead worktrees / orphan + stale claims / orphan ports; report records whose branch or path cannot be resolved (see *Records that cannot be acted on*); flip + sweep **merged** worktrees (see *Worktree lifecycle*); **list** shipped branches awaiting deletion (never deletes them) |
 | `release-notes [<range>] [--repo P] [--out F] [--headline "..."]` | grouped Markdown release summary from git history (see below) |
 | `template [<name>] [--dest F] [--repo P] [--force]` | copy a handbook workflow template into a repo, **stamped** with the handbook version (see below) |
 | `update [<repo>...] [--apply] [--json] [--quiet]` | sweep the fleet registry for stamped copies that fell behind a changed template; `--apply` refreshes the **pristine** ones. Never commits; never touches a hand-edited copy (see below) |
@@ -781,6 +830,8 @@ Each step is checked; any failure aborts **before the push**, so trunk is never 
 | step | what | abort condition |
 |---|---|---|
 | a. autonomy | repo grants `auto-trunk` | not granted → refuse (no override) |
+| a′. resolvable | the session's recorded branch resolves to a ref (locally or on `origin`) | it does not → refuse: everything below is keyed to that name, and a record nothing can act on silently costs the `Closes` |
+| a″. claim sanity | the branch resolves to at least one claimed issue | zero → **loud warning** (the squash will carry no `Closes #N`); zero **and** some claim in the repo names an unresolvable branch → refuse, because "no claims" is then a broken lookup |
 | b. preconditions | reported as a ✓/✗ table | any ✗ → abort |
 | | · trunk CI alive **and** green (`gh run list --branch <trunk> -L 1`) | not `completed`+`success` (billing fail-to-start counts as ✗) |
 | | · **no new migration files** on the branch (`database/migrations/`, `prisma/migrations/`) | any present → human must run Phase B (no override) |

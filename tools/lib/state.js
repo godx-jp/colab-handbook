@@ -33,11 +33,17 @@
  *   }
  * }
  *
- * Field notes for the two that carry weight beyond storage:
+ * Field notes for the four that carry weight beyond storage:
  *   base     the branch the worktree was cut from AND the one `colab ship` merges back into —
  *            trunk normally, a declared `integration:` line by request. Not derived at ship time.
  *   session  the ONLY join key to a live session; `sessionName` is display text and joins nothing.
  *            A name with no URL is a half-identity — the row reads as owned and links nowhere.
+ *   branch   a real branch name, or `null` for "no branch" (a claim held on the trunk checkout).
+ *            NEVER the word `trunk`: that is a role, not a name, and a reader resolving it gets
+ *            nothing. Enforced on write by lib/records.js; readers must tolerate null.
+ *   status   `running` → `merged` (killed = entry removed), plus `pending`: a stub written by
+ *            `colab claim --worktree <name>` for a worktree that does not exist yet. It is the one
+ *            status allowed a null `path`, and `colab worktree new` replaces it with the real record.
  *
  * `session`, `sessionName`, `status` and `base` are backward-compatible: entries written before
  * they existed simply lack them, and readers must tolerate that — no migration is performed.
@@ -50,6 +56,11 @@ const path = require('path');
 // Optional local journal. Requires nothing back from this module (it resolves COLAB_DIR itself), so
 // there is no require cycle; see the note on COLAB_DIR in lib/journal.js.
 const journal = require('./journal');
+// Write-time validation of the fields other commands resolve against git. Same reason the journal
+// hooks into mutate() and nowhere else: one place every fact enters state, so no write site can
+// forget. Neither module requires this one back.
+const records = require('./records');
+const { UserError } = require('./util');
 
 const HOME = os.homedir();
 const COLAB_DIR = process.env.COLAB_HOME || path.join(HOME, '.colab');
@@ -170,6 +181,12 @@ function withLock(fn, { tries = 100, waitMs = 100 } = {}) {
  * forgetting to report. It is off unless `journal: true` is configured, and when off `snapshot()`
  * returns null on its first line, so the disabled path costs one boolean and allocates nothing.
  *
+ * It is also where the write-time record validation runs (lib/records.js), for the same structural
+ * reason and with one deliberate difference: the journal observes and cannot fail a mutation, while
+ * validation REFUSES one. It throws before saveState, so a refused write leaves the file exactly as
+ * it was — and it only judges fields this mutation CHANGED, so a legacy-bad record already on disk
+ * does not turn every later command into a crash. That record is `colab doctor`'s to report.
+ *
  * Two properties the journal must never cost us, both structural rather than promised:
  *   - It cannot fail a mutation. Everything journal-related is inside try/catch, and the catch is
  *     empty on purpose — a full disk must not roll back a claim that succeeded.
@@ -177,20 +194,25 @@ function withLock(fn, { tries = 100, waitMs = 100 } = {}) {
  *     happens after withLock has returned, so a slow filesystem blocks no other session.
  */
 function mutate(fn) {
-  let records = null;
+  // NOT named `records`: that shadowed the module of the same name for the whole closure, so the
+  // guard below read `null.snapshot` and every state write died. Caught by the new tests.
+  let journalRecords = null;
   const result = withLock(() => {
     const st = loadState();
     let before = null;
     try { before = journal.snapshot(st); } catch (_) { before = null; }
+    const guard = records.snapshot(st);
     const r = fn(st);
+    const problems = records.changedProblems(guard, st);
+    if (problems.length) throw new UserError(records.refusalMessage(problems));
     saveState(st);
     if (before) {
-      try { records = journal.recordDiff(before, journal.snapshot(st)); } catch (_) { records = null; }
+      try { journalRecords = journal.recordDiff(before, journal.snapshot(st)); } catch (_) { journalRecords = null; }
     }
     return r;
   });
-  if (records && records.length) {
-    try { journal.append(records); } catch (_) { /* never at the expense of the mutation */ }
+  if (journalRecords && journalRecords.length) {
+    try { journal.append(journalRecords); } catch (_) { /* never at the expense of the mutation */ }
   }
   return result;
 }
