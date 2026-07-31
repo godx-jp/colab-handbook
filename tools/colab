@@ -3652,19 +3652,20 @@ function resolveCloseRefsSplit(repoAbs, gh, issues, refsFromFlag) {
 function shipCiCheck(repoAbs, gh, target, trunk) {
   const name = `${target === trunk ? 'trunk' : 'line'} CI green`;
   if (!gh) return { name, ok: false, class: SELF_CLEARING, detail: 'gh not usable (no auth / no origin) — cannot confirm CI' };
-  let run = git.ghRunLatest(repoAbs, target);
+  let run = git.ghRunForSha(repoAbs, target);
   let via = target;
   if (run && run.status === 'none' && target !== trunk) {
-    run = git.ghRunLatest(repoAbs, trunk);
+    run = git.ghRunForSha(repoAbs, trunk);
     via = `${trunk} (line "${target}" has no runs — ungated, advisory)`;
   }
   if (!run) return { name, ok: false, class: SELF_CLEARING, detail: 'gh run list failed' };
+  const at = `${via}@${shortSha(run.sha)}`;
   if (run.status === 'completed') {
-    if (run.conclusion === 'success') return { name, ok: true, class: null, detail: `latest run on ${via}: success` };
-    return { name, ok: false, class: HUMAN_GATED, detail: `latest run on ${via}: status=completed conclusion=${run.conclusion || 'none'}` };
+    if (run.conclusion === 'success') return { name, ok: true, class: null, detail: `run for ${at}: success` };
+    return { name, ok: false, class: HUMAN_GATED, detail: `run for ${at}: status=completed conclusion=${run.conclusion || 'none'}` };
   }
-  if (run.status === 'none') return { name, ok: false, class: HUMAN_GATED, detail: `latest run on ${via}: no runs at all — CI is not wired for this ref` };
-  return { name, ok: false, class: SELF_CLEARING, detail: `latest run on ${via}: status=${run.status} — still running, retry later` };
+  if (run.status === 'none') return { name, ok: false, class: HUMAN_GATED, detail: `no run for ${at} — CI is not wired for this ref, or never started for this commit` };
+  return { name, ok: false, class: SELF_CLEARING, detail: `run for ${at}: status=${run.status} — still running, retry later` };
 }
 
 /**
@@ -3916,15 +3917,15 @@ function cmdShip(argv) {
   const ciLabel = `${target === trunk ? 'trunk' : 'line'} CI green`;
   if (!gh) { checks.push(['✗', ciLabel, 'gh not usable (no auth / no origin) — cannot confirm CI']); }
   else {
-    let run = git.ghRunLatest(repoAbs, target);
+    let run = git.ghRunForSha(repoAbs, target);
     let via = target;
     if (run && run.status === 'none' && target !== trunk) {
-      run = git.ghRunLatest(repoAbs, trunk);
+      run = git.ghRunForSha(repoAbs, trunk);
       via = `${trunk} (line "${target}" has no runs — ungated, advisory)`;
     }
     if (!run) checks.push(['✗', ciLabel, 'gh run list failed']);
-    else if (run.status === 'completed' && run.conclusion === 'success') { ciOk = true; checks.push(['✓', ciLabel, `latest run on ${via}: success`]); }
-    else checks.push(['✗', ciLabel, `latest run on ${via}: status=${run.status} conclusion=${run.conclusion || 'none'} (fail-to-start counts as not green)`]);
+    else if (run.status === 'completed' && run.conclusion === 'success') { ciOk = true; checks.push(['✓', ciLabel, `run for ${via}@${shortSha(run.sha)}: success`]); }
+    else checks.push(['✗', ciLabel, `${via}@${shortSha(run.sha)}: status=${run.status} conclusion=${run.conclusion || 'none'} (fail-to-start counts as not green; a cancelled sibling of a passing run on this sha would read success, not this)`]);
   }
   // No new migrations on the branch, measured against what it will merge into
   const migrations = newMigrations(repoAbs, target, sess.branch);
@@ -3980,6 +3981,22 @@ function cmdShip(argv) {
     warn(`  stop now and:  ${claimRemedy}`);
   } else if (brokenClaims.length) {
     warn(`${brokenClaims.length} claim(s) in this repo name a branch that resolves to no ref — run \`colab doctor\``);
+  }
+
+  // ---- surface the squash-subject blind spot BEFORE it ships (#88) ----
+  // A commit whose prefix isn't a recognised Conventional Commit type (`wip:`, or no prefix at
+  // all) can never win the squash subject on merit — pickSubjectIndex cannot see it, so a
+  // LOWER-WEIGHT recognised commit (often the closing `docs:` pass) wins instead, silently. Only
+  // meaningful on the composed path: `--message` replaces the subject outright.
+  if (!opts.message) {
+    const unweighted = squash.unweightedCommits(branchCommits(repoAbs, target, sess.branch));
+    if (unweighted.length) {
+      warn(`${unweighted.length} commit(s) on this branch carry no recognised Conventional Commit type`);
+      warn('  — invisible to the squash-subject ranking, however small the commit that wins instead:');
+      for (const c of unweighted) warn(`    ${String(c.sha || '').slice(0, 7)}  ${c.subject}`);
+      warn('  If one of these is the branch\'s real headline, re-word it to a recognised type, or ship');
+      warn('  with --message so the subject is not guessed.');
+    }
   }
   print('');
   print(table(checks.map((c) => [c[0], c[1], c[2]]), ['', 'PRECONDITION', 'DETAIL']));
@@ -4068,10 +4085,10 @@ function cmdShip(argv) {
 
   // ---- (d) B1: re-verify CI, then squash-merge into the target ----
   if (gh) {
-    let run2 = git.ghRunLatest(repoAbs, target);
+    let run2 = git.ghRunForSha(repoAbs, target);
     // Same fallback as the precondition: an ungated line borrows trunk's verdict rather than
     // blocking. The two must agree, or a ship passes the table and dies at the re-check.
-    if (run2 && run2.status === 'none' && target !== trunk) run2 = git.ghRunLatest(repoAbs, trunk);
+    if (run2 && run2.status === 'none' && target !== trunk) run2 = git.ghRunForSha(repoAbs, trunk);
     if (!(run2 && run2.status === 'completed' && run2.conclusion === 'success')) {
       cleanupEphemeral();
       process.stderr.write(`✗ B1: CI for ${target} is no longer green — aborting before merge. Nothing pushed.\n`);
@@ -4246,7 +4263,7 @@ function cmdShip(argv) {
 // ---------------------------------------------------------------------------
 // landed — "has this branch's work landed on its base?", the one shared answer.
 //
-// code-sweep sorts candidates into wrap / teardown-only / claim-only / blocked, and code-wrap
+// code-sweep sorts candidates into wrap / teardown-only / claim-only / blocked / unlinked, and code-wrap
 // Phase B decides the same thing for one branch. Both used to decide it by prose and judgement,
 // and the obvious rule (count the commits ahead) misreports every squash-merge — see lib/landed.js
 // for the measurement and for exactly what the rule does and does not cover.
@@ -4474,10 +4491,10 @@ function cmdPromote(argv) {
   let ciOk = false;
   if (!gh) checks.push(['✗', 'trunk CI green', 'gh not usable (no auth / no origin) — cannot confirm CI']);
   else {
-    const run = git.ghRunLatest(repoAbs, trunk);
+    const run = git.ghRunForSha(repoAbs, trunk);
     if (!run) checks.push(['✗', 'trunk CI green', 'gh run list failed']);
-    else if (run.status === 'completed' && run.conclusion === 'success') { ciOk = true; checks.push(['✓', 'trunk CI green', 'latest run success']); }
-    else checks.push(['✗', 'trunk CI green', `latest run status=${run.status} conclusion=${run.conclusion || 'none'} (fail-to-start counts as not green)`]);
+    else if (run.status === 'completed' && run.conclusion === 'success') { ciOk = true; checks.push(['✓', 'trunk CI green', `run for ${trunk}@${shortSha(run.sha)}: success`]); }
+    else checks.push(['✗', 'trunk CI green', `${trunk}@${shortSha(run.sha)}: status=${run.status} conclusion=${run.conclusion || 'none'} (fail-to-start counts as not green)`]);
   }
 
   const localTrunk = git.git(['rev-parse', trunk], repoAbs);
@@ -4629,6 +4646,8 @@ which of the two you are talking to.
 
 function print(s) { process.stdout.write(s.endsWith('\n') ? s : s + '\n'); return 0; }
 function warn(s) { process.stderr.write(`! ${s}\n`); }
+/** 7-char sha for a CI-verdict message, or '?' when `ghRunForSha` had none to report (#92). */
+function shortSha(sha) { return sha ? String(sha).slice(0, 7) : '?'; }
 
 function main(argv) {
   const cmd = argv[0];

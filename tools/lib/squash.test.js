@@ -16,7 +16,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 
 const squash = require('./squash.js');
-const { parseSubject, commitWeight, pickSubjectIndex, harvestTrailers, composeSquashMessage } = squash;
+const { parseSubject, commitWeight, unweightedCommits, pickSubjectIndex, harvestTrailers, composeSquashMessage } = squash;
 
 /** Commits are NEWEST-FIRST everywhere, matching `git log` order. */
 const c = (subject, body = '') => ({ subject, body });
@@ -94,6 +94,47 @@ test('a prefix-shaped word that is not a Conventional Commit type does not win',
   // "wip:" looks like a prefix but is not a type — it must not outrank a real feat.
   const commits = [c('wip: still poking at it'), c('feat: the actual change')];
   assert.strictEqual(composeSquashMessage(commits, []).split('\n')[0], 'feat: the actual change');
+});
+
+// --- #88: the ranking's blind spot — an unrecognised type is invisible, not merely low-weight ---
+//
+// #160 shipped titled `docs:` because its only real headline commit was typed `wip:`. `wip` was
+// never in the race against `docs` (weight 30) — it scored 0, same as no prefix at all — so a
+// LOWER-WEIGHT recognised commit won on merit while the branch's actual feature vanished from the
+// changelog. `unweightedCommits` exists so a caller (`colab ship`) can warn about exactly this
+// before it ships, not just discover it by reading trunk afterwards.
+
+test('unweightedCommits: the #88 regression, exactly — wip: outranked by docs: and invisible', () => {
+  const commits = [
+    c('docs(#160): the gate reads a CLOCK, not the delete scale'),
+    c('wip(#160): 🛟 Reload rescue — gate, dialog, executors, tests'),
+  ];
+  // docs wins the subject — this IS the bug, reproduced, so the warning helper has something to catch.
+  assert.strictEqual(composeSquashMessage(commits, []).split('\n')[0],
+    'docs(#160): the gate reads a CLOCK, not the delete scale');
+  const flagged = unweightedCommits(commits);
+  assert.strictEqual(flagged.length, 1);
+  assert.strictEqual(flagged[0].subject, 'wip(#160): 🛟 Reload rescue — gate, dialog, executors, tests');
+});
+
+test('unweightedCommits: a fully-conventional branch flags nothing', () => {
+  assert.deepStrictEqual(unweightedCommits([c('feat: a thing'), c('docs: tidy')]), []);
+});
+
+test('unweightedCommits: no-prefix-at-all commits are flagged too — same blind spot, different shape', () => {
+  const commits = [c('feat: a thing'), c('fixed the bug, oops')];
+  assert.strictEqual(unweightedCommits(commits).length, 1);
+  assert.strictEqual(unweightedCommits(commits)[0].subject, 'fixed the bug, oops');
+});
+
+test('unweightedCommits: chore(sync) merge noise is never flagged — it has its own name for what it is', () => {
+  const commits = [c('chore(sync): merge main into the branch'), c('feat: a thing')];
+  assert.deepStrictEqual(unweightedCommits(commits), []);
+});
+
+test('unweightedCommits: empty input is empty output', () => {
+  assert.deepStrictEqual(unweightedCommits([]), []);
+  assert.deepStrictEqual(unweightedCommits(undefined), []);
 });
 
 test('chore(sync) merge noise never titles a squash and never becomes a bullet', () => {

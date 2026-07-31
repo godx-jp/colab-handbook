@@ -82,6 +82,31 @@ function commitWeight(commit) {
 }
 
 /**
+ * Commits whose weight is 0, excluding sync-merge noise (#88). Two shapes land here, and both are
+ * the SAME finding `commitWeight`'s comment already names: the type will never win the subject and
+ * will never head a changelog entry titled by it.
+ *
+ *   - no Conventional Commit shape at all ("fixed the thing")
+ *   - a shape that isn't a recognised type — `wip:`, `spike:` — which is the more dangerous of the
+ *     two, because it LOOKS finished. `pickSubjectIndex` cannot tell "this branch has no signal"
+ *     (falls back to newest, harmlessly) apart from "this branch's real headline is invisible to
+ *     the ranking" (a lower-weight RECOGNISED commit wins instead, silently) — both just read as
+ *     weight 0. #88 Case 1 is exactly this: a branch shipping a convention plus +104 lines of
+ *     CONVENTIONS.md landed titled `fix(labels): correct mechanical-readiness tests…`, because its
+ *     only commit describing the deliverable was typed `wip:`. The incidental `fix` (weight 60) won
+ *     over nothing rather than over the headline — the `wip` commit was never in the race.
+ *
+ * Named for a caller to WARN with, not to decide with — `pickSubjectIndex` already resolves ties
+ * and fallbacks correctly on its own terms; this only surfaces the blind spot at ship time instead
+ * of only at changelog-reading time, which is CONVENTIONS.md §4 undetected until now.
+ */
+function unweightedCommits(commits) {
+  return (Array.isArray(commits) ? commits : [])
+    .filter((c) => c && !isSyncNoise(c.subject))
+    .filter((c) => commitWeight(c) === 0);
+}
+
+/**
  * Index of the commit whose subject should title the squash. `commits` is NEWEST-FIRST (git log
  * order).
  *
@@ -312,6 +337,6 @@ function spliceCloses(message, closes = [], refs = [], conflicts) {
 
 module.exports = {
   TYPE_WEIGHT, BREAKING_BONUS, TRAILER_RE,
-  isSyncNoise, parseSubject, commitWeight, pickSubjectIndex, harvestTrailers, composeSquashMessage,
-  spliceCloses, reconcileClosesRefsConflict,
+  isSyncNoise, parseSubject, commitWeight, unweightedCommits, pickSubjectIndex, harvestTrailers,
+  composeSquashMessage, spliceCloses, reconcileClosesRefsConflict,
 };
