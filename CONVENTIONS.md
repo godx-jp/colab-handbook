@@ -119,7 +119,11 @@ specific to `deploy: tag`: `manual` and `push-main` have no tag to mark the boun
 so they keep the `dev`/`main` split. Wherever the deploy runs outside CI — a `manual`
 hand-deploy or a `tag` deployed by an external poller — the path to production must be
 committed as a [`runbook:`](project.schema.md#runbook--required-when-an-out-of-ci-deploy-has-no-workflow),
-since no workflow file records it.
+since no workflow file records it. **Name that release branch in
+[`releaseBranch:`](project.schema.md#releasebranch--optional)** — between releases
+it is, by construction, an ancestor of trunk, which reads identically to a spent
+session branch to any check reasoning from ancestry alone; undeclared, `colab
+doctor` misreads it as safe to delete (issue #63).
 
 **Tier C exists because a tag ritual nobody honours is worse than no tag ritual.** A
 live but low-stakes site — a brochure page, an internal dashboard — gains nothing from
