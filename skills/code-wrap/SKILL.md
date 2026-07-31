@@ -230,7 +230,7 @@ Shipping a line-based branch into trunk would drag the whole line in behind it i
 one squash commit.
 
 ```sh
-colab worktrees --json     # this worktree's .base — trunk if it has none
+colab worktrees --json     # .worktrees["<name>"].base — trunk if it has none (shape: #67)
 ```
 
 **Then ask whether there is anything left to ship:**

@@ -89,14 +89,18 @@ gh issue list --label in-progress
 ```
 
 ⚠️ **`colab worktrees` and `colab claims` list the whole machine.** Scope them, or
-the sweep will start wrapping another project's work. Filter by repo:
+the sweep will start wrapping another project's work. Filter by repo — note the
+JSON shape is `{"worktrees": {...}, "unrecorded": [...]}`, not a bare map (#67):
 
 ```sh
 REPO="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
 colab worktrees --json | python3 -c 'import json,sys,os
 r=os.path.realpath(sys.argv[1])
-for w in json.load(sys.stdin).values():
-    if os.path.realpath(w["repo"])==r: print(w["name"], w["branch"], w.get("status",""))' "$REPO"
+d=json.load(sys.stdin)
+for w in d["worktrees"].values():
+    if os.path.realpath(w["repo"])==r: print(w["name"], w["branch"], w.get("status",""))
+for u in d["unrecorded"]:
+    if os.path.realpath(u["repo"])==r: print("UNRECORDED", u["branch"], u["path"])' "$REPO"
 ```
 
 ⚠️ **The anchor is the main checkout, not `$PWD`.** `colab` records every worktree and
@@ -105,6 +109,21 @@ nothing — and the sweep reports a clean repo because it enumerated an empty li
 the worst possible failure here: "found nothing" wearing the face of "nothing to find"
 (§1.1 rule 3 exists for the same confusion arriving by a different road). `dirname` of the
 common git dir yields the main checkout from anywhere in the repo.
+
+### 1.2 `unrecorded` rows are candidates too — never drop them for lack of a bucket
+
+**Before #67, this enumeration was `colab worktrees`'s bare state.json read — so a directory
+on disk with no record (hand-created, or a husk left by an interrupted `worktree rm`, #62)
+was invisible here, and the §3 completeness check couldn't notice: it compares buckets
+derived from the same list that omitted the row.** `colab worktrees` now reconciles against
+`git worktree list` itself, so `unrecorded` entries surface with the rest — treat every one
+of them as a candidate to sort in §3, exactly like a recorded worktree, never as noise to
+skip because it has no ISSUES column.
+
+A row here has no claim, no ports, and — the case that motivated #67 — sometimes no
+claimable issue *in this repo at all* (a branch whose issue numbers belong to a different
+repo's tracker). That is a real, distinct shape, not a defect in the filter: see §3's
+`unrecorded` bucket for what to do with it.
 
 ### 1.1 Scoped mode — sweep a subset, and say that you did
 
@@ -198,17 +217,53 @@ what state the work is *in*; `in-progress` says someone *believes they hold it*.
 disagree in both directions — claims outliving finished work, finished work never
 claimed — and the label remains the veto before any teardown.
 
-## 3. Sort into four buckets — each gets a different action
+## 3. Sort into five buckets — each gets a different action
 
 | Bucket | What it looks like | Action |
 |---|---|---|
 | **wrap** | `cargo` (or `unknown`) — content NOT on its base | full [`code-wrap`](../code-wrap/SKILL.md) |
 | **teardown-only** | `landed` — content already on its base, worktree lingering | remove worktree, release claims, close issues with evidence |
 | **claim-only** | no worktree; `in-progress` on work already shipped | release the claim, close the issue with evidence |
+| **unrecorded** | on disk, `colab worktrees`'s `unrecorded` list — no claim, no ports | **report only** — see below, never `code-wrap` |
 | **blocked** | uncommitted tracked work, or genuinely unfinished | **report — never force** |
 
 `teardown-only` is the common case and the most skipped. It is also the cheapest, so
 do these first — they shrink the list before you start the expensive ones.
+
+### `unrecorded` — a worktree colab never held a claim for
+
+This bucket exists because #67 measured the alternative: an unrecorded worktree used to have
+nowhere to go, so it went nowhere — invisible to enumeration, absent from every bucket, and the
+completeness check agreed there was nothing to check. It is deliberately **not** folded into
+`blocked`: `blocked` means "known work, human judgement needed"; this means "colab has no record
+to act on at all" — a different reason to stop, worth naming as such.
+
+**Never run `code-wrap` on one.** Every phase of `code-wrap` assumes a claimed issue and a
+recorded worktree — B1's harvest reads the claim registry, B3 releases claims, B4 tears down a
+worktree `colab` knows about. None of that exists here, so a full wrap does not degrade
+gracefully; it errors, or worse, silently does nothing where you expected it to act.
+
+Read the verdict `colab worktrees` already computed (§1.2) and act by hand:
+
+- **`landed vs <trunk>`** → the content shipped by some other route (a prior session's
+  interrupted wrap, or a #62-style husk). Confirm with `colab landed --repo <repo> --branch
+  <branch>`, then `git worktree remove <path>` (`--force` if git objects, not tracked files,
+  uncommitted) and `git branch -D <branch>`. No claim to release, no ports to free.
+- **`cargo` / `unknown vs <trunk>`** → genuine unmerged content with no claim behind it. Do
+  **not** guess ownership from the branch name alone. Check whether the branch's issue numbers
+  belong to *this* repo's tracker (`gh issue view <N>` — 404 or a title that makes no sense means
+  they don't) or, per #67's own case, to a **different** repo's tracker entirely — that shape has
+  no issue here to harvest, close, or post evidence on, so `code-wrap`'s `Closes #N` step has
+  nothing to close even if you ran it. Report it and leave it; claiming it into this repo would be
+  inventing an issue number that was never this repo's to begin with.
+- **`detached HEAD`** or **`IS <trunk> — should not be a linked worktree`** → structurally odd
+  regardless of content; report, do not guess intent.
+
+**What bucket "cargo with no claimable issue in this repo" belongs in past this first report is
+still an open convention question (#67's point 3) — this section covers the mechanical minimum
+(don't lose it, don't silently wrap it, don't misattribute it), not the eventual policy for
+routing it. If you find yourself resolving the same shape repeatedly, that is a signal the
+convention decision is overdue, not a cue to improvise one per sweep.**
 
 ```sh
 colab worktree rm <name>       # releases its claims and frees its ports
@@ -278,11 +333,12 @@ Worktrees are only half of it. Also:
 ## 6. Report
 
 ```
-swept 4, left 2
+swept 4, left 3
 
 wrapped         fix/import-115-114-113   → trunk a1b2c3d, #115 #114 closed, #113 split
 teardown-only   feat/console-shell-28    → content already on trunk, worktree removed
 claim-only      #26                      → shipped in e4f5g6h, claim released
+unrecorded      .worktrees/orphan-1      → landed vs main, no claim — removed by hand
 blocked         feat/session-types-26    → 3 uncommitted tracked files — needs a human
 blocked         #58                      → trunk CI dead (billing), cannot merge
 ```
@@ -310,9 +366,12 @@ still blocked: trunk CI dead (billing), since 2026-07-21T11:40Z
 
 ## Verify complete
 
-- Every worktree in this repo is in exactly one bucket — none silently skipped. In a
-  scoped run, every worktree is either in a bucket or named as out of scope; "not
-  selected" is a stated outcome, never an omission.
+- Every worktree in this repo is in exactly one bucket — none silently skipped, **including
+  `unrecorded` rows** (§1.2): `colab worktrees`'s own git-vs-record reconciliation is what makes
+  this checkable at all (#67 — before it, an unrecorded worktree was missing from both the
+  enumeration and the buckets, so this line could never actually fail). In a scoped run, every
+  worktree is either in a bucket or named as out of scope; "not selected" is a stated outcome,
+  never an omission.
 - A scoped run reported `N of M`, restricted §5 to the selection, and did not run
   `doctor --prune`.
 - A selector that matched nothing said so — not "swept 0".

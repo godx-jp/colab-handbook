@@ -101,6 +101,37 @@ function worktreeList(repo) {
     .map((l) => l.slice('worktree '.length));
 }
 
+/**
+ * `git worktree list --porcelain`, parsed per-block instead of flattened — a caller that needs
+ * "which branch is checked out at THIS path" (not just "is this branch checked out somewhere")
+ * needs the path/branch pairing, which a flat line-filter throws away. Returns
+ * `[{path, branch, detached, bare}]`; `branch` is null for a detached or bare entry.
+ *
+ * Ground truth for what worktrees actually exist, independent of anyone's record of them — see
+ * `worktreeList` above for the flat form, kept because `shippedBranches` only ever needed "is this
+ * branch checked out anywhere" and a block parse would be pure overhead there.
+ */
+function worktreeListDetailed(repo) {
+  const r = git(['worktree', 'list', '--porcelain'], repo);
+  if (!r.ok) return [];
+  const out = [];
+  let cur = null;
+  for (const line of r.stdout.split('\n')) {
+    if (line.startsWith('worktree ')) {
+      if (cur) out.push(cur);
+      cur = { path: line.slice('worktree '.length), branch: null, detached: false, bare: false };
+    } else if (cur && line.startsWith('branch ')) {
+      cur.branch = line.slice('branch '.length).replace(/^refs\/heads\//, '');
+    } else if (cur && line === 'detached') {
+      cur.detached = true;
+    } else if (cur && line === 'bare') {
+      cur.bare = true;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
 /** Tracked (non-untracked) uncommitted changes in a worktree, or '' if clean. */
 function dirtyTracked(wtPath) {
   const r = git(['status', '--porcelain'], wtPath);
@@ -188,7 +219,8 @@ function ghAssignedIssues(repo) {
 }
 
 module.exports = {
-  run, git, repoRoot, mainRepoRoot, originUrl, detectTrunk, branchExists, worktreeList, dirtyTracked,
+  run, git, repoRoot, mainRepoRoot, originUrl, detectTrunk, branchExists,
+  worktreeList, worktreeListDetailed, dirtyTracked,
   ghAvailable, ghIssueEdit, ghListLabels, ghAssignedIssues,
   ghCurrentLogin, ghIssueView, ghIssueComment, ghRunLatest,
 };

@@ -985,6 +985,14 @@ dependency symlinking, dev-server restarts) live in OPTIONAL repo hooks, not her
       never inferred from the name; absent stays "unknown".
 
   colab worktrees [--json]     list worktrees with their claims and ports
+      Also reconciles against \`git worktree list\` for every repo colab has a record in (plus the
+      current repo): a directory on disk with NO colab record (hand-created, or a husk left by an
+      interrupted \`worktree rm\`, #62) is reported separately — never silently absent. #67: a
+      worktree missing from this enumeration was invisible to code-sweep too, since it reads this
+      command; ground truth is now git, not state.json.
+      --json emits \`{"worktrees": {...}, "unrecorded": [...]}\` — NOT a bare worktrees map (breaking
+      shape change, #67; nothing in this repo consumed the old bare-map shape besides this CLI's own
+      skills, which were updated in the same change).
 
 HOOKS (optional, provided by the adopting repo):
   <repo>/.colab/hooks/post-create   run after worktree creation (if present & executable)
@@ -1343,27 +1351,96 @@ function cmdWorktree(argv) {
   return print(HELP_WORKTREE);
 }
 
+/**
+ * Worktree directories that exist on git's ground truth but carry NO colab record — issue #67.
+ *
+ * `colab worktrees` used to be a straight read of state.json, so a directory `git worktree add`
+ * created by hand, or a partially-torn-down `worktree rm` (#62 husk), was invisible to it — and
+ * therefore invisible to `code-sweep`'s enumeration, which reads exactly this command. A worktree
+ * missing from BOTH the enumeration and the record sails straight through the sweep's own "every
+ * worktree is in exactly one bucket" completeness check, because that check is evaluated against
+ * the same record-derived list that produced the buckets: nothing to compare against, nothing to
+ * flag. `colab landed --all` has the identical blind spot — it iterates `st.worktrees` too.
+ *
+ * Ground truth (`git worktree list`) is authoritative for *what exists*; the record store only
+ * ever ADDS claims/ports/session identity on top. So this reconciles git → records, never the
+ * other direction, and reports what git knows that the records don't — never the reverse (a
+ * record naming a vanished directory is `doctor`'s job, already handled there).
+ *
+ * Scoped to repos colab already has *some* record for (from `st.worktrees`), plus the current repo
+ * if run from inside one — the same repo set `knownRepos` aggregates reserved ports from. A repo
+ * colab has never heard of has no claims or ports to drift against in the first place, and walking
+ * an arbitrary filesystem for stray `.git` files is a different, much more expensive command.
+ */
+function unrecordedWorktrees(st) {
+  const repos = new Set();
+  for (const wt of Object.values(st.worktrees)) if (wt.repo) repos.add(wt.repo);
+  const cur = git.mainRepoRoot(process.cwd());
+  if (cur) repos.add(cur);
+
+  const recordedPaths = new Set(
+    Object.values(st.worktrees).map((w) => w.path && path.resolve(w.path)).filter(Boolean),
+  );
+
+  const out = [];
+  for (const repo of repos) {
+    if (!repo || !fs.existsSync(repo) || !git.repoRoot(repo)) continue;
+    for (const w of git.worktreeListDetailed(repo)) {
+      if (w.bare) continue;
+      const abs = path.resolve(w.path);
+      if (abs === path.resolve(repo)) continue; // the main checkout itself, never a candidate
+      if (recordedPaths.has(abs)) continue;
+      out.push({ repo, path: abs, branch: w.branch, detached: w.detached });
+    }
+  }
+  return out;
+}
+
 function cmdWorktrees(argv) {
   const opts = parseArgs(argv, { flags: { '--json': 'json', '-h': 'help', '--help': 'help' } });
   if (opts.help) return print(HELP_WORKTREE);
   const st = state.loadState();
-  if (opts.json) { print(JSON.stringify(st.worktrees, null, 2)); return 0; }
+  const unrecorded = unrecordedWorktrees(st);
+  if (opts.json) { print(JSON.stringify({ worktrees: st.worktrees, unrecorded }, null, 2)); return 0; }
   const wts = Object.values(st.worktrees);
-  if (wts.length === 0) { print('No worktrees.'); return 0; }
-  const rows = wts.map((wt) => {
-    const claims = Object.values(st.claims).filter((c) => c.worktree === wt.name).map((c) => c.issue).join(' ') || '-';
-    const alive = wt.path ? (fs.existsSync(wt.path) ? 'yes' : 'MISSING') : 'n/a';
-    // A non-trunk base is shown inline rather than in its own column: it is rare, and a worktree
-    // that ships somewhere other than trunk must not look identical to one that does. Read from
-    // project.yml directly — resolveTrunk's origin/HEAD fallback can hit the network, and listing
-    // worktrees must stay a local, instant command.
-    const doc = projectDoc(wt.repo);
-    const declaredTrunk = doc && doc.trunk ? String(doc.trunk) : '';
-    const branchCell = wt.base && declaredTrunk && wt.base !== declaredTrunk ? `${wt.branch} → ${wt.base}` : wt.branch;
-    return [wt.name, shortRepo(wt.repo), branchCell, wt.ports.join(',') || '-', claims, wtStatus(wt), identityCell(wt.sessionName, wt.session), alive];
-  });
-  print(table(rows, ['NAME', 'REPO', 'BRANCH', 'PORTS', 'ISSUES', 'STATUS', 'SESSION', 'ON-DISK']));
-  identityLegend(wts);
+  if (wts.length === 0 && unrecorded.length === 0) { print('No worktrees.'); return 0; }
+  if (wts.length) {
+    const rows = wts.map((wt) => {
+      const claims = Object.values(st.claims).filter((c) => c.worktree === wt.name).map((c) => c.issue).join(' ') || '-';
+      const alive = wt.path ? (fs.existsSync(wt.path) ? 'yes' : 'MISSING') : 'n/a';
+      // A non-trunk base is shown inline rather than in its own column: it is rare, and a worktree
+      // that ships somewhere other than trunk must not look identical to one that does. Read from
+      // project.yml directly — resolveTrunk's origin/HEAD fallback can hit the network, and listing
+      // worktrees must stay a local, instant command.
+      const doc = projectDoc(wt.repo);
+      const declaredTrunk = doc && doc.trunk ? String(doc.trunk) : '';
+      const branchCell = wt.base && declaredTrunk && wt.base !== declaredTrunk ? `${wt.branch} → ${wt.base}` : wt.branch;
+      return [wt.name, shortRepo(wt.repo), branchCell, wt.ports.join(',') || '-', claims, wtStatus(wt), identityCell(wt.sessionName, wt.session), alive];
+    });
+    print(table(rows, ['NAME', 'REPO', 'BRANCH', 'PORTS', 'ISSUES', 'STATUS', 'SESSION', 'ON-DISK']));
+    identityLegend(wts);
+  } else {
+    print('No recorded worktrees.');
+  }
+  if (unrecorded.length) {
+    print('');
+    print(`⚠ ${unrecorded.length} worktree(s) on disk with NO colab record (git ground truth vs state.json):`);
+    for (const u of unrecorded) {
+      const doc = projectDoc(u.repo);
+      const trunk = resolveTrunk(u.repo, doc);
+      let verdict = 'unknown — no trunk resolvable';
+      if (u.detached) verdict = 'detached HEAD';
+      else if (trunk && u.branch && u.branch !== trunk) {
+        const v = landed.landedState(u.repo, trunk, u.branch);
+        verdict = `${v.state} vs ${trunk}`;
+      } else if (trunk && u.branch === trunk) verdict = `IS ${trunk} — should not be a linked worktree`;
+      print(`  ${shortRepo(u.repo)}  ${u.path}  branch=${u.branch || '(none)'}  ${verdict}`);
+    }
+    print('  No claim to release, no ports to free, no issue in this repo to close — nothing here is');
+    print('  auto-actioned. Investigate ownership by hand, then `git worktree remove` (+ `git branch -D`');
+    print('  if landed) once you know it is spent. See CONVENTIONS.md / code-sweep SKILL.md §3 for the');
+    print('  bucket this belongs in.');
+  }
   return 0;
 }
 
@@ -1373,7 +1450,11 @@ function cmdWorktrees(argv) {
 
 const HELP_DOCTOR = `colab doctor [--prune] [--ttl <hours>] [--json]
 
-Health-check the machine-local state and heal drift.
+Health-check the machine-local state and heal drift. This is the RECORD-points-nowhere
+direction; the mirror direction — a directory that exists with NO record — is reported by
+\`colab worktrees\` itself (its "unrecorded" section, #67), not here: doctor's fixes read and
+write colab's OWN state, and a directory with no record has no state entry to prune ports or
+claims from.
   - A worktree whose directory no longer exists on disk is DEAD: its claims are pruned
     and its ports freed (--prune actually removes; default only reports).
   - Claims referencing a worktree that isn't in state are orphans (same treatment).
