@@ -1,6 +1,6 @@
 ---
 name: code-sweep
-description: "Clear out everything finished in ONE repo: find every worktree whose work has landed, every issue whose code shipped but is still open, and every claim outliving its session — then put each through code-wrap, one at a time. Run it at end of day, or ping it whenever a session goes idle — a no-change ping short-circuits in three calls. Sorts candidates into wrap / teardown-only / claim-only / blocked, because most do not need a full wrap. Can be scoped to a set of issues or one session/worktree instead of the whole repo. Trigger phrases: 'sweep the repo', 'wrap everything finished', 'clean up the worktrees', 'close out the session work', 'tidy up finished work', 'wrap all the done branches', 'sweep the issues #95 #96', 'sweep the session <name>', 'ship these'; and — when this session's last act was a sweep — the re-ping forms 'again', 'anything new?', 'check again', 'anything to wrap yet?', or a bare 'go'. Uses code-wrap per candidate; never batches merges."
+description: "Clear out everything finished in ONE repo: find every worktree whose work has landed, every issue whose code shipped but is still open, and every claim outliving its session — then put each through code-wrap, one at a time. Run it at end of day, or ping it whenever a session goes idle — a no-change ping short-circuits in three calls. Sorts candidates into wrap / teardown-only / claim-only / unrecorded / blocked / unlinked, because most do not need a full wrap. Can be scoped to a set of issues or one session/worktree instead of the whole repo. Trigger phrases: 'sweep the repo', 'wrap everything finished', 'clean up the worktrees', 'close out the session work', 'tidy up finished work', 'wrap all the done branches', 'sweep the issues #95 #96', 'sweep the session <name>', 'ship these'; and — when this session's last act was a sweep — the re-ping forms 'again', 'anything new?', 'check again', 'anything to wrap yet?', or a bare 'go'. Uses code-wrap per candidate; never batches merges."
 ---
 
 # code-sweep — clear out everything finished, one at a time
@@ -217,15 +217,16 @@ what state the work is *in*; `in-progress` says someone *believes they hold it*.
 disagree in both directions — claims outliving finished work, finished work never
 claimed — and the label remains the veto before any teardown.
 
-## 3. Sort into five buckets — each gets a different action
+## 3. Sort into six buckets — each gets a different action
 
 | Bucket | What it looks like | Action |
 |---|---|---|
-| **wrap** | `cargo` (or `unknown`) — content NOT on its base | full [`code-wrap`](../code-wrap/SKILL.md) |
+| **wrap** | `cargo` (or `unknown`), **and** at least one claimed issue | full [`code-wrap`](../code-wrap/SKILL.md) |
 | **teardown-only** | `landed` — content already on its base, worktree lingering | remove worktree, release claims, close issues with evidence |
 | **claim-only** | no worktree; `in-progress` on work already shipped | release the claim, close the issue with evidence |
 | **unrecorded** | on disk, `colab worktrees`'s `unrecorded` list — no claim, no ports | **report only** — see below, never `code-wrap` |
 | **blocked** | uncommitted tracked work, or genuinely unfinished | **report — never force** |
+| **unlinked** | `cargo` (or `unknown`), **zero** claimed issues | **report — do not wrap** (#92) |
 
 `teardown-only` is the common case and the most skipped. It is also the cheapest, so
 do these first — they shrink the list before you start the expensive ones.
@@ -264,6 +265,26 @@ still an open convention question (#67's point 3) — this section covers the me
 (don't lose it, don't silently wrap it, don't misattribute it), not the eventual policy for
 routing it. If you find yourself resolving the same shape repeatedly, that is a signal the
 convention decision is overdue, not a cue to improvise one per sweep.**
+
+### `unlinked` — cargo whose issue numbers are nobody's here
+
+**`unlinked` is its own bucket, not a subset of `wrap` (#92).** `colab worktrees`
+enumerates by worktree, not by issue, so a branch with real unlanded commits and no
+issue attached still surfaces at §1 — it is not invisible. But wrapping it the normal
+way is the wrong action even though `landed` reports `cargo`: `--issues` is empty,
+so the squash carries no `Closes #N`, B2c's evidence-posting step has nothing to post
+to, and the branch content can be *better* than whatever DID ship (a genuine measured
+case: a one-line fix stranded this way outclassed the fix that landed through a
+different door — the residue is not clutter). Do not silently fold this case into
+`wrap` on the theory that "cargo → wrap" always holds; the theory holds only when a
+`Closes #N` is possible. Do not silently drop it either — an un-named residue class is
+how a better patch sits unreachable indefinitely while a worse one ships.
+
+Report it and stop there. Two reasonable next steps exist and this skill does not
+choose between them: file (or reopen) an issue for the branch so it becomes an
+ordinary `wrap` candidate next sweep, or leave it named so a human decides. Never
+open the issue automatically — that is a judgement call about what the branch is
+*for*, which this skill has no way to make from git state alone.
 
 ```sh
 colab worktree rm <name>       # releases its claims and frees its ports
@@ -341,6 +362,7 @@ claim-only      #26                      → shipped in e4f5g6h, claim released
 unrecorded      .worktrees/orphan-1      → landed vs main, no claim — removed by hand
 blocked         feat/session-types-26    → 3 uncommitted tracked files — needs a human
 blocked         #58                      → trunk CI dead (billing), cannot merge
+unlinked        fix/railquiet-fixture-trunk-red → 1 commit ahead of trunk, no issue claimed — not wrapped, not dropped
 ```
 
 Say what you left and why. A worktree kept for a stated reason is fine; a worktree
