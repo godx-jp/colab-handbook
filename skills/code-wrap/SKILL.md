@@ -103,6 +103,14 @@ there. So the counter-pressure has to be here:
 - **This is not licence to distill less.** The content is worth keeping — location
   and unboundedness are what's wrong. Move it; never drop it.
 
+This paragraph used to be enforcement-by-prose only, and that failed silently: a repo
+was measured at 112,382 bytes / 197 lines — the line count read as healthy while one
+"pointer" row alone had grown to 68,350 bytes (60.8% of the file), because nothing
+mechanical was watching bytes. `audit/audit.mjs` now flags this — a `CLAUDE.md` over
+~40 KB, or any single physical line more than 6x the file's median and over 2 KB — as
+an advisory (`audit/README.md`, #64). It is a starting-point threshold, not a hard
+gate, but it means a session no longer has to catch this by eye.
+
 #### A *new rule* is a follow-up unit, not a line in this session's diff
 
 A2 covers docs your work made **wrong** — the domain moved, the deploy changed, a

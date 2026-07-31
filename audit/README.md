@@ -117,6 +117,20 @@ the handbook's current version, so a scheduled run is self-documenting.
   rewrite a copy that is provably pristine, and refuses to touch a hand-edited one. See
   `tools/README.md`.
 
+- **`CLAUDE.md` size (#64)** — code-wrap's A2 rule ("router, not an archive") was
+  prose-only, and its own worst-case citation is framed in *lines*, which is blind to
+  the failure that actually occurs: a single "pointer" line growing into a full copy of
+  the doc it points at. Two independent, advisory (⚠→`warn`, never `fail`) checks:
+  - **Whole-file byte ceiling** — `CLAUDE.md` over 40 KB. It is loaded in full into
+    every session before any work starts.
+  - **Per-line ceiling** — any single physical line more than 6x the file's own median
+    line **and** over 2048 bytes. That combination (relative *and* absolute) is the
+    "pointer became a copy" signature, and it is format-agnostic: a bullet-list router
+    trips it exactly like a markdown table does, because it scans physical lines, not
+    table syntax.
+  Both thresholds are explicitly a starting point offered by the issue for calibration
+  across adopting repos, not a settled gate — hence `warn`, not `fail`.
+
 `stack` is intentionally **not** validated — it is a free-form string now.
 
 ## The repo list — resolution order

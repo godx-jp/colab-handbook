@@ -721,6 +721,11 @@ function auditRepo(target, ctx) {
     }
   }
 
+  // ---- CLAUDE.md is a router, not an archive (#64) -------------------------
+  // Unconditional: this is a repo-doc concern, not a tier/deploy one, and it applies to
+  // the handbook's OWN CLAUDE.md too (not a stamp check, so it is not gated on !isSelf).
+  checkClaudeMdSize(src, warn);
+
   // ---- deploy workflow presence -------------------------------------------
   const workflows = src.listDir(".github/workflows").filter((f) => /\.ya?ml$/.test(f));
   const deployWorkflows = workflows.filter((f) => /^deploy[-.]/.test(f));
@@ -994,6 +999,57 @@ function checkReleaseBranch(cfg, trunk, branches, fail, warn, deploy) {
     warn(`releaseBranch "${b}" is declared but deploy is ${JSON.stringify(deploy)} — this field only means something for deploy: tag (an external poller fast-forwarding it on release)`);
   }
   return b;
+}
+
+// `CLAUDE.md` is the router (code-wrap A2), loaded in full into EVERY session before any
+// work starts. Issue #64: A2's rule was prose-only, and its own worst-case citation is
+// framed in LINES — which is structurally blind to the failure that actually occurred. A
+// repo audited clean at 197 lines carried 112,382 bytes because a single "pointer" row had
+// grown into a hand-maintained paraphrase of the whole document it was meant to point at:
+// 68,350 bytes, 60.8% of the file, 9.3x the next-largest row. Because CLAUDE.md sits in the
+// cached prompt PREFIX, that cost is paid on every TURN of every session, not once per
+// session — a byte ceiling on the whole file catches the aggregate, and a per-LINE ceiling
+// catches the specific signature: one physical line ballooning while nothing else grows.
+//
+// Deliberately NOT scoped to markdown table rows: a repo that routes with a bullet list
+// (`- docs/x.md — one line`) carries the identical risk if one bullet's line balloons, and
+// scanning physical lines catches both shapes without assuming either.
+//
+// Both thresholds are WARN, not FAIL. The issue that proposed them offered the numbers "as
+// a starting point rather than a recommendation", wanting calibration across adopting repos
+// before anything here becomes a hard gate — the goal is a finding with the measured number
+// ("state the condition"), not a build-breaking assertion of a still-uncalibrated one.
+const CLAUDE_MD_MAX_BYTES = 40 * 1024; // near the handbook's own cited worst case (39 KB / 452 lines)
+const CLAUDE_MD_LINE_MULTIPLE = 6; // "some small multiple of the [file's] median row"
+const CLAUDE_MD_LINE_ABS_FLOOR = 2048; // below this, flagging on multiple alone is noise (tiny medians make everything look huge)
+
+function checkClaudeMdSize(src, warn) {
+  const text = src.readFile("CLAUDE.md");
+  if (text === null) return; // no CLAUDE.md here — a separate concern (project.yml already covers "undescribed")
+
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > CLAUDE_MD_MAX_BYTES) {
+    warn(
+      `CLAUDE.md is ${bytes} bytes (~${(bytes / 1024).toFixed(1)} KB) — over the ${CLAUDE_MD_MAX_BYTES / 1024} KB ` +
+      `advisory ceiling (#64). It is loaded in full into every session before any work starts; if the ` +
+      `knowledge belongs in docs/, the CLAUDE.md change is a pointer, not a copy (code-wrap A2)`,
+    );
+  }
+
+  // Median over non-empty PHYSICAL lines — a monster line is one that never wrapped, so a
+  // line-count-based reader (like A2's own cited metric) never sees it either.
+  const lens = text.split(/\r?\n/).filter((l) => l.length > 0).map((l) => Buffer.byteLength(l, "utf8")).sort((a, b) => a - b);
+  if (lens.length < 2) return; // no meaningful median from 0 or 1 lines
+  const median = lens[Math.floor(lens.length / 2)];
+  const worst = lens[lens.length - 1];
+  if (median > 0 && worst > CLAUDE_MD_LINE_ABS_FLOOR && worst > median * CLAUDE_MD_LINE_MULTIPLE) {
+    const pct = ((worst / bytes) * 100).toFixed(1);
+    warn(
+      `CLAUDE.md has a single line of ${worst} bytes — ${(worst / median).toFixed(1)}x the file's median line ` +
+      `(${median} bytes), ${pct}% of the whole file (#64). That is the "pointer became a copy" signature: a ` +
+      `router line should name where the depth lives, not reproduce it`,
+    );
+  }
 }
 
 // `deploy: manual` promises that the hand-deploy procedure is written down and findable.
