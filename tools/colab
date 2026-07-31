@@ -2955,17 +2955,37 @@ function newMigrations(mainRoot, trunk, branch) {
 }
 
 /**
- * Read the branch's non-merge commits (newest-first) as {subject, body} records.
+ * Read commits the branch itself contributed (newest-first) as {subject, body} records.
  *
  * Split out from message composition on purpose: this half touches git, the other half is pure and
  * lives in lib/squash.js where CI can unit-test it. `tools/colab` has no test harness, which is how
  * the "newest commit titles the squash" bug survived long enough to reach a published tag.
+ *
+ * TWO THINGS THIS MUST NOT DO, both found live (#57):
+ *
+ * 1. Walk `--first-parent` from the merge-base, not the full ancestry of `<trunk>..<branch>`. A
+ *    plain ancestry diff cannot tell "this session wrote it" from "this session merged it in" — a
+ *    commit pulled in from an unrelated branch via `git merge` sits in the same range as the
+ *    branch's own work and, if it carries a higher-weight prefix, silently wins the subject. The
+ *    first-parent chain is the cheap approximation that excludes it: only commits reached by
+ *    walking the branch's own sequence of commits count, not ones that arrived as a merge's other
+ *    side.
+ * 2. Never substitute the branch's TIP for an empty result. The previous code did exactly that —
+ *    `shas.length ? shas : [rev-parse branch]` — reasoning that an empty `git log` meant something
+ *    had gone wrong and a fallback commit was safer than none. But an empty range is not always a
+ *    failure: a freshly-cut branch with no commits of its own produces one too, correctly, and the
+ *    "fallback" then grabs whatever commit sits at the branch's tip — which, having no commits of
+ *    its own, IS the base's tip: a commit some other, earlier session wrote. Observed live wrapping
+ *    the record-validation work, where a freshly-cut branch dry-ran with a squash subject borrowed
+ *    from its base. An empty result is now left empty; the caller decides what to say about it
+ *    (buildSquashMessage below), rather than this layer inventing a commit to hide it.
  */
 function branchCommits(mainRoot, trunk, branch) {
-  const logShas = git.git(['log', `${trunk}..${branch}`, '--no-merges', '--format=%H'], mainRoot);
+  const mb = git.git(['merge-base', trunk, branch], mainRoot);
+  const base = mb.ok && mb.stdout ? mb.stdout : trunk;
+  const logShas = git.git(['log', '--first-parent', `${base}..${branch}`, '--no-merges', '--format=%H'], mainRoot);
   const shas = logShas.ok ? logShas.stdout.split('\n').filter(Boolean) : [];
-  const list = shas.length ? shas : [git.git(['rev-parse', branch], mainRoot).stdout].filter(Boolean);
-  return list.map((sha) => {
+  return shas.map((sha) => {
     const full = git.git(['log', '-1', '--format=%B', sha], mainRoot).stdout;
     const nl = full.indexOf('\n');
     return {
@@ -2984,6 +3004,10 @@ function branchCommits(mainRoot, trunk, branch) {
  * shipped titled `docs:` and vanished from the changelog). The body keeps the design that was never
  * at fault: `Closes #N` per claimed issue, the other subjects as bullets, `chore(sync)` filtered,
  * Co-Authored-By / Claude-Session trailers preserved.
+ *
+ * Returns '' when `branchCommits` found nothing the branch wrote itself (#57) — composeSquashMessage
+ * is defined to return '' for an empty commit list. Callers must treat that as "no subject to
+ * derive", never as "empty string, use it" — see the two call sites below.
  */
 function buildSquashMessage(mainRoot, trunk, branch, closes, refs = [], conflicts) {
   return squash.composeSquashMessage(branchCommits(mainRoot, trunk, branch), closes, refs, conflicts);
@@ -3298,9 +3322,17 @@ function cmdShip(argv) {
     // Show the subject the squash WOULD get. The whole point of issue #17 was that a wrong subject
     // is silent — nothing fails, CI is green, and it is only visible once it is in a published tag.
     // A dry run is the last moment it can be caught, so it must be on screen there.
-    print('  Squash subject: ' + (opts.message
-      ? `${opts.message} [--message]`
-      : buildSquashMessage(repoAbs, target, sess.branch, closeIssues, refsIssues).split('\n')[0]));
+    //
+    // An empty default (#57) means the branch has no commits of its own to derive a subject from —
+    // say that plainly rather than printing a blank line that reads like a rendering glitch.
+    let subjectLine;
+    if (opts.message) {
+      subjectLine = `${opts.message} [--message]`;
+    } else {
+      const built = buildSquashMessage(repoAbs, target, sess.branch, closeIssues, refsIssues);
+      subjectLine = built ? built.split('\n')[0] : '(none — branch has no commits of its own; pass --message)';
+    }
+    print('  Squash subject: ' + subjectLine);
     if (refsIssues.length) print(`  Refs (kept open, NOT closed): ${refsIssues.map((n) => '#' + n).join(' ')}`);
     return preOk ? 0 : 1;
   }
@@ -3406,6 +3438,18 @@ function cmdShip(argv) {
   } else {
     // Preserve the branch's crafted commit (subject + footers); insert Closes/Refs above the footers.
     commitMsg = buildSquashMessage(repoAbs, target, sess.branch, closeIssues, refsIssues, trailerConflicts);
+    if (!commitMsg) {
+      // #57: no commit on the branch's own first-parent chain carries a subject to borrow. Failing
+      // here, with a clear reason, beats either of the two silent alternatives — inventing one from
+      // the base's tip (the original bug) or letting `git commit -m ''` reject it with a generic
+      // "empty commit message" that does not say WHY. composeSquashMessage returns '' before ever
+      // touching spliceCloses/reconcileClosesRefsConflict for an empty commit list, so trailerConflicts
+      // is guaranteed empty here too — nothing for the warn loop below to report on this path.
+      cleanupEphemeral(); cleanupTarget();
+      process.stderr.write('✗ B1: the branch has no commits of its own to derive a squash subject from — ' +
+        're-run with --message "<subject>" to supply one by hand. Nothing pushed.\n');
+      return 1;
+    }
   }
   for (const cf of trailerConflicts) {
     warn(`#${cf.num}: the branch commit said "${cf.from} #${cf.num}" but this ship closes it (${cf.to} #${cf.num}) — inherited trailer dropped, kept ship's own.`);

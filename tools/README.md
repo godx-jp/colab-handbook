@@ -850,13 +850,18 @@ Each step is checked; any failure aborts **before the push**, so trunk is never 
 With `--message`, the subject is yours and a `— Closes #N, …` trailer is appended. Without it, the
 message is composed (`tools/lib/squash.js`, unit-tested):
 
-- **Subject** — the branch's **highest-weight** commit: breaking > `feat` > `fix` > `perf` >
-  `refactor` > `docs` > `test` > `chore`, ties going to the **oldest** (the commit that established
-  what the branch is for). Not the newest commit. That was the old rule, and it was wrong in exactly
-  the common case: on a well-run branch the newest commit is the docs pass, so features shipped
-  titled `docs:` and — because release notes group on the prefix (§4) — vanished from the changelog
-  without anything failing. If no commit carries a recognised prefix there is nothing to weigh, and
-  it falls back to the newest.
+- **Subject** — the branch's **highest-weight** commit, among the ones it actually wrote itself:
+  breaking > `feat` > `fix` > `perf` > `refactor` > `docs` > `test` > `chore`, ties going to the
+  **oldest** (the commit that established what the branch is for). Not the newest commit. That was
+  the old rule, and it was wrong in exactly the common case: on a well-run branch the newest commit
+  is the docs pass, so features shipped titled `docs:` and — because release notes group on the
+  prefix (§4) — vanished from the changelog without anything failing. If no commit carries a
+  recognised prefix there is nothing to weigh, and it falls back to the newest.
+  "Wrote itself" is a first-parent walk from the merge-base, not a raw `<base>..<branch>` diff — the
+  latter cannot tell a commit the branch authored from one it merely merged in from elsewhere, and a
+  higher-weight borrowed commit used to win the subject silently (#57). A branch with **no** commits
+  of its own on that chain (a freshly-cut one, most commonly) no longer borrows the base's tip to
+  produce a plausible-looking subject either: `ship` refuses and asks for `--message` instead.
 - **Body** — `Closes #N` for **every** issue the branch claims in `state.json` (a group branch
   closes all its siblings), then the other commit subjects as bullets with `chore(sync)` merge-noise
   dropped, then the chosen commit's body, then `Co-Authored-By:` / `Claude-Session:` trailers
