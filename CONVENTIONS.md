@@ -750,6 +750,12 @@ One edge the tool cannot fix by itself: if a commit *body* on the branch literal
 cannot un-close it. `colab ship` detects this after the push (the referenced issue reads
 `CLOSED`) and warns you to reopen it by hand. Do not write `Closes #<tracking>` in a commit body.
 
+The reverse direction is **not** the same kind of edge, and `ship` fixes it rather than
+warning about it: a commit body may carry `Refs #N` written while N was still open, and by
+the time `ship` runs N is one of the issues this branch *closes*. Nothing needs GitHub to
+un-do anything here, so the composer drops the stale `Refs #N` and keeps its own `Closes #N`
+before the push, instead of shipping a commit that says both (#58).
+
 ---
 
 ## 6. Releases
