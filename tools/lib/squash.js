@@ -123,6 +123,75 @@ function harvestTrailers(commits) {
 }
 
 /**
+ * Full-line reference clauses ship itself composes ("Closes #17", "Refs #48", or several of either
+ * joined by ", "). Only a line matching this shape end-to-end is ever touched by
+ * `reconcileClosesRefsConflict` below — arbitrary prose that merely mentions an issue number (a
+ * sentence, not a trailer) is left alone, because rewriting inside a sentence is not a safe
+ * mechanical operation. The keyword casing mirrors the rest of this file: `[Cc]loses`, `[Rr]efs` —
+ * not a general case-insensitive match, and not the full GitHub closing-keyword vocabulary.
+ */
+const REF_LINE_RE = /^(?:(?:[Cc]loses|[Rr]efs) #\d+)(?:,\s*(?:[Cc]loses|[Rr]efs) #\d+)*$/;
+const REF_CLAUSE_RE = /([Cc]loses|[Rr]efs) #(\d+)/g;
+
+/**
+ * Drop an inherited `Refs #N` clause for any N ship is about to CLOSE (#58).
+ *
+ * The scenario: a session writes `Refs #53` into its own commit body while the issue is still open
+ * (an honest trailer at the time). By the time `ship` runs, #53 is one of the issues this branch
+ * CLOSES — but the pure layer only ever APPENDED a missing reference; it never looked at what the
+ * carried text already said. The result was two contradictory, immutable trailers on one commit:
+ * `Closes #53` (composed) and `Refs #53` (inherited), both true-looking, one of them stale.
+ *
+ * Only a self-contained reference LINE is touched (see `REF_LINE_RE`) — this is exactly the shape
+ * both ship's own composed line and the live #58 report take (a commit body ending in a bare
+ * `Refs #53`). A clause naming an issue NOT in `closeNums` survives untouched, including a `Refs #N`
+ * for a number that is genuinely only in `refs` — that is not a conflict, just a duplicate the
+ * caller's "already present" check already declines to repeat.
+ *
+ * Deliberately NOT symmetric: an inherited `Closes #N` for a number ship intends to `Refs` (a
+ * tracking issue, #48) is left alone here. `composeSquashMessage`'s doc comment explains why that
+ * half stays a post-push warning instead of a rewrite — GitHub reads the carried `Closes #N` and
+ * closes the issue regardless of what this pure layer emits, so stripping the text would produce a
+ * message that reads correct while the actual merge still closes the memory issue silently.
+ *
+ * @param {string} message
+ * @param {string[]} closeNums   normalised (no leading `#`) issue numbers ship will CLOSE
+ * @param {Array} [conflicts]    when given, one `{num, from, to}` is pushed per clause dropped —
+ *                                the caller's hook for warning a human that a hand-written trailer
+ *                                was overruled
+ * @returns {string}
+ */
+function reconcileClosesRefsConflict(message, closeNums, conflicts) {
+  if (!closeNums || !closeNums.length) return message;
+  const closeSet = new Set(closeNums);
+  let changed = false;
+  const lines = String(message).split('\n').map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || !REF_LINE_RE.test(trimmed)) return line;
+    const kept = [];
+    let m;
+    REF_CLAUSE_RE.lastIndex = 0;
+    while ((m = REF_CLAUSE_RE.exec(trimmed))) {
+      const isRefs = /^[Rr]efs$/.test(m[1]);
+      const num = m[2];
+      if (isRefs && closeSet.has(num)) {
+        changed = true;
+        if (conflicts) conflicts.push({ num, from: 'Refs', to: 'Closes' });
+        continue; // drop this clause — ship's own Closes #N replaces it
+      }
+      kept.push(`${isRefs ? 'Refs' : 'Closes'} #${num}`);
+    }
+    return kept.length ? kept.join(', ') : null; // null marks the whole line for removal
+  });
+  if (!changed) return message;
+  return lines.filter((l) => l !== null).join('\n')
+    // a fully-dropped line can leave a dangling blank run — mid-message (two adjacent blank
+    // separators) or trailing (the dropped line was last). Collapse both; never touches content.
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/\n+$/, '');
+}
+
+/**
  * Compose the full squash message.
  *
  * @param {Array<{subject:string, body?:string}>} commits  NEWEST-FIRST, merge commits already excluded
@@ -130,6 +199,9 @@ function harvestTrailers(commits) {
  * @param {Array<number|string>} refs                       claimed issue numbers to REFERENCE but keep
  *                                                          open (`Refs #N`) — long-lived memory/tracking
  *                                                          issues the branch touched but did not complete
+ * @param {Array} [conflicts]                               when given, collects `{num, from, to}` for
+ *                                                          every inherited trailer `spliceCloses`
+ *                                                          overruled — see `reconcileClosesRefsConflict`
  * @returns {string} the commit message
  *
  * Layout — subject, then body blocks in this order:
@@ -139,7 +211,7 @@ function harvestTrailers(commits) {
  *   <chosen commit's body>   verbatim
  *   <harvested trailers>     only those not already present above
  */
-function composeSquashMessage(commits, closes = [], refs = []) {
+function composeSquashMessage(commits, closes = [], refs = [], conflicts) {
   const list = Array.isArray(commits) ? commits.filter(Boolean) : [];
   if (list.length === 0) return '';
 
@@ -174,7 +246,7 @@ function composeSquashMessage(commits, closes = [], refs = []) {
     assembled += (TRAILER_RE.test(lastLine) ? '\n' : '\n\n') + extraTrailers.join('\n');
   }
 
-  return spliceCloses(assembled, closes, refs);
+  return spliceCloses(assembled, closes, refs, conflicts);
 }
 
 /**
@@ -195,37 +267,51 @@ function composeSquashMessage(commits, closes = [], refs = []) {
  * `colab ship` detects that after the push (the ref issue reads CLOSED) and warns; here we simply
  * do not emit a redundant `Refs #N` when a `Closes #N` for it already sits in the text.
  *
+ * The mirror case — an inherited `Refs #N` for a number THIS call closes — is not a limitation the
+ * same way: nothing here needs GitHub to un-do anything, so it is reconciled up front by
+ * `reconcileClosesRefsConflict` (#58) rather than left for ship to warn about after the fact.
+ *
  * Exported so every caller composes the same way. The composed path always did this correctly; the
  * `--message` override concatenated instead, which is exactly the drift a shared helper prevents.
+ *
+ * @param {string} message
+ * @param {Array<number|string>} closes
+ * @param {Array<number|string>} refs
+ * @param {Array} [conflicts]  see `reconcileClosesRefsConflict` — passed straight through
  */
-function spliceCloses(message, closes = [], refs = []) {
+function spliceCloses(message, closes = [], refs = [], conflicts) {
   const norm = (arr) => (arr || []).map((n) => String(n).replace(/^#/, '')).filter(Boolean);
   const refNums = norm(refs);
   const refSet = new Set(refNums);
+  const closeNums = norm(closes).filter((n) => !refSet.has(n)); // refs wins — a tracking issue is never closed
 
-  const missingCloses = norm(closes)
-    .filter((n) => !refSet.has(n)) // refs wins — a tracking issue is never closed
-    .filter((n) => !new RegExp(`[Cc]loses #${n}\\b`).test(message));
+  // Drop any inherited `Refs #N` the branch wrote for an issue THIS call is about to close, before
+  // deciding what still needs adding — otherwise the stale trailer survives verbatim alongside the
+  // freshly composed `Closes #N` (#58).
+  const text = reconcileClosesRefsConflict(message, closeNums, conflicts);
+
+  const missingCloses = closeNums
+    .filter((n) => !new RegExp(`[Cc]loses #${n}\\b`).test(text));
   const missingRefs = refNums
     // Skip a ref already referenced. Also skip one the message already CLOSES: this layer only adds
     // text, so it cannot un-close it — ship warns after the push instead of us emitting both keywords.
-    .filter((n) => !new RegExp(`[Rr]efs #${n}\\b`).test(message) && !new RegExp(`[Cc]loses #${n}\\b`).test(message));
+    .filter((n) => !new RegExp(`[Rr]efs #${n}\\b`).test(text) && !new RegExp(`[Cc]loses #${n}\\b`).test(text));
 
   const parts = [
     ...missingCloses.map((n) => `Closes #${n}`),
     ...missingRefs.map((n) => `Refs #${n}`),
   ];
-  if (!parts.length) return message;
+  if (!parts.length) return text;
 
   const refLine = parts.join(', ');
-  const nl = message.indexOf('\n');
-  const head = nl === -1 ? message : message.slice(0, nl);
-  const rest = nl === -1 ? '' : message.slice(nl + 1).replace(/^\n+/, '');
+  const nl = text.indexOf('\n');
+  const head = nl === -1 ? text : text.slice(0, nl);
+  const rest = nl === -1 ? '' : text.slice(nl + 1).replace(/^\n+/, '');
   return rest ? `${head}\n\n${refLine}\n\n${rest}` : `${head}\n\n${refLine}`;
 }
 
 module.exports = {
   TYPE_WEIGHT, BREAKING_BONUS, TRAILER_RE,
   isSyncNoise, parseSubject, commitWeight, pickSubjectIndex, harvestTrailers, composeSquashMessage,
-  spliceCloses,
+  spliceCloses, reconcileClosesRefsConflict,
 };

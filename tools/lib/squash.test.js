@@ -278,3 +278,57 @@ test('refs defaults to empty: the two-arg form is unchanged (backward compatible
   assert.strictEqual(composeSquashMessage([c('feat: a thing')], [17, 21]).split('\n')[2], 'Closes #17, Closes #21');
   assert.strictEqual(squash.spliceCloses('fix: x', [7, 8]), 'fix: x\n\nCloses #7, Closes #8');
 });
+
+// --- issue #58: an inherited `Refs #N` must not survive alongside a composed `Closes #N` ---------
+//
+// A session writes `Refs #53` into its own commit body while #53 is still open — an honest trailer
+// at the time. By the time `ship` runs, #53 is one of the issues THIS branch closes. The old code
+// only ever checked whether `Closes #N` was already present before appending one; it never looked at
+// a pre-existing `Refs #N` for the same number, so the squash carried both — two contradictory,
+// immutable trailers for one issue.
+
+test('an inherited Refs #N for an issue this call CLOSES is dropped, not carried alongside Closes', () => {
+  const commits = [c('fix(colab): the real fix', 'Why this exists.\n\nRefs #53')];
+  const msg = composeSquashMessage(commits, [53]);
+  assert.strictEqual(msg.match(/Closes #53\b/g).length, 1);
+  assert.ok(!/Refs #53\b/.test(msg), 'the stale Refs #53 must not survive next to Closes #53');
+});
+
+test('spliceCloses reports the dropped trailer via the optional conflicts sink', () => {
+  const conflicts = [];
+  squash.spliceCloses('fix: x\n\nRefs #53', [53], [], conflicts);
+  assert.deepStrictEqual(conflicts, [{ num: '53', from: 'Refs', to: 'Closes' }]);
+});
+
+test('no conflicts sink passed is still safe (default parameter, not a crash)', () => {
+  assert.strictEqual(squash.spliceCloses('fix: x\n\nRefs #53', [53]), 'fix: x\n\nCloses #53');
+});
+
+test('a Refs #N for a DIFFERENT issue on the same line survives; only the conflicting clause drops', () => {
+  const msg = squash.spliceCloses('fix: x\n\nRefs #53, Refs #48', [53], [48]);
+  assert.ok(!/Refs #53\b/.test(msg), 'the conflicting clause must be gone');
+  assert.match(msg, /Refs #48\b/);
+  assert.strictEqual(msg.match(/Refs #48\b/g).length, 1);
+});
+
+test('Refs #N in ordinary prose (not a self-contained reference line) is left untouched', () => {
+  // Only a line that IS a reference clause (or several) end-to-end is touched — rewriting inside a
+  // sentence is not a safe mechanical operation, and this is not the shape either #58 or ship's own
+  // composed line takes.
+  const msg = squash.spliceCloses('fix: x\n\nSee the discussion in Refs #53 for background.', [53]);
+  assert.match(msg, /See the discussion in Refs #53 for background\./);
+  assert.match(msg, /Closes #53/);
+});
+
+test('the mirror direction (#48) is unaffected: an inherited Closes #N for a Refs issue still stays', () => {
+  // Locking in the pre-existing, deliberate asymmetry: reconciliation only ever removes a stale
+  // Refs when ship intends Closes, never the other way (composeSquashMessage's doc comment explains
+  // why — this pure layer cannot un-close what GitHub will read as a closing keyword regardless).
+  const out = squash.spliceCloses('feat: x\n\nCloses #48', [], [48]);
+  assert.strictEqual(out, 'feat: x\n\nCloses #48');
+});
+
+test('reconcileClosesRefsConflict is a no-op with no closeNums, and safe on a message with no match', () => {
+  assert.strictEqual(squash.reconcileClosesRefsConflict('fix: x\n\nRefs #53', [], []), 'fix: x\n\nRefs #53');
+  assert.strictEqual(squash.reconcileClosesRefsConflict('fix: x\n\nno reference here', ['53'], []), 'fix: x\n\nno reference here');
+});

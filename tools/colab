@@ -2808,8 +2808,8 @@ function branchCommits(mainRoot, trunk, branch) {
  * at fault: `Closes #N` per claimed issue, the other subjects as bullets, `chore(sync)` filtered,
  * Co-Authored-By / Claude-Session trailers preserved.
  */
-function buildSquashMessage(mainRoot, trunk, branch, closes, refs = []) {
-  return squash.composeSquashMessage(branchCommits(mainRoot, trunk, branch), closes, refs);
+function buildSquashMessage(mainRoot, trunk, branch, closes, refs = [], conflicts) {
+  return squash.composeSquashMessage(branchCommits(mainRoot, trunk, branch), closes, refs, conflicts);
 }
 
 const HELP_SHIP = `colab ship [--repo <path>] [--worktree <name> | --branch <br>] [--message "<msg>"] [--refs <N[,M]>] [--keep-worktree] [--delete-branch] [--dry]
@@ -3206,14 +3206,20 @@ function cmdShip(argv) {
   const cleanupTarget = () => { if (ephemeralTarget) git.git(['worktree', 'remove', '--force', targetDir], repoAbs); };
 
   let commitMsg;
+  // Collects one {num, from, to} per inherited trailer the composer overruled (#58: a branch commit
+  // wrote e.g. `Refs #53` before #53 was decided as a Closes) — surfaced below, not silently dropped.
+  const trailerConflicts = [];
   if (opts.message) {
     // --message overrides the subject/body, but Closes is spliced in as its own paragraph — never
     // concatenated. Appending it welded ` — Closes #N` onto whatever the message ended with, which
     // for any message carrying a trailer block corrupted the last trailer's value.
-    commitMsg = squash.spliceCloses(opts.message, closeIssues, refsIssues);
+    commitMsg = squash.spliceCloses(opts.message, closeIssues, refsIssues, trailerConflicts);
   } else {
     // Preserve the branch's crafted commit (subject + footers); insert Closes/Refs above the footers.
-    commitMsg = buildSquashMessage(repoAbs, target, sess.branch, closeIssues, refsIssues);
+    commitMsg = buildSquashMessage(repoAbs, target, sess.branch, closeIssues, refsIssues, trailerConflicts);
+  }
+  for (const cf of trailerConflicts) {
+    warn(`#${cf.num}: the branch commit said "${cf.from} #${cf.num}" but this ship closes it (${cf.to} #${cf.num}) — inherited trailer dropped, kept ship's own.`);
   }
 
   print(`B1: squash-merging ${sess.branch} → ${target} …`);
