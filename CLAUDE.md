@@ -123,6 +123,14 @@ colab worktree rm <name>        # releases all its claims, frees its ports
   most-skipped step we measured (8 of 9 sessions, 2.9 GB). If you cannot
   remove it (uncommitted work, unsure), say so in your report instead of
   silently leaving it.
+- **Never `git stash` inside a worktree.** `refs/stash` is one ref shared by
+  every worktree of the repo, not scoped per worktree — two concurrent
+  sessions stashing around the same time can push/pop over each other with no
+  error, silently swapping uncommitted work between sessions. We measured
+  exactly this on a repo running 10+ concurrent worktree sessions. Use
+  `git diff`/`git status`, a targeted `git checkout -- <path>`, or diff
+  directly against `origin/<trunk>` instead — see `CONVENTIONS.md` §4 for the
+  full incident and the stale-`stash@{N}`-index gotcha.
 
 ## The Issue is the memory
 

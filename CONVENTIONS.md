@@ -268,6 +268,29 @@ that repo, including sessions touching files you never opened. A plain branch is
 on a repo nothing reads from; taking it means **you** own returning the checkout to trunk
 before you wrap.
 
+**`git stash` is repo-scoped, not worktree-scoped — never reach for a bare stash inside a
+worktree session.** `refs/stash` is a single ref per repository; plain git has no way to give
+each worktree its own. Two concurrent worktree sessions on the same repo, both stashing around
+the same time, can push and pop over each other with no error and no conflict marker. Measured:
+on a repo running 10+ concurrent worktree sessions, one session's `git stash pop` — done to
+check whether a test failure was pre-existing — restored a *different* session's uncommitted
+changes into its own working tree. Nothing signalled a problem; only the second session
+noticing its work had vanished caught it, and a re-stash from a third, unrelated, much older
+session was already sitting in the same shared stack the entire time. Had either session
+reflexively discarded what looked like "unexpected local changes" instead of recognising the
+mismatch, the swap would have destroyed the other session's work outright — worse than a merge
+conflict, because nothing ever signals that anything went wrong.
+
+Prefer, in order: `git diff` / `git status` to read what changed without moving it; targeted
+`git checkout -- <path>` plus a manual re-apply for the few files that actually need to go;
+comparing directly against `origin/<trunk>` without ever touching `refs/stash`. If you must
+stash, label the message so a colliding session can tell it apart
+(`git stash push -m "<issue> wip"`), and **re-run `git stash list` immediately before touching
+any `stash@{N}` index** — a concurrent push renumbers every existing entry, so an index you
+captured earlier in the same session may already point at someone else's work by the time you
+use it; `git stash show -p stash@{N}` against a stale index prints nothing rather than warning
+you it moved.
+
 **Commits** — Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `test:`,
 `perf:`). This is not decoration: [§6](#6-releases) builds the release summary by grouping on
 these prefixes. A commit with no prefix is invisible in release notes.
