@@ -3149,6 +3149,18 @@ function cmdShip(argv) {
   const merge = git.git(['merge', '--no-edit', mergeRef], branchDir);
   if (!merge.ok) {
     const uf = git.git(['diff', '--name-only', '--diff-filter=U'], branchDir).stdout.split('\n').filter(Boolean);
+    // An empty unmerged-path list does NOT mean "no conflicts" here — it means git never entered a
+    // conflicted merge state at all. The common cause is uncommitted local changes to a file the merge
+    // would touch ("Your local changes … would be overwritten by merge. Aborting"), refused before the
+    // merge machinery starts. Every branch below this point reasons off `uf`/`nonGen`, so a refused
+    // merge used to fall through to the generated-file path and print an empty, actionable-nothing list
+    // under the word "conflicts" — wrong noun, empty detail (#60). Distinguish it before branching.
+    if (uf.length === 0) {
+      cleanupEphemeral();
+      process.stderr.write('✗ B0: merge refused before it started — not a conflict:\n' +
+        (merge.stderr ? merge.stderr.split('\n').map((l) => `  ${l}`).join('\n') + '\n' : '  (git gave no message)\n'));
+      return 1;
+    }
     const nonGen = uf.filter((f) => !isGeneratedPath(f, generated));
     if (nonGen.length) {
       git.git(['merge', '--abort'], branchDir); cleanupEphemeral();
