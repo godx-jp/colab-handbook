@@ -244,6 +244,29 @@ Validity: an entry may not be `trunk`'s value, may not be `main`, may not be the
 rule as `integration:` — a malformed entry is dropped rather than honoured, and the
 audit reports it as a finding rather than silently leaving the real branch unprotected.
 
+### Per-host deploy target — deliberately not a field
+
+Not modeled here, on purpose ([CONVENTIONS.md §2](CONVENTIONS.md#2-tiers)). "Which branch does
+*this checkout* serve" is a fact about one machine, not about the repo — the opposite of
+everything else on this page — so it holds no key in this file, on any tier.
+
+A repo running on more than one host may legitimately want a different answer per host: a dev
+tool serving a built bundle out of its own working tree, rebuilt and restarted whenever *that
+host's* line moves, gated on `HEAD` matching what that host serves. That fact belongs to a
+per-host mechanism the repo owns — an environment variable read by the host's own service
+definitions, or a machine-local config file — the same shape as `colab`'s own cache
+(`~/.colab/state.json`: local, uncommitted, fenced off from VCS and file-sync) rather than a
+schema entry. Putting it here instead (`deploys: { <host>: <branch> }`) would put hostnames into
+a shared, often-public file that drifts the moment a machine is renamed or retired, with nothing
+here able to tell a stale entry from a live one. `integration:` does not cover it either — it
+declares that a line *exists*, never that a given checkout *serves* it.
+
+Whatever mechanism a repo picks, it must **name** the branch it serves, unset-by-default, and
+never widen or disable the gate it overrides — see [CONVENTIONS.md §2](CONVENTIONS.md#2-tiers)
+for why that direction is the only safe one. `trunk:` and `integration:` keep answering only the
+correctness question — what has landed, what is safe to delete, what a new worktree is cut
+from; this axis never reads them and they never read it.
+
 ### `ports` — optional
 
 ```yaml

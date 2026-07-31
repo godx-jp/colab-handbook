@@ -175,6 +175,43 @@ on Tiers A and C trunk **is** the production spine — the branch promotion cons
 a long-lived line as trunk would aim the promotion path straight at it, which is the opposite
 of what the line is for.
 
+**`trunk:` gets asked a third question, and the ruling is that it stays silent on it.**
+Consumers reading `trunk:` fall into two groups. **Group A — correctness:** worktree
+classification, the landed/delete-safety check, the base a new worktree is cut from. These
+must keep answering against the one shared value — a local answer here would let a machine
+call unlanded work "landed", and therefore safe to delete, against a branch nobody else has.
+**Group B — deployment:** "which line does *this checkout* serve", read by things like an
+auto-build gate, an auto-restart gate, or a "this view is stale" banner. A repo checked out on
+more than one host can legitimately want a different answer to B per host — that is a fact
+about one machine, not about the repo, and the opposite of what everything else in this file
+describes.
+
+**Group B does not get a descriptor field, on any tier, and that is a ruling, not an
+oversight.** `project.yml` is fetched, cached and reasoned about as one fact-sheet per
+*repository*; a hostname inside it (`deploys: { <host>: <branch> }`) turns a shared, often
+public file into one that drifts the moment a machine is renamed or retired, with nothing here
+able to tell a stale entry from a live one. `integration:` does not cover it either — it
+declares that a line *exists*, never that a given checkout *serves* it. So Group B's answer
+lives entirely outside the descriptor, in a per-host mechanism the repo owns: an environment
+variable read by that host's own service definitions, or a machine-local config file — the same
+shape as `colab`'s own cache ([§5](#5-claiming-work--how-to-say-im-on-this), machine-local,
+uncommitted, fenced off from VCS and file-sync) rather than a schema entry. Which of those a
+repo picks is its own call; the handbook has no opinion between them.
+
+**One property any such mechanism must keep, wherever it lives:** it must **name** a branch,
+unset-by-default, rather than widen or disable the gate it overrides. `HEAD == trunk` is what
+makes an unattended rebuild-and-restart safe to run on a timer at all; a knob that turns the
+gate off, or accepts "any branch", can no longer answer "which branch is live" — the one
+property the gate exists to protect. Replacing the value a host compares against keeps that
+property; widening the accepted set destroys it. Unset, the override is byte-identical to
+reading `trunk:` today.
+
+A repo running on N hosts with N lines is therefore a supported shape, but only ever as a
+deployment detail *of one repo* — it never becomes N repos, N descriptors, or a second entry in
+`trunk:` / `integration:`. A future need to make a host's line *visible* rather than purely
+local — discoverable from a repo card, say — is a new, explicit field to design at that point,
+not a retrofit of `trunk:`, which keeps answering Group A alone.
+
 ---
 
 ## 3. `.github/project.yml` — the marker
