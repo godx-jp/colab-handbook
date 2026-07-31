@@ -826,6 +826,14 @@ gate has **no override** — `--force` does not exist on `ship`. Autonomy is a p
 human configured, never a flag the caller can pass. `ship` **never** touches `main` when `trunk ≠
 main`, **never** tags, and **never** promotes — those remain human/`scripts/release.sh` territory.
 
+**The caller here need not be a human-opened session.** A scheduled driver — a per-repo autopilot
+that ships and triages on a cadence — is a legitimate caller of `ship`, subject to this identical
+gate and no other: `auto-trunk` grants it exactly as much as it grants any agent, and it still never
+promotes or tags. See [*Scheduled drivers*](../CONVENTIONS.md#scheduled-drivers--provenance-and-autonomy-meet-a-caller-that-is-not-a-person)
+for the additional properties a scheduler owes on top of this gate (excluding `agent-filed` work by
+default, spawning ordinary sessions rather than writing to the tracker itself, and telling a
+self-clearing blocker apart from one only a human can clear).
+
 ### The gated sequence
 
 Each step is checked; any failure aborts **before the push**, so trunk is never left half-shipped:

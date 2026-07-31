@@ -613,6 +613,76 @@ default be *excluded, and started only when a person clicks* — which makes the
 approval. A tool cannot construct that gate from an issue's contents; only whoever filed
 it knows the answer, and only at filing time.
 
+### Scheduled drivers — provenance and autonomy meet a caller that is not a person
+
+Everything above — provenance, readiness, the autonomy ladder — was written assuming the
+caller deciding to act is a person, or an agent a person is watching. A **scheduled
+driver** breaks that assumption on purpose: a per-repo autopilot that wakes on a cadence,
+ships finished branches, triages the backlog, and starts sessions for groups that read as
+ready, with nobody watching the tick. Nothing above stops applying to it — this section is
+what a scheduler must additionally honor *because* nothing above assumed it exists.
+
+**It inherits the provenance gate rather than replacing it.** *Provenance* already names the
+failure mode a bulk starter creates: "an agent files an issue, a fan-out tool starts it, that
+session files more" — a closed loop with no human in it. A scheduler is exactly that fan-out
+tool, running unattended and repeatedly, which makes the gate load-bearing on every tick
+rather than the one time a human clicks a button:
+
+- **`agent-filed` issues are excluded from what a scheduler starts, by default, every run.**
+  Not filtered once and remembered — the exclusion is re-applied on each pass, because the
+  backlog changes between ticks.
+- **The only admission is a human act on the issue itself: removing the label.** A scheduler
+  has no other door in — it cannot decide an `agent-filed` issue has "become" approved by
+  reading its content, its age, or how many times it has been proposed. The label is the whole
+  answer; a scheduler that infers around it has reinvented the closed loop with extra steps.
+
+**A scheduler starts work only by spawning ordinary sessions, and touches the tracker no other
+way.** Concretely: it may run `code-triage` to decide what is ready, then spawn a session that
+itself runs `code-start` → does the work → `code-wrap`. What it may **not** do is claim,
+label, comment, or merge *directly* — every tracker write happens inside a session running the
+standard skills, using the same claim-before-start and release-on-wrap discipline as a human-
+opened one. A scheduler that shortcuts this — claiming in its own driver code to save a spawn —
+produces exactly the anonymous, unaccountable writes [§0 of `code-start`](skills/code-start/SKILL.md)
+exists to prevent, except now on a timer instead of from a single unnamed session.
+
+**It may complete a trunk merge only where the repo has granted it, and only through the one
+door that checks.** [`autonomy: auto-trunk`](#6-releases) is what makes `colab ship` usable at
+all; a scheduler is not a wider grant of that permission, it is one more caller subject to the
+identical gate — CI alive and green, no new migrations, no hand-merge conflict, and no
+`--force` override, because `ship` has none. A repo that has not set `autonomy: auto-trunk`
+gates a scheduler exactly as it gates every other agent: `ship` refuses, and a human runs
+Phase B. Nothing about running on a cadence earns a wider door.
+
+**The rungs above ship stay untouched, unconditionally.** A scheduler never promotes
+(`colab promote`, trunk → main) and never tags — those remain human on every repo, on every
+tier, with no field that can say otherwise ([§6](#6-releases)). This is not a narrower version
+of the same rule that applies to interactive agents; it is the *same* rule, because the ladder
+is a property of the action, not of who or what is asking. A scheduler that could promote or
+tag would not be "a faster human-approved release" — it would be the ladder's top two rungs
+deciding themselves have no gate.
+
+**A blocker a scheduler meets on its own must be told apart from one only a human can clear** —
+because a driver that treats both alike either spins forever on the second or gives up
+silently on the first:
+
+- **Self-clearing** — CI temporarily red, a billing outage, a merge conflict a hook can
+  regenerate. Nothing here needs a person; the correct behavior is to retry on the next tick
+  and say nothing until it either clears or has failed enough ticks to stop being "temporary."
+- **Human-gated** — no `autonomy: auto-trunk` grant, a new migration on the branch, an
+  `agent-filed` issue with its label still on, a claim held by someone else. These do not
+  change on their own no matter how many ticks pass. The correct behavior is to **state it
+  once** — a comment on the Issue, or a single line in the driver's own log — and then park:
+  stop re-announcing the same unmet gate every cycle, because a driver that repeats itself
+  every tick is indistinguishable from one that is stuck, and trains its own operator to
+  ignore it.
+
+**Why this belongs in the handbook and not in one tool's docs:** the rules above are not
+features of any particular autopilot — they are what makes *any* scheduled caller sanctioned
+rather than rogue, in the same way [§5](#5-claiming-work--how-to-say-im-on-this) and the
+[autonomy ladder](#6-releases) are not features of `colab` but the shape any tool in that role
+must have. A repo adopting a different scheduler owes it these same five properties, not a
+rewrite of them.
+
 ### Grouping — issues that must share one branch
 
 *Readiness* gave two relationships a native home: parent/child as sub-issues, sequence as
