@@ -1398,7 +1398,10 @@ Health-check the machine-local state and heal drift.
     commands. \`git branch --merged\` cannot find these (a squash leaves no ancestry), so nothing
     else will. Branches checked out in a worktree are excluded (a live session's branch is not
     spent), and so are branches that CONFLICT against trunk rather than matching it — the list is
-    honest rather than exhaustive.
+    honest rather than exhaustive. Also excluded: trunk, \`main\`, any declared \`integration:\` line,
+    and a declared \`releaseBranch:\` (project.schema.md) — an external-deploy branch that sits
+    "contained in trunk" between releases BY CONSTRUCTION, which this heuristic would otherwise
+    misread as spent and advise deleting, silently breaking GitOps deploys (#63).
 
 This exists because claims made without a worktree were never auto-healed before, and a
 real repo accumulated 17 stale same-day claims. Run \`colab doctor\` regularly; \`--prune\`
@@ -1454,6 +1457,11 @@ function shippedBranches(repos, st) {
     // sessions, and it is contained in trunk by construction for as long as nothing has been merged
     // into it yet — which is exactly when suggesting its deletion would be most destructive.
     const lines = resolveIntegration(repo, doc, trunk);
+    // A declared external-deploy release branch is never "spent" either, for the opposite reason: it
+    // is CONSUMED, not accumulated into. Between releases it sits fast-forwarded to trunk's tip as of
+    // the last tag, so it reads as fully "contained in trunk" — the exact shape this list hunts for —
+    // right up until the moment deleting it would silently stop production deploys (#63).
+    const release = resolveReleaseBranch(repo, doc, trunk);
     // Branches checked out anywhere in this repo (main checkout + every worktree) are off limits.
     const checkedOut = new Set(
       git.git(['worktree', 'list', '--porcelain'], repo).stdout.split('\n')
@@ -1463,7 +1471,7 @@ function shippedBranches(repos, st) {
     const refs = git.git(['for-each-ref', '--format=%(refname:short)', 'refs/heads/'], repo);
     if (!refs.ok) continue;
     for (const branch of refs.stdout.split('\n').filter(Boolean)) {
-      if (branch === trunk || branch === 'main' || lines.includes(branch)) continue;
+      if (branch === trunk || branch === 'main' || branch === release || lines.includes(branch)) continue;
       if (checkedOut.has(branch)) continue;
       if ((liveByRepo.get(repo) || EMPTY_SET).has(branch)) continue;
       if (!branchContainedInTrunk(repo, branch).contained) continue;
@@ -2724,6 +2732,31 @@ function resolveIntegration(repoAbs, doc, trunk) {
 /** The set of refs a worktree may legitimately be based on: trunk ∪ integration. */
 function allowedBases(repoAbs, doc, trunk) {
   return [trunk, ...resolveIntegration(repoAbs, doc, trunk)].filter(Boolean);
+}
+
+/**
+ * Declared external-deploy release branch (project.yml `releaseBranch:`), or ''.
+ *
+ * Names a long-lived branch that is NOT trunk and NOT `main`: the extra branch a
+ * single-trunk, tag-gated Tier A repo fast-forwards on release for an external GitOps
+ * poller to consume (project.schema.md#releasebranch--optional). It is a PRODUCTION ref
+ * — the opposite axis from `integration:` — so it is never added to allowedBases() and a
+ * worktree may never be cut from or shipped into it.
+ *
+ * Between releases this branch is, by construction, an ancestor of trunk (it was
+ * fast-forwarded to trunk's tip at the last tag, and trunk has since moved on). That is
+ * exactly the shape shippedBranches() flags as "already merged, safe to delete" — so this
+ * resolver exists to let that check name the one branch where the heuristic is wrong.
+ *
+ * Same fail-closed rule as resolveIntegration: a value equal to trunk, `main` or the role
+ * word `trunk` is dropped rather than honoured — the audit reports it as a finding, and a
+ * malformed descriptor must not be the thing that un-protects a real branch by accident.
+ */
+function resolveReleaseBranch(repoAbs, doc, trunk) {
+  const raw = doc && doc.releaseBranch;
+  if (raw === null || raw === undefined) return '';
+  const b = String(raw).trim();
+  return b && b !== trunk && b !== 'main' && b !== 'trunk' ? b : '';
 }
 
 /**

@@ -207,6 +207,43 @@ worth saying — but a line that is not yet gated is a normal early state, and f
 the repo for it would push teams back to declaring the line nowhere, which is the
 state this field exists to end. Trunk's CI gate remains a hard requirement.
 
+### `releaseBranch` — optional
+
+```yaml
+tier: A
+trunk: main       # single-trunk, tag-gated — see trunk's exception above
+deploy: tag
+releaseBranch: release
+```
+
+Names the long-lived branch an **external GitOps poller** fast-forwards on release, in
+the single-trunk, tag-gated shape ([`trunk`](#trunk--required)'s exception): day-to-day
+work lands on `main`, and a release script cuts a tag and fast-forwards this *separate*
+branch, which the poller watches and redeploys. Empty and absent are the same thing,
+and absent is the normal case — most Tier A repos deploy from `main` itself and need no
+extra name.
+
+**This is the opposite axis from [`integration`](#integration--optional), not a
+variant of it.** An integration line *accumulates* development work over weeks; a
+release branch is *consumed* — a release script overwrites it wholesale on every tag —
+and it is a **production** ref, exactly the thing `integration:` guarantees never to
+touch. A worktree may never be cut from it or shipped into it; declaring one here grants
+no such base (it is not added to the set [`allowedBases`](#integration--optional)
+computes).
+
+**Why it exists:** between releases, this branch is by construction an ancestor of
+trunk — it was fast-forwarded to trunk's tip as of the last tag, and trunk has since
+moved on. That is indistinguishable, by ancestry alone, from a spent session branch
+whose work already landed — which is exactly what `colab doctor`'s routine-maintenance
+list hunts for. Undeclared, `doctor` prints a ready-to-paste `git push origin --delete`
+for a ref a live deploy pipeline is polling; declaring it here is what lets `doctor`
+tell the two apart (issue #63).
+
+Validity: an entry may not be `trunk`'s value, may not be `main`, may not be the word
+`trunk` (a role, never a branch name), and **must exist as a branch**. Same fail-closed
+rule as `integration:` — a malformed entry is dropped rather than honoured, and the
+audit reports it as a finding rather than silently leaving the real branch unprotected.
+
 ### `ports` — optional
 
 ```yaml
@@ -369,6 +406,18 @@ runbook: docs/deploy.md
 stack: fastapi + vite spa
 ```
 
+Tier A, single-trunk tag-gated, deployed by an external GitOps poller:
+
+```yaml
+tier: A
+trunk: main
+production: https://app.example.com
+deploy: tag
+runbook: docs/deploy.md
+releaseBranch: release
+stack: laravel-inertia
+```
+
 ## Validity rules (what the audit tool checks)
 
 | Rule | Failure it prevents |
@@ -383,6 +432,7 @@ stack: fastapi + vite spa
 | `tier: B` → `trunk: main`, `deploy: none`, `production: null` | ceremony without benefit |
 | declared `trunk` branch actually exists | docs describing a repo that doesn't exist |
 | every `integration` entry exists, and is not `trunk` / `main` / the word `trunk` | a dev-side line acquiring a path to production |
+| declared `releaseBranch` exists, and is not `trunk` / `main` / the word `trunk` | `colab doctor` misreading a live deploy target as a spent branch and advising its deletion |
 | toolchain pin vs manifest agreement | building on one version, deploying on another |
 
 `push-main` on a Tier A repo **is a finding** — a mismatch between the

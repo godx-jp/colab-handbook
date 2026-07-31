@@ -820,7 +820,18 @@ function auditRepo(target, ctx) {
   const integration = checkIntegration(cfg, trunk, branches, fail, warn);
   // Declared lines are integration points, so they inherit trunk's exemptions: the §4 branch-name
   // regex does not apply to them, and a workflow naming one is not referencing a ghost.
-  const exempt = integration.length ? new Set([...INTEGRATION_BRANCHES, ...integration]) : INTEGRATION_BRANCHES;
+
+  // ---- release branch (optional, production-side, opposite axis from integration) ----
+  // Names the branch an EXTERNAL GitOps poller fast-forwards on tag, in the single-trunk
+  // tag-gated shape (trunk: main). Unlike integration lines this is a PRODUCTION ref — it
+  // grants no worktree base, nothing here adds it to allowedBases() — but it needs the same
+  // naming-regex and ghost-branch exemptions integration lines get, for the same reason: it
+  // is a long-lived name a workflow or a human may reasonably reference. Its real payoff is
+  // in `colab doctor` (tools/colab), which otherwise reads it as a spent branch between
+  // releases and advises deleting a live deploy target (#63).
+  const releaseBranch = checkReleaseBranch(cfg, trunk, branches, fail, warn, deploy);
+  const exemptList = releaseBranch ? [...integration, releaseBranch] : integration;
+  const exempt = exemptList.length ? new Set([...INTEGRATION_BRANCHES, ...exemptList]) : INTEGRATION_BRANCHES;
 
   // ---- branch naming -------------------------------------------------------
   if (branches) {
@@ -918,6 +929,71 @@ function checkIntegration(cfg, trunk, branches, fail, warn) {
     warn(`cannot list branches — integration line(s) ${out.join(", ")} unverified`);
   }
   return out;
+}
+
+// `releaseBranch:` — the declared external-deploy axis. Optional; absent is the normal case, and
+// most Tier A repos deploy from `main` itself and need no extra name.
+//
+// It answers a different question from `integration:`, on the opposite side of the fence: which
+// branch does an EXTERNAL GitOps poller fast-forward on release, in the single-trunk tag-gated
+// shape (`trunk: main`, `deploy: tag`)? That branch is, by construction, an ancestor of trunk
+// between releases — the release script fast-forwarded it to trunk's tip as of the last tag, and
+// trunk has moved on since — which reads identically to a spent session branch to any check that
+// reasons from ancestry alone. `colab doctor` is exactly that kind of check (tools/colab), and
+// undeclared it prints a ready-to-paste delete command for a ref a live deploy pipeline is
+// polling (#63). Declaring it here is what lets doctor tell the two apart.
+//
+// The validity rules mirror checkIntegration's, because both defend a declared name actually
+// meaning something — but the axis itself is inverted: this field is scoped to touch nothing
+// BUT production (a worktree may never be cut from it or ship into it), where integration's
+// whole guarantee is to never touch production at all.
+//   - not `trunk`: this field names a THIRD branch, distinct from trunk and from `main` — the
+//     single-trunk tag-gated shape already treats `main` as the release artifact's landing spot.
+//   - not `main`: same branch, same reasoning, stated for the same "fail closed on a malformed
+//     descriptor" reason integration's check states it.
+//   - not literally `trunk`: banned outright, same as everywhere (§2 — trunk is a role).
+//   - it must EXIST: a declared branch nobody cut is the identical failure this field exists to
+//     name — "a release branch nothing consumes" — just reached from the descriptor side instead
+//     of doctor's ancestry side.
+//
+// Returns the validated branch name, or "" (never a list — a repo has at most one).
+function checkReleaseBranch(cfg, trunk, branches, fail, warn, deploy) {
+  if (!cfg || !("releaseBranch" in cfg)) return "";
+  const raw = cfg.releaseBranch;
+  if (raw === null) return ""; // `releaseBranch:` with nothing under it — same as absent
+  if (Array.isArray(raw) || (typeof raw === "object" && raw !== null)) {
+    fail(`releaseBranch must be a single branch name, found ${JSON.stringify(raw)} — a repo has at most one`);
+    return "";
+  }
+  const b = String(raw).trim();
+  if (!b) { fail("releaseBranch is set but empty"); return ""; }
+  if (b === trunk) {
+    fail(`releaseBranch names the trunk ("${b}") — it must name a DIFFERENT branch than trunk (the single-trunk tag-gated shape already lands day-to-day work on trunk itself)`);
+    return "";
+  }
+  if (b === "main") {
+    fail('releaseBranch is "main" — that is trunk itself in the single-trunk tag-gated shape this field targets; name the separate branch the external poller actually watches');
+    return "";
+  }
+  if (b === "trunk") {
+    fail('releaseBranch is "trunk" — "trunk" is a role, never a branch name (CONVENTIONS.md §2)');
+    return "";
+  }
+  if (Array.isArray(branches)) {
+    if (!branches.includes(b)) {
+      fail(`releaseBranch "${b}" does not exist as a branch — a declared release branch nobody cut is the same failure as a release branch nothing consumes`);
+      return "";
+    }
+  } else {
+    warn(`cannot list branches — releaseBranch "${b}" unverified`);
+  }
+  // Advisory, not a failure: the field's only meaning is a tag fast-forwarding this branch, so a
+  // repo declaring it under any other `deploy:` is very likely describing a shape that does not
+  // exist yet, or that has already changed underneath the descriptor.
+  if (deploy !== "tag") {
+    warn(`releaseBranch "${b}" is declared but deploy is ${JSON.stringify(deploy)} — this field only means something for deploy: tag (an external poller fast-forwarding it on release)`);
+  }
+  return b;
 }
 
 // `deploy: manual` promises that the hand-deploy procedure is written down and findable.
