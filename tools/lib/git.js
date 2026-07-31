@@ -8,19 +8,29 @@
 const { spawnSync } = require('child_process');
 const path = require('path');
 
+/**
+ * @param {object} [opts]
+ * @param {number} [opts.timeoutMs] - bound how long we'll wait (see #62: `git worktree remove` on
+ *   a slow/synced volume, or a hook script blocked on a dead network call, used to hang forever
+ *   with NO output — indistinguishable from slow-but-working). Omit for the historical unbounded
+ *   behavior; every call site that can plausibly block on something outside the repo should pass one.
+ */
 function run(cmd, args, opts = {}) {
-  const res = spawnSync(cmd, args, { encoding: 'utf8', ...opts });
+  const { timeoutMs, ...spawnOpts } = opts;
+  const res = spawnSync(cmd, args, { encoding: 'utf8', ...(timeoutMs ? { timeout: timeoutMs } : {}), ...spawnOpts });
+  const timedOut = !!(res.error && res.error.code === 'ETIMEDOUT');
   return {
-    ok: res.status === 0,
+    ok: res.status === 0 && !timedOut,
     code: res.status,
     stdout: (res.stdout || '').trim(),
-    stderr: (res.stderr || '').trim(),
+    stderr: timedOut ? `timed out after ${timeoutMs}ms with no output` : (res.stderr || '').trim(),
     error: res.error || null,
+    timedOut,
   };
 }
 
-function git(args, cwd) {
-  return run('git', args, cwd ? { cwd } : {});
+function git(args, cwd, opts = {}) {
+  return run('git', args, { ...(cwd ? { cwd } : {}), ...opts });
 }
 
 /** Absolute repo root for a path (default cwd), or null if not a git repo. */

@@ -23,6 +23,7 @@ const notify = require('./lib/notify');
 const journal = require('./lib/journal');
 const labels = require('./lib/labels');
 const records = require('./lib/records');
+const teardown = require('./lib/teardown');
 const {
   HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
   parseArgs, table, shortRepo,
@@ -970,9 +971,13 @@ dependency symlinking, dev-server restarts) live in OPTIONAL repo hooks, not her
         colab worktree new fix/import-fixes-115-114-113 --issues 115,114,113 --ports 1
 
   colab worktree rm <name> [--force] [--repo <path>]
-      Releases ALL claims on the worktree, frees its ports, runs the pre-remove hook,
-      then removes the worktree. Refuses if there are uncommitted TRACKED changes
-      unless --force.
+      Runs the pre-remove hook, removes the worktree directory, THEN releases claims and
+      frees ports — only once the directory removal actually succeeded (or there was
+      nothing left to remove: a directory missing its .git, from an earlier interrupted
+      removal, is finished by hand rather than re-fought with git). A failed or timed-out
+      removal (bounded at 5min, override with COLAB_TEARDOWN_TIMEOUT_MS) leaves the claim
+      and state record in place for a retry, unless --force. Refuses if there are
+      uncommitted TRACKED changes unless --force.
 
   colab worktree tag <name> --session <url> [--session-name <s>]
       REPAIR session identity on a worktree that already exists — and on every claim
@@ -997,6 +1002,12 @@ HOOKS (optional, provided by the adopting repo):
 
 function worktreeSubdir(config) { return config.worktreeSubdir || '.worktrees'; }
 
+// Bound how long we'll wait on a hook or on `git worktree remove` (#62). A hook blocked on a dead
+// network call, or `git worktree remove` walking a huge/slow-synced directory (Resilio Sync and
+// friends), used to hang colab forever with literally no output — indistinguishable from
+// slow-but-working. Overridable per-machine/per-repo for a legitimately slow teardown.
+const TEARDOWN_TIMEOUT_MS = Number(process.env.COLAB_TEARDOWN_TIMEOUT_MS) || 5 * 60 * 1000;
+
 function runHook(repoAbs, name, ctx) {
   const hook = path.join(repoAbs, '.colab', 'hooks', name);
   try {
@@ -1016,8 +1027,39 @@ function runHook(repoAbs, name, ctx) {
     COLAB_ISSUES: (ctx.issues || []).join(','),
   };
   print(`  running hook ${name} …`);
-  const r = spawnSync(hook, [ctx.wtPath, ...(ctx.ports || []).map(String)], { stdio: 'inherit', env });
-  return { ran: true, ok: r.status === 0, code: r.status };
+  const r = spawnSync(hook, [ctx.wtPath, ...(ctx.ports || []).map(String)], { stdio: 'inherit', env, timeout: TEARDOWN_TIMEOUT_MS });
+  const timedOut = !!(r.error && r.error.code === 'ETIMEDOUT');
+  if (timedOut) warn(`  hook ${name} timed out after ${Math.round(TEARDOWN_TIMEOUT_MS / 1000)}s with no output — treating as failed`);
+  return { ran: true, ok: r.status === 0 && !timedOut, code: r.status, timedOut };
+}
+
+/**
+ * Remove a worktree's DIRECTORY off disk — the piece of `colab worktree rm` (and `doctor --prune`)
+ * that used to hang or fail silently (#62). Never touches claims or the state.json worktree record
+ * itself; the caller decides what to do with the returned `{action, reason}` (tools/lib/teardown.js
+ * is the pure decision logic this is the thin, effectful shell around).
+ */
+function removeWorktreeDir(repoAbs, wtPath) {
+  const shape = teardown.classifyWorktreeDir({
+    pathExists: !!(wtPath && fs.existsSync(wtPath)),
+    gitEntryExists: !!(wtPath && fs.existsSync(path.join(wtPath, '.git'))),
+  });
+  if (shape === 'gone') return teardown.decideTeardown(shape);
+  if (shape === 'husk') {
+    warn('  worktree directory is a husk (.git missing) — an earlier removal was interrupted partway; cleaning it up directly');
+    git.git(['worktree', 'prune'], repoAbs); // best-effort: clears git's admin-dir reference to the dead path
+    try { fs.rmSync(wtPath, { recursive: true, force: true }); }
+    catch (e) { return { action: 'blocked', reason: `rm -rf of the husk failed: ${e.message}` }; }
+    return teardown.decideTeardown(shape);
+  }
+  // shape === 'live'. Always --force at the git level: copied .env / hook artifacts are
+  // untracked-but-expected — the tracked-changes safety gate in cmdWorktreeRm is what actually
+  // protects unsaved work, this is a different check.
+  print('  removing worktree directory …');
+  const r = git.git(['worktree', 'remove', '--force', wtPath], repoAbs, { timeoutMs: TEARDOWN_TIMEOUT_MS });
+  if (r.timedOut) warn(`  git worktree remove timed out after ${Math.round(TEARDOWN_TIMEOUT_MS / 1000)}s with no output`);
+  else if (!r.ok) warn(`  git worktree remove reported: ${r.stderr.split('\n')[0]}`);
+  return teardown.decideTeardown(shape, { ok: r.ok, timedOut: r.timedOut, stderr: r.stderr && r.stderr.split('\n')[0] });
 }
 
 function cmdWorktreeNew(argv) {
@@ -1228,12 +1270,22 @@ function cmdWorktreeRm(argv) {
   const hook = runHook(repoAbs, 'pre-remove', { wtPath: wt.path, name, branch: wt.branch, ports: wt.ports, issues: attachedIssues });
   if (hook.ran && !hook.ok && !opts.force) throw new UserError(`pre-remove hook exited ${hook.code} — aborting (use --force to override)`);
 
-  // git worktree remove
-  if (wt.path && fs.existsSync(wt.path)) {
-    // always --force at the git level: copied .env / hook artifacts are untracked-but-expected;
-    // the tracked-changes safety gate above is what actually protects unsaved work.
-    const r = git.git(['worktree', 'remove', '--force', wt.path], repoAbs);
-    if (!r.ok) warn(`git worktree remove reported: ${r.stderr.split('\n')[0]}`);
+  // remove the directory off disk. #62: a failed OR timed-out removal must NOT read as success —
+  // release the claim(s) and delete the state record below only once this actually resolved to
+  // 'noop' (nothing on disk), 'rm-rf' (a husk from an earlier interruption, finished by hand) or
+  // 'done' (git worktree remove succeeded). A 'blocked' result means the directory is still there
+  // in some unresolved state, and silently proceeding past that is exactly the bug: the registry
+  // would say gone while the disk says otherwise, with no way back except manual surgery.
+  const removal = removeWorktreeDir(repoAbs, wt.path);
+  if (removal.action === 'blocked' && !opts.force) {
+    throw new UserError(
+      `could not remove the worktree directory (${removal.reason}) — the claim(s) and state record ` +
+      `are left in place so a retry can pick this up (a retry against a partially-deleted directory ` +
+      `will detect it as a husk and finish by hand). Pass --force to release the claim(s) and drop ` +
+      `the state record anyway, leaving ${wt.path} for manual cleanup.`);
+  }
+  if (removal.action === 'blocked') {
+    warn(`  directory NOT removed (${removal.reason}) — releasing claim(s)/record anyway because --force; clean up ${wt.path} by hand`);
   }
 
   // GitHub: release each attached issue (unassign + delabel + "✅ Released" unless already CLOSED)
@@ -1256,6 +1308,7 @@ function cmdWorktreeRm(argv) {
   });
 
   print(`✓ Removed worktree "${name}"`);
+  if (removal.action === 'rm-rf') print('  (directory was a husk from an earlier interrupted removal — cleaned up directly)');
   print(`  released ${removed.claims} claim(s)${attachedIssues.length ? ' (' + attachedIssues.map((n) => '#' + n).join(' ') + ')' : ''}${gh ? '' : ' (local-only)'}`);
   if (killed.length) print(`  stopped ${killed.filter((k) => k.gone).length}/${killed.length} owned process(es): ${killed.map((k) => k.pid).join(', ')}`);
 
@@ -1483,7 +1536,7 @@ function cmdDoctor(argv) {
   const ttl = opts.ttl ? parseFloat(opts.ttl) : config.claimTTLHours;
 
   const report = { deadWorktrees: [], orphanClaims: [], staleClaims: [], orphanPorts: [], brokenRecords: [], prunedPorts: [],
-    mergedFlips: [], mergedSweep: [], mergedDirty: [], mergedHookFail: [], shippedBranches: [], ghostPorts: [], pruned: !!opts.prune };
+    mergedFlips: [], mergedSweep: [], mergedDirty: [], mergedHookFail: [], mergedRemoveFail: [], shippedBranches: [], ghostPorts: [], pruned: !!opts.prune };
 
   // One answer per (repo, branch) — pass 5b asks about the same branch from a worktree and from each
   // of its claims, and every miss costs two `git rev-parse` calls.
@@ -1629,7 +1682,13 @@ function cmdDoctor(argv) {
       const attached = Object.values(st2.claims).filter((c) => c.worktree === wt.name).map((c) => normIssueNum(c.issue));
       const hook = runHook(wt.repo, 'pre-remove', { wtPath: wt.path, name: wt.name, branch: wt.branch, ports: wt.ports, issues: attached });
       if (hook.ran && !hook.ok) { report.mergedHookFail.push(wt.name); continue; } // pre-remove veto → leave it
-      if (fs.existsSync(wt.path)) git.git(['worktree', 'remove', '--force', wt.path], wt.repo);
+      // #62: the removal result is checked, same as cmdWorktreeRm — this loop used to call
+      // `git worktree remove` and drop the state record regardless of whether it actually succeeded,
+      // which is exactly how a `--prune` sweep turned a failed-or-hung removal into a registry entry
+      // that quietly vanished while the husk (and, worse, the claim it should have released) stayed
+      // behind with nothing left pointing at either.
+      const removal = removeWorktreeDir(wt.repo, wt.path);
+      if (removal.action === 'blocked') { report.mergedRemoveFail.push({ name: wt.name, reason: removal.reason }); continue; }
       // LOCAL-ONLY: doctor never touches GitHub (a cron may be pruning a shared machine). A flipped
       // merged worktree has no claims by the flip guard; a ship --keep-worktree residual claim is for
       // an already-shipped (Closes) issue, so we drop it locally and let claims --sync reconcile GitHub.
@@ -1726,6 +1785,10 @@ function cmdDoctor(argv) {
   }
   if (report.mergedHookFail.length) {
     print(`Left ${report.mergedHookFail.length} merged worktree(s) — pre-remove hook vetoed teardown: ${report.mergedHookFail.join(' ')}`);
+  }
+  if (report.mergedRemoveFail.length) {
+    print(`Left ${report.mergedRemoveFail.length} merged worktree(s) — directory removal did not complete (claim(s) NOT released, retry later):`);
+    for (const w of report.mergedRemoveFail) print(`  ${w.name} — ${w.reason}`);
   }
   if (opts.prune && report.prunedPorts.length) print(`Freed ports: ${[...new Set(report.prunedPorts)].sort((a, b) => a - b).join(', ')}`);
   // Deliberately NOT part of the health verdict below. `ship` keeps branches by default, so one

@@ -299,9 +299,12 @@ A worktree entry carries a `status`, backfilled-on-read (older/absent → `runni
   group with an unfinished sibling is not done.
 - **merged → killed**: `colab doctor --prune` now **sweeps** merged worktrees still on disk (full
   teardown: pre-remove hook → `git worktree remove` → free ports → drop the entry, all local-only). It
-  **refuses** a merged worktree with uncommitted **tracked** changes (reports it instead). `running`
-  worktrees are **never** swept. Teardown removes the entry outright — "killed" is the absence of a
-  record, not a stored status (per Boss: no need to save it). That absence is exactly what the
+  **refuses** a merged worktree with uncommitted **tracked** changes (reports it instead), and **also
+  refuses** — leaving the entry in place — one whose directory removal failed or timed out, reporting
+  it separately rather than dropping the entry while a husk (or a still-live directory) sits on disk
+  with nothing left pointing at it (#62). `running` worktrees are **never** swept. Teardown removes the
+  entry outright — "killed" is the absence of a record, not a stored status (per Boss: no need to save
+  it). That absence is exactly what the
   optional local journal recovers, without adding a status to the schema: teardown emits a
   `worktree.removed` line carrying `livedMs` and the last `status`, so how long the worktree lived
   and whether it ever reached `merged` survive the record that is being deleted.
@@ -646,7 +649,7 @@ Run `colab <cmd> --help` for full detail.
 | `port free <port> \| --worktree N \| --claim I` | free ports |
 | `ports [--json]` | list allocated ports + the reserved set |
 | `worktree new <branch> [--issues N,M] [--ports N \| --at p1,..] [--name X] [--trunk T] [--session S] [--session-name S] [--repo P]` | create a worktree (optional) |
-| `worktree rm <name> [--force] [--repo P]` | remove a worktree; release its group; free its ports. Refuses on uncommitted tracked work **or** processes the worktree owns (cwd inside it); `--force` overrides both, terminating the owned processes. Ports still bound afterwards are reported as such, never as freed |
+| `worktree rm <name> [--force] [--repo P]` | remove a worktree; release its group; free its ports. Refuses on uncommitted tracked work **or** processes the worktree owns (cwd inside it); `--force` overrides both, terminating the owned processes. Ports still bound afterwards are reported as such, never as freed. Directory removal (and the pre-remove hook) is bounded at 5min (`COLAB_TEARDOWN_TIMEOUT_MS`); a failed or timed-out removal leaves the claim(s) and state record in place for a retry instead of releasing them anyway, unless `--force`. A directory missing `.git` (an earlier removal interrupted partway) is recognized as a **husk** and finished by hand rather than re-fought with `git worktree remove`, which can never succeed against it |
 | `worktree tag <name> --session S [--session-name S]` | **repair** session identity on an existing worktree **and its claims** (see *Session identity*) |
 | `worktrees [--json]` | list worktrees (status + on-disk liveness) |
 | `ship [--worktree N \| --branch B] [--message M] [--keep-worktree] [--delete-branch] [--dry]` | code-wrap **Phase B**: squash-merge a session branch → trunk. The branch is **kept** unless `--delete-branch`. Gated by repo autonomy (see *Phase B autonomy ladder*) |
