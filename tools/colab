@@ -582,7 +582,7 @@ function cmdRelease(argv) {
 // readiness — colab owns the deps-checked marker (CONVENTIONS.md §5)
 // ---------------------------------------------------------------------------
 
-const HELP_READINESS = `colab readiness <issue> [--clear] [--repo <path>]
+const HELP_READINESS = `colab readiness <issue> [--clear] [--mechanical] [--repo <path>]
 
 Own the readiness marker (§5) — the deps-checked label meaning "dependencies verified,
 no open blocker". Making colab the writer (rather than a raw \`gh issue edit\`) is the point:
@@ -602,12 +602,26 @@ an actionable message pointing at handbook-sync — never a success on a write t
 
 The label is DERIVED state, only ever as fresh as this last check: whoever adds a blocker
 clears it. Prefer leaving it off to leaving it wrong (CONVENTIONS.md §5).
+
+  colab readiness <N> --mechanical           add graph-empty    (reads blockedBy itself)
+  colab readiness <N> --mechanical --clear   remove graph-empty
+
+--mechanical writes a SEPARATE, weaker marker — CONVENTIONS.md §5 "Mechanical readiness"
+(#69). It never touches deps-checked, and deps-checked never touches graph-empty: the two
+claims must stay distinguishable, because a mechanical read cannot see a blocker described
+only in prose. It re-derives its own evidence rather than trusting the caller — it reads
+\`blockedBy\` via \`gh issue view\` on every run — and REFUSES rather than write the label if
+that read comes back non-empty or unreadable. On a successful ADD it also posts a receipt
+comment naming exactly what was read and when, so the claim is auditable rather than
+assumed. graph-empty is opt-in per repo (create the label yourself; adoption/sync/the audit
+do not provision it — same treatment as \`tracking\`), and it emits no observer event: the
+receiver has agreed \`readiness.marked\` to mean deps-checked specifically, and this is not that.
 `;
 
 function cmdReadiness(argv) {
   const opts = parseArgs(argv, {
     values: { '--repo': 'repo' },
-    flags: { '--clear': 'clear', '-h': 'help', '--help': 'help' },
+    flags: { '--clear': 'clear', '--mechanical': 'mechanical', '-h': 'help', '--help': 'help' },
   });
   if (opts.help || opts._.length === 0) return print(HELP_READINESS);
   const num = normIssueNum(opts._[0]);
@@ -621,6 +635,8 @@ function cmdReadiness(argv) {
   if (!isGhUsable(repoAbs)) {
     throw new UserError(`gh not usable here (no gh auth or no origin remote) — the ${labels.READINESS_LABEL} marker lives on GitHub and cannot be written local-only`);
   }
+
+  if (opts.mechanical) return cmdReadinessMechanical(repoAbs, num, opts);
 
   const r = git.ghIssueEdit(repoAbs, num, labels.readinessLabelArgs({ clear: opts.clear }));
   if (!r.ok) {
@@ -641,6 +657,58 @@ function cmdReadiness(argv) {
   // the provider's read-after-write lag (#46 §1, following #45 §1). Best-effort as ever: unset
   // notifyUrl is silence, a dead receiver costs nothing, and the label above is already written.
   pushEvent('readiness', { repo: repoAbs, issue: num, payload: { state: opts.clear ? 'unchecked' : 'checked' } });
+  return 0;
+}
+
+/**
+ * The --mechanical half of `colab readiness` (#69). Split out rather than interleaved with the
+ * deps-checked path above so the two writers can never accidentally share a branch of logic —
+ * CONVENTIONS.md §5 is explicit that the two claims must stay distinguishable at every layer,
+ * not just in the label name.
+ */
+function cmdReadinessMechanical(repoAbs, num, opts) {
+  if (opts.clear) {
+    const r = git.ghIssueEdit(repoAbs, num, labels.mechanicalReadinessLabelArgs({ clear: true }));
+    if (!r.ok) throw new UserError(`gh edit #${num} failed (${r.stderr.split('\n')[0] || r.code})`);
+    print(`Cleared ${labels.MECHANICAL_READINESS_LABEL} on #${num} in ${shortRepo(repoAbs)}`);
+    return 0;
+  }
+
+  // Opt-in label (CONVENTIONS.md §5): unlike deps-checked, adoption/sync never provision this
+  // one, so an absent label here is the ordinary case for a repo that has not opted in — point
+  // at self-provisioning, never at handbook-sync (there is nothing for sync to back-fill).
+  const present = git.ghListLabels(repoAbs);
+  if (present && !present.includes(labels.MECHANICAL_READINESS_LABEL)) {
+    throw new UserError(`this repo has no \`${labels.MECHANICAL_READINESS_LABEL}\` label — it is opt-in `
+      + `(CONVENTIONS.md §5, Mechanical readiness). Create it to use the mechanical lane: `
+      + `gh label create ${labels.MECHANICAL_READINESS_LABEL} --color BFDADC --description "Mechanical check: the recorded dependency graph reads empty — NOT a substitute for deps-checked"`);
+  }
+
+  // Re-derive the evidence ourselves — the whole point of #69's resolution is that this marker
+  // may never be written on a caller's say-so, only on what the API says right now.
+  const info = git.ghIssueView(repoAbs, num, ['blockedBy']);
+  if (!info || !info.blockedBy || typeof info.blockedBy.totalCount !== 'number') {
+    throw new UserError(`could not read #${num}'s blockedBy graph — refusing to write ${labels.MECHANICAL_READINESS_LABEL} on an unmeasured read`);
+  }
+  if (info.blockedBy.totalCount > 0) {
+    throw new UserError(`#${num} has ${info.blockedBy.totalCount} recorded blocker(s) — ${labels.MECHANICAL_READINESS_LABEL} asserts an EMPTY graph, so this read does not qualify`);
+  }
+
+  const r = git.ghIssueEdit(repoAbs, num, labels.mechanicalReadinessLabelArgs({ clear: false }));
+  if (!r.ok) throw new UserError(`gh edit #${num} failed (${r.stderr.split('\n')[0] || r.code})`);
+
+  // The receipt (#69, framing 2): auditable rather than assumed. Best-effort — the label write
+  // above already landed, and a comment that fails to post costs a human re-deriving "when was
+  // this checked" from the label's own timestamp, not a lost fact.
+  const ts = new Date().toISOString();
+  git.ghIssueComment(repoAbs, num,
+    `Mechanical readiness check (\`colab readiness --mechanical\`): \`blockedBy\` totalCount = 0, read ${ts}. `
+    + `This confirms the ENCODED graph only — it cannot see a blocker described only in prose. Applied \`${labels.MECHANICAL_READINESS_LABEL}\`, not \`${labels.READINESS_LABEL}\`.`);
+
+  print(`Marked #${num} in ${shortRepo(repoAbs)} ${labels.MECHANICAL_READINESS_LABEL} — blockedBy reads empty (receipt posted)`);
+  // Deliberately no pushEvent: the receiver has agreed `readiness.marked` to mean deps-checked
+  // specifically (#45, #46); this marker is not that claim and gets no event until a kind for it
+  // is separately agreed (CONVENTIONS.md §5, Mechanical readiness).
   return 0;
 }
 
@@ -3265,6 +3333,9 @@ Sequence (each step gated; any failure aborts before the push — the target is 
   f. B3 teardown        colab worktree rm (releases claims + ports + ✅ comments) unless --keep-worktree.
                         The BRANCH IS KEPT — pass --delete-branch to remove it (local + remote).
   g. B4 verify + h.     confirm each issue auto-closed; post "🚢 Shipped to <trunk>" per issue
+  i. group teardown     for every group:<key> label the branch's issues carried, delete the
+                        LABEL OBJECT once no open issue carries it anymore (#82) — a live member
+                        elsewhere leaves it in place
 
 The default squash subject is the branch's HIGHEST-WEIGHT commit (breaking > feat > fix > perf >
 refactor > docs > test > chore, ties to the oldest) — NOT its newest commit, which on a well-run
@@ -3951,15 +4022,17 @@ function cmdShip(argv) {
   handleShippedBranch(repoAbs, target, sess.branch, { deleteBranch: opts.deleteBranch, worktreeKept, integration });
 
   // ---- (g/h) B4 verify + post summary per issue ----
+  const groupLabelsCarried = new Set(); // union across every issue this branch carried — for (i) below
   if (gh) {
     for (const num of sess.issues) {
       const isRef = refsSet.has(num);
-      const info = git.ghIssueView(repoAbs, num, ['state']);
+      const info = git.ghIssueView(repoAbs, num, ['state', 'labels']);
       // A closed issue must have auto-closed; a ref'd (tracking) issue must have STAYED open. The
       // second check catches the one case the pure layer cannot fix: a carried commit body that
       // literally says `Closes #N` for a ref issue — GitHub honours it and closes the memory issue.
       if (!isRef && info && info.state !== 'CLOSED') warn(`#${num} did not auto-close (state=${info.state}) — the Closes trailer needs a push to the DEFAULT branch; close it by hand if ${target} isn't default`);
       if (isRef && info && info.state === 'CLOSED') warn(`#${num} was meant to stay open (Refs, tracking issue) but is CLOSED — a commit body likely carries "Closes #${num}"; reopen it by hand`);
+      for (const gl of labels.groupLabelNames(info && info.labels)) groupLabelsCarried.add(gl);
       const shipSess = sessionCommentSuffix(sess.session, sess.sessionName); // markdown link when both present
       // Name the branch it actually landed on. An issue whose code is on a long-lived line is NOT
       // in trunk, and a comment saying otherwise would be read as "this is in the next release".
@@ -3969,6 +4042,24 @@ function cmdShip(argv) {
         : `🚢 Shipped to ${target} by colab ship — ${sha}${onLine}${shipSess}`;
       const r = git.ghIssueComment(repoAbs, num, body);
       if (!r.ok) warn(`could not post ship comment on #${num}`);
+    }
+  }
+
+  // ---- (i) group-label teardown (#82) ----
+  // A `group:<key>` label (CONVENTIONS.md §5, Grouping) records that a set of issues had to
+  // share one branch — it stops being useful the moment every member is closed, and left in
+  // place it is picker noise forever (measured: ~12 stale entries on one fleet repo). Only the
+  // issues THIS branch carried can trigger a check — that is the set whose state just changed —
+  // but membership is read fresh per label, because a group can outlive the branch that closed
+  // its last member.
+  if (gh) {
+    for (const gl of groupLabelsCarried) {
+      const openMembers = git.ghIssueListByLabel(repoAbs, gl, 'open', ['number']);
+      if (openMembers === null) { warn(`could not check membership of ${gl} — left in place`); continue; }
+      if (openMembers.length > 0) continue; // still binds the remainder — leave it
+      const del = git.ghLabelDelete(repoAbs, gl);
+      if (del.ok) print(`  deleted spent group label ${gl} (every member now closed)`);
+      else warn(`could not delete spent group label ${gl}: ${del.stderr || 'gh label delete failed'}`);
     }
   }
 
@@ -4320,7 +4411,7 @@ Three independent capabilities (each works standalone):
 Commands:
   claim <issue> [<issue>...] [--worktree N] [--branch B] [--repo P]   claim issue(s)
   release <issue> [--repo P]                                          release one issue
-  readiness <issue> [--clear] [--repo P]                             own the deps-checked marker (§5)
+  readiness <issue> [--clear] [--mechanical] [--repo P]              own the deps-checked / graph-empty markers (§5)
   claims [--json] [--sync]                                            list / reconcile with GitHub
 
   port alloc [--count N] [--range A-B] [--worktree N|--claim I|--label S]

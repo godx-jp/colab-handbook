@@ -57,15 +57,27 @@
  * (the graph edge, the blocker's open/closed state, its branch facts) and this decides. That is
  * what lets a consumer outside this repo — a dashboard, a vendored copy — reach the same verdict
  * from facts it collected its own way.
+ *
+ * MECHANICAL READINESS (#69) is a SEPARATE, WEAKER claim layered on top of `depsChecked`, not a
+ * second way to reach the same `ready` verdict. `depsChecked` means a reasoning session looked —
+ * including at prose a blocker might only be described in, never encoded as an edge. `graphEmpty`
+ * means an authoritative API read found the encoded graph empty; it says nothing about prose, so
+ * it must never be allowed to produce `ready` on its own. An empty blocker list with `graphEmpty`
+ * true and `depsChecked` false reads `unchecked-mechanical` — still not `isStartable()` by
+ * default. A consumer that has decided the faster, weaker lane is worth the risk opts in
+ * explicitly via `isStartableMechanical()`; every existing conservative consumer is unaffected by
+ * this fact merely being available.
  */
 
 const landed = require('./landed.js');
 
-/** The four verdicts. `UNCHECKED` is not a fourth kind of ready — it is "nobody looked". */
+/** The five verdicts. `UNCHECKED` and `UNCHECKED_MECHANICAL` are not kinds of ready — the first
+ *  is "nobody looked"; the second is "an API said the graph is empty, nobody has judged it yet". */
 const READY = 'ready';
 const SOFT = 'ready-with-a-note'; // a real blocker, whose code is already written and pushed
 const BLOCKED = 'blocked';
 const UNCHECKED = 'unchecked';
+const UNCHECKED_MECHANICAL = 'unchecked-mechanical'; // graph reads empty; no reasoning session yet (#69)
 
 /** Per-blocker verdicts, in increasing order of how much they stop you. */
 const CLEAR = 'clear';       // this one does not block: closed, or its work is already on the base
@@ -136,12 +148,17 @@ function classifyBlocker(blocker) {
  *
  * Input: {
  *   blockers,      // array of blocker facts. undefined/null means NOBODY LOOKED — not "none".
- *   depsChecked,   // the marker meaning someone verified an empty blocker list
+ *   depsChecked,   // the marker meaning a REASONING SESSION verified an empty blocker list —
+ *                  // including blockers described only in prose, never encoded as an edge.
+ *   graphEmpty,    // the marker meaning an AUTHORITATIVE API READ found the encoded graph empty
+ *                  // (#69). Strictly weaker than depsChecked — it cannot see a prose-only
+ *                  // blocker — so it can promote UNCHECKED to UNCHECKED_MECHANICAL and no
+ *                  // further; only depsChecked (or a clear blocker list) reaches READY.
  * }
  *
  * Returns { state, why, notes: [{ number, why }], hard: [{ number, why }] }.
  */
-function classify({ blockers, depsChecked } = {}) {
+function classify({ blockers, depsChecked, graphEmpty } = {}) {
   if (!Array.isArray(blockers)) {
     return {
       state: UNCHECKED,
@@ -172,6 +189,14 @@ function classify({ blockers, depsChecked } = {}) {
     };
   }
   if (blockers.length === 0 && !depsChecked) {
+    if (graphEmpty) {
+      return {
+        state: UNCHECKED_MECHANICAL,
+        why: 'blocker list is empty and an API read confirms it — but nobody has judged prose blockers',
+        notes: [],
+        hard: [],
+      };
+    }
     return {
       state: UNCHECKED,
       why: 'blocker list is empty and unverified — "none" and "nobody checked" look identical',
@@ -190,13 +215,26 @@ function classify({ blockers, depsChecked } = {}) {
 /**
  * Callers act on this, not on `state`: work may begin on a positive `ready` or `ready-with-a-note`
  * and on nothing else. `unchecked` is not startable — that is the distinction the marker exists for.
+ * `unchecked-mechanical` ALSO reads not-startable here, on purpose: this is the conservative
+ * default every existing consumer already gets, unaffected by #69's weaker signal existing.
  */
 function isStartable(verdict) {
   return Boolean(verdict) && (verdict.state === READY || verdict.state === SOFT);
 }
 
+/**
+ * The OPT-IN, weaker lane (#69): a consumer that has decided a mechanically-confirmed-empty
+ * graph is worth starting on, without waiting for a reasoning session, calls this instead of
+ * `isStartable`. It accepts everything `isStartable` does, plus `unchecked-mechanical`. Nothing
+ * in this repo's own triage or scheduled-driver path calls this — adopting it is a per-consumer
+ * decision, exactly as `graph-empty` is a per-repo opt-in label (CONVENTIONS.md §5).
+ */
+function isStartableMechanical(verdict) {
+  return Boolean(verdict) && (verdict.state === READY || verdict.state === SOFT || verdict.state === UNCHECKED_MECHANICAL);
+}
+
 module.exports = {
-  classify, classifyBlocker, isStartable,
-  READY, SOFT, BLOCKED, UNCHECKED,
+  classify, classifyBlocker, isStartable, isStartableMechanical,
+  READY, SOFT, BLOCKED, UNCHECKED, UNCHECKED_MECHANICAL,
   CLEAR, SOFT_BLOCK, HARD_BLOCK,
 };

@@ -18,6 +18,8 @@ const assert = require('node:assert');
 const {
   CONVENTION_LABELS, conventionLabelNames, missingConventionLabels,
   READINESS_LABEL, readinessLabelArgs, readinessMissingLabelHint,
+  MECHANICAL_READINESS_LABEL, mechanicalReadinessLabelArgs,
+  GROUP_LABEL_PREFIX, isGroupLabel, groupLabelNames,
 } = require('./labels.js');
 
 test('the convention set is exactly the four labels §9 provisions, in canonical order', () => {
@@ -96,4 +98,70 @@ test('readinessMissingLabelHint returns null when the label set could not be REA
   assert.equal(readinessMissingLabelHint(null), null);
   assert.equal(readinessMissingLabelHint(undefined), null);
   assert.match(readinessMissingLabelHint([]), /deps-checked/);
+});
+
+// #82 — colab ship's B4 group-label teardown: once every member of a group:<key> label is
+// closed, the label OBJECT is deleted (gh label delete). These two functions are the pure half
+// of that: which label names on an issue are group markers, and — unioned across a branch's
+// issues — which ones colab ship should even bother checking membership for.
+
+test('isGroupLabel matches only the prefixed shape, never the bare prefix or an unrelated label', () => {
+  assert.equal(isGroupLabel('group:import-fixes'), true);
+  assert.equal(isGroupLabel('group:x'), true);
+  assert.equal(isGroupLabel(GROUP_LABEL_PREFIX), false); // "group:" with no key names no group
+  assert.equal(isGroupLabel('in-progress'), false);
+  assert.equal(isGroupLabel('grouped'), false); // prefix-ish but not the prefix
+  assert.equal(isGroupLabel(''), false);
+  assert.equal(isGroupLabel(null), false);
+  assert.equal(isGroupLabel(undefined), false);
+});
+
+test('groupLabelNames extracts group markers from a label list, ignoring everything else', () => {
+  assert.deepStrictEqual(
+    groupLabelNames(['in-progress', 'group:import-fixes', 'deps-checked']),
+    ['group:import-fixes'],
+  );
+  assert.deepStrictEqual(groupLabelNames(['in-progress', 'bug']), []);
+});
+
+test('groupLabelNames accepts label OBJECTS — the shape gh issue view actually returns', () => {
+  const present = [{ name: 'in-progress' }, { name: 'group:aging-buckets' }];
+  assert.deepStrictEqual(groupLabelNames(present), ['group:aging-buckets']);
+});
+
+test('groupLabelNames dedupes and preserves first-seen order — a branch unions several issues', () => {
+  assert.deepStrictEqual(
+    groupLabelNames(['group:b', 'group:a', 'group:b']),
+    ['group:b', 'group:a'],
+  );
+});
+
+test('groupLabelNames tolerates empty / null / undefined the same way missingConventionLabels does', () => {
+  assert.deepStrictEqual(groupLabelNames([]), []);
+  assert.deepStrictEqual(groupLabelNames(null), []);
+  assert.deepStrictEqual(groupLabelNames(undefined), []);
+});
+
+// --- mechanical readiness marker (#69) ---------------------------------------
+// `graph-empty` is a deliberately SEPARATE, weaker claim from `deps-checked` — see
+// CONVENTIONS.md §5 "Mechanical readiness". These tests pin that it stays out of the set an
+// unattended adoption/sync/audit provisions (opt-in, like `tracking`), and that its write helper
+// never shares a name or a code path with `readinessLabelArgs`.
+
+test('graph-empty is not one of the four provisioned convention labels', () => {
+  assert.equal(MECHANICAL_READINESS_LABEL, 'graph-empty');
+  assert.ok(!conventionLabelNames().includes(MECHANICAL_READINESS_LABEL),
+    'a mechanical-only check must stay opt-in — forcing it defeats the point of a cheaper lane');
+});
+
+test('a repo missing graph-empty is never reported by missingConventionLabels — it is not in the set', () => {
+  assert.deepStrictEqual(missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic']), []);
+});
+
+test('mechanicalReadinessLabelArgs maps set⇒add and clear⇒remove against its OWN marker name', () => {
+  assert.deepStrictEqual(mechanicalReadinessLabelArgs(), ['--add-label', 'graph-empty']);
+  assert.deepStrictEqual(mechanicalReadinessLabelArgs({}), ['--add-label', 'graph-empty']);
+  assert.deepStrictEqual(mechanicalReadinessLabelArgs({ clear: true }), ['--remove-label', 'graph-empty']);
+  // And never the other marker's name — the two writers must not be interchangeable.
+  assert.notDeepStrictEqual(mechanicalReadinessLabelArgs(), readinessLabelArgs());
 });
