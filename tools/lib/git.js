@@ -142,11 +142,56 @@ function worktreeListDetailed(repo) {
   return out;
 }
 
+/**
+ * `git status --porcelain` split into its tracked and untracked halves, or null if git could not
+ * answer. Two deliberate choices, both load-bearing for the callers below:
+ *
+ * - **`-uall`, not the default `-unormal`.** Porcelain normally collapses an untracked directory
+ *   into a single `?? dir/` line. The callers of `dirtyUntracked` are about to DELETE what they
+ *   are describing, and `?? tools/lib/` does not tell a human which of their new sources is at
+ *   stake. Listing them costs a directory walk over non-ignored paths only.
+ * - **No `--ignored`, ever.** Ignored files stay invisible here by construction. Build output,
+ *   `node_modules`, a copied `.env` — those are exactly what a teardown is right to destroy
+ *   without asking, and a worktree post-create hook legitimately produces them.
+ */
+function statusPorcelain(wtPath) {
+  const r = git(['status', '--porcelain', '-uall'], wtPath);
+  if (!r.ok) return null;
+  const lines = r.stdout.split('\n').filter(Boolean);
+  return {
+    tracked: lines.filter((l) => !l.startsWith('??')),
+    untracked: lines.filter((l) => l.startsWith('??')),
+  };
+}
+
+// All three degrade to '' ("clean") when git itself cannot answer, which for a destructive caller
+// means "proceed". That is deliberate and not a fail-open bug: the case where `git status` fails in
+// a directory that exists is a worktree that is no longer a worktree — the #62 husk, whose whole
+// removal path exists to clean it up. A gate that refused there would make husks unremovable.
+
 /** Tracked (non-untracked) uncommitted changes in a worktree, or '' if clean. */
 function dirtyTracked(wtPath) {
-  const r = git(['status', '--porcelain'], wtPath);
-  if (!r.ok) return '';
-  return r.stdout.split('\n').filter((l) => l && !l.startsWith('??')).join('\n');
+  const s = statusPorcelain(wtPath);
+  return s ? s.tracked.join('\n') : '';
+}
+
+/**
+ * Untracked, NON-IGNORED files in a worktree, or '' if none (#86).
+ *
+ * The companion `dirtyTracked` never had. A file that has never been `git add`ed exists in exactly
+ * one place — the working tree — so it is the ONLY category of work a teardown can destroy with
+ * nothing to restore from: not the index, not a commit, not the remote. Tracked changes always
+ * have at least a committed base to diff against; untracked ones have nothing.
+ */
+function dirtyUntracked(wtPath) {
+  const s = statusPorcelain(wtPath);
+  return s ? s.untracked.join('\n') : '';
+}
+
+/** Everything uncommitted: tracked changes AND untracked non-ignored files. '' if the tree is clean. */
+function dirtyAny(wtPath) {
+  const s = statusPorcelain(wtPath);
+  return s ? [...s.tracked, ...s.untracked].join('\n') : '';
 }
 
 // ---- gh ----
@@ -253,7 +298,7 @@ function ghAssignedIssues(repo) {
 
 module.exports = {
   run, git, repoRoot, mainRepoRoot, originUrl, detectTrunk, branchExists,
-  worktreeList, worktreeListDetailed, dirtyTracked,
+  worktreeList, worktreeListDetailed, dirtyTracked, dirtyUntracked, dirtyAny,
   ghAvailable, ghIssueEdit, ghListLabels, ghAssignedIssues,
   ghCurrentLogin, ghIssueView, ghIssueComment, ghRunLatest,
   ghIssueListByLabel, ghLabelDelete,

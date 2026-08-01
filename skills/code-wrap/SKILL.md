@@ -661,7 +661,10 @@ git worktree remove <path>  # … else raw git
 ```
 
 `colab worktree rm` runs the repo's `.colab/hooks/pre-remove` (e.g. dropping a
-cloned DB) and refuses if there's uncommitted tracked work.
+cloned DB) and refuses if there's uncommitted work — tracked changes **or**
+untracked, non-ignored files. Untracked counts because it is the only category
+with no copy anywhere else: not in the index, not in a commit, not on the remote.
+Ignored files (build output, a copied `.env`) never block.
 
 **It also refuses when the worktree still owns running processes** — anything
 whose cwd is inside it, typically the dev server you started. That is not an
@@ -676,7 +679,7 @@ leave one standing silently:
 
 - the group branch still has unfinished issues,
 - a human just told you to keep working in it,
-- teardown is blocked by uncommitted tracked work.
+- teardown is blocked by uncommitted work (tracked or untracked).
 
 > **If you keep it, release its claims by hand.** `colab worktree rm` is *what*
 > releases claims — skip the removal and that automatic path never runs, so B3

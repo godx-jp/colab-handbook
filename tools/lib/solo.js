@@ -47,10 +47,15 @@ function unpushedBranches(repoAbs, trunk) {
  * ship precondition but wrong here — solo flow's whole premise is "this checkout has nothing
  * anyone else needs to know about", and an untracked file is exactly the kind of thing a returning
  * session would otherwise have to notice by eye).
+ *
+ * #86: this is now a thin adapter over `git.dirtyAny` rather than its own porcelain call. It was
+ * written here first, which is how the repo ended up with two independent implementations of one
+ * reading — and only this copy counted untracked files, while the teardown gate that most needed
+ * them did not. Keeps the array shape solo's callers and tests expect.
  */
 function fullyDirty(repoAbs) {
-  const r = git.git(['status', '--porcelain'], repoAbs);
-  return r.ok ? r.stdout.split('\n').filter(Boolean) : [];
+  const d = git.dirtyAny(repoAbs);
+  return d ? d.split('\n').filter(Boolean) : [];
 }
 
 /**

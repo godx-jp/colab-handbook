@@ -1238,13 +1238,43 @@ function removeWorktreeDir(repoAbs, wtPath) {
     return teardown.decideTeardown(shape);
   }
   // shape === 'live'. Always --force at the git level: copied .env / hook artifacts are
-  // untracked-but-expected — the tracked-changes safety gate in cmdWorktreeRm is what actually
-  // protects unsaved work, this is a different check.
+  // untracked-but-expected, and plain `git worktree remove` refuses on any of them.
+  //
+  // #86 — READ THIS BEFORE ADDING A CALLER. That --force switches OFF git's own refusal to delete
+  // a worktree holding untracked files, so this function will destroy never-committed sources
+  // without a word. The protection is therefore entirely the caller's: every call site must run
+  // `uncommittedWork()` first and honour it. That contract used to be written here as "the
+  // tracked-changes safety gate in cmdWorktreeRm is what actually protects unsaved work" — which
+  // was the bug in one sentence, since a tracked-only gate cannot see the one category of work
+  // that has no copy anywhere else.
   print('  removing worktree directory …');
   const r = git.git(['worktree', 'remove', '--force', wtPath], repoAbs, { timeoutMs: TEARDOWN_TIMEOUT_MS });
   if (r.timedOut) warn(`  git worktree remove timed out after ${Math.round(TEARDOWN_TIMEOUT_MS / 1000)}s with no output`);
   else if (!r.ok) warn(`  git worktree remove reported: ${r.stderr.split('\n')[0]}`);
   return teardown.decideTeardown(shape, { ok: r.ok, timedOut: r.timedOut, stderr: r.stderr && r.stderr.split('\n')[0] });
+}
+
+/**
+ * The uncommitted-work gate for every path that DELETES a worktree directory (#86). One definition,
+ * because there are two such paths (`worktree rm`, `doctor --prune`) and the original gate lived
+ * inline in one of them — so when the second was written it inherited the same blind spot rather
+ * than the same rule. A third caller must use this too; see removeWorktreeDir's contract note.
+ *
+ * `untracked` is the half that matters most and was missing: a session's first hour is a new module
+ * and a new test, neither staged. Ignored files are excluded (git.js `statusPorcelain`).
+ */
+function uncommittedWork(wtPath) {
+  if (!wtPath || !fs.existsSync(wtPath)) return { any: false, lines: '', what: '' };
+  const tracked = git.dirtyTracked(wtPath);
+  const untracked = git.dirtyUntracked(wtPath);
+  return {
+    any: !!(tracked || untracked),
+    lines: [tracked, untracked].filter(Boolean).join('\n'),
+    what: [
+      tracked && 'TRACKED changes',
+      untracked && 'UNTRACKED files (never committed — no copy in the index, a commit, or the remote)',
+    ].filter(Boolean).join(' and '),
+  };
 }
 
 function cmdWorktreeNew(argv) {
@@ -1419,12 +1449,15 @@ function cmdWorktreeRm(argv) {
   if (!wt) throw new UserError(`No worktree "${name}" in state`);
   const repoAbs = wt.repo;
 
-  // safety: refuse if tracked changes uncommitted
-  if (wt.path && fs.existsSync(wt.path)) {
-    const dirty = git.dirtyTracked(wt.path);
-    if (dirty && !opts.force) {
-      warn(dirty);
-      throw new UserError(`Worktree "${name}" has uncommitted TRACKED changes — commit/stash, or pass --force`);
+  // safety: refuse if ANY uncommitted work is present — tracked changes or untracked files (#86).
+  // "commit", never "stash": refs/stash is one ref shared by every worktree of the repo, so telling
+  // a session to stash here is telling it to reach into a ref a concurrent session may pop
+  // (CONVENTIONS.md §4). The old message recommended exactly that.
+  {
+    const work = uncommittedWork(wt.path);
+    if (work.any && !opts.force) {
+      warn(work.lines);
+      throw new UserError(`Worktree "${name}" has uncommitted ${work.what} — commit them, or pass --force to destroy them`);
     }
   }
 
@@ -1934,15 +1967,17 @@ function cmdDoctor(argv) {
 
   // 6. merged worktrees still on disk = sweep candidates. Report always; --prune tears them down
   //    (pre-remove hook → git worktree remove → free ports → drop entry). Done OUTSIDE the pass-1..5
-  //    lock to avoid nesting state.mutate; refuse ones with uncommitted TRACKED files (report instead).
-  //    running worktrees are NEVER touched by this sweep.
+  //    lock to avoid nesting state.mutate; refuse ones holding ANY uncommitted work — tracked
+  //    changes or untracked files (#86) — and report them instead. running worktrees are NEVER
+  //    touched by this sweep. This is the unattended path, so the untracked half matters more here
+  //    than in `worktree rm`: nobody is watching a --prune sweep decide.
   {
     const st2 = state.loadState();
     for (const wt of Object.values(st2.worktrees)) {
       if (wtStatus(wt) !== 'merged') continue;
       if (!wt.path || !fs.existsSync(wt.path)) continue;
-      const dirty = git.dirtyTracked(wt.path);
-      if (dirty) { report.mergedDirty.push({ name: wt.name, repo: shortRepo(wt.repo) }); continue; }
+      const work = uncommittedWork(wt.path);
+      if (work.any) { report.mergedDirty.push({ name: wt.name, repo: shortRepo(wt.repo), what: work.what }); continue; }
       report.mergedSweep.push({ name: wt.name, repo: shortRepo(wt.repo), ports: wt.ports });
       if (!opts.prune) continue;
       const attached = Object.values(st2.claims).filter((c) => c.worktree === wt.name).map((c) => normIssueNum(c.issue));
@@ -2046,8 +2081,8 @@ function cmdDoctor(argv) {
     if (!opts.prune) print('  (re-run with --prune to tear these down: hook + git worktree remove + free ports)');
   }
   if (report.mergedDirty.length) {
-    print(`Skipped ${report.mergedDirty.length} merged worktree(s) with uncommitted TRACKED changes (not swept):`);
-    for (const w of report.mergedDirty) print(`  ${w.name} [${w.repo}] — commit/stash, or remove with: colab worktree rm ${w.name} --force`);
+    print(`Skipped ${report.mergedDirty.length} merged worktree(s) holding uncommitted work (not swept):`);
+    for (const w of report.mergedDirty) print(`  ${w.name} [${w.repo}] — ${w.what || 'uncommitted work'}; commit it, or remove with: colab worktree rm ${w.name} --force`);
   }
   if (report.mergedHookFail.length) {
     print(`Left ${report.mergedHookFail.length} merged worktree(s) — pre-remove hook vetoed teardown: ${report.mergedHookFail.join(' ')}`);
@@ -3798,6 +3833,15 @@ function cmdShipDryJson(opts) {
 
   const headBranch = git.git(['rev-parse', '--abbrev-ref', 'HEAD'], repoAbs).stdout;
   const onTrunk = headBranch === trunk;
+  // dirtyTracked, NOT dirtyAny — deliberate, and #86 did not change it. The two questions differ:
+  //   `worktree rm` asks "am I about to DESTROY something with no other copy?" → untracked counts,
+  //     because that is precisely the category with nowhere to be restored from.
+  //   this asks "is the trunk checkout fit to merge INTO?" → untracked does not count. A long-lived
+  //     trunk checkout accumulates scratch files and un-ignored local config indefinitely, and none
+  //     of it is at risk: a merge does not delete untracked files, and where an incoming path would
+  //     collide git refuses the merge itself rather than clobbering. Gating on it here would block
+  //     ship on every repo carrying a stray artifact, to protect against nothing.
+  // So this is not an oversight to "finish" — completing the sweep here is the regression.
   const dirty = git.dirtyTracked(repoAbs);
   const treeOk = onTrunk && !dirty;
   checks.push({ name: 'trunk checkout ready', ok: treeOk, class: treeOk ? null : HUMAN_GATED,
@@ -3935,7 +3979,7 @@ function cmdShip(argv) {
   // precisely so that this stays true.
   const headBranch = git.git(['rev-parse', '--abbrev-ref', 'HEAD'], repoAbs).stdout;
   const onTrunk = headBranch === trunk;
-  const dirty = git.dirtyTracked(repoAbs);
+  const dirty = git.dirtyTracked(repoAbs); // tracked-only on purpose — see the #86 note in cmdShipJson
   const treeOk = onTrunk && !dirty;
   checks.push([treeOk ? '✓' : '✗', 'trunk checkout ready',
     !onTrunk ? `main checkout is on "${headBranch}", not "${trunk}"` : (dirty ? 'tracked changes uncommitted in trunk checkout' : `on ${trunk}, clean`)]);
@@ -4495,7 +4539,7 @@ function cmdPromote(argv) {
   const headBranch = git.git(['rev-parse', '--abbrev-ref', 'HEAD'], repoAbs).stdout;
   let useRepoDir = false, checkoutOk, checkoutDetail;
   if (headBranch === MAIN) {
-    const dirty = git.dirtyTracked(repoAbs);
+    const dirty = git.dirtyTracked(repoAbs); // tracked-only on purpose — see the #86 note in cmdShipJson
     checkoutOk = !dirty; useRepoDir = !dirty;
     checkoutDetail = dirty ? 'main checkout has uncommitted tracked changes' : 'on main, clean';
   } else {

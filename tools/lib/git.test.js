@@ -1,6 +1,6 @@
 'use strict';
 /**
- * Tests for tools/lib/git.js — currently just `worktreeListDetailed` (#67).
+ * Tests for tools/lib/git.js — `worktreeListDetailed` (#67) and the dirty-tree readings (#86).
  *
  * Run: `node --test tools/lib/*.test.js` — the existing CI glob picks this file up.
  *
@@ -19,7 +19,7 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const { worktreeListDetailed } = require('./git.js');
+const { worktreeListDetailed, dirtyTracked, dirtyUntracked, dirtyAny } = require('./git.js');
 
 const TMP = [];
 process.on('exit', () => { for (const d of TMP) { try { fs.rmSync(d, { recursive: true, force: true }); } catch (_) {} } });
@@ -89,4 +89,77 @@ test('a non-repo path returns [] rather than throwing', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-test-notrepo-'));
   TMP.push(dir);
   assert.deepStrictEqual(worktreeListDetailed(dir), []);
+});
+
+// --- dirty readings (#86) -----------------------------------------------------
+//
+// The regression these pin is a DATA-LOSS one, so they are written against real git rather than a
+// porcelain fixture: the bug was a disagreement about what `git status` actually emits, and a
+// hand-written fixture would have agreed with the buggy reading.
+
+test('#86 REGRESSION: a never-added file is invisible to dirtyTracked but caught by dirtyUntracked', () => {
+  const r = repo();
+  // The exact shape of a session's first hour: new module + new test, neither staged. There is no
+  // copy in the index, in a commit, or on a remote — a teardown here destroys them outright.
+  fs.writeFileSync(path.join(r.dir, 'checklist.js'), 'module.exports = {};\n');
+  fs.writeFileSync(path.join(r.dir, 'checklist.test.js'), '// tests\n');
+
+  assert.strictEqual(dirtyTracked(r.dir), '', 'tracked reading must stay clean — this is the blind spot');
+  const untracked = dirtyUntracked(r.dir);
+  assert.match(untracked, /checklist\.js/);
+  assert.match(untracked, /checklist\.test\.js/);
+  assert.strictEqual(untracked.split('\n').length, 2);
+});
+
+test('#86: dirtyAny is the union — tracked edits AND untracked files', () => {
+  const r = repo();
+  fs.writeFileSync(path.join(r.dir, 'README'), 'base\nedited\n');
+  fs.writeFileSync(path.join(r.dir, 'brand-new.js'), 'x\n');
+
+  assert.match(dirtyTracked(r.dir), /README/);
+  assert.match(dirtyUntracked(r.dir), /brand-new\.js/);
+  assert.strictEqual(dirtyAny(r.dir).split('\n').length, 2);
+});
+
+test('#86: IGNORED files stay excluded — build output must not block a teardown', () => {
+  const r = repo();
+  fs.writeFileSync(path.join(r.dir, '.gitignore'), 'node_modules/\n.env\ndist/\n');
+  r.g('add', '-A'); r.g('commit', '-q', '-m', 'chore: ignore');
+  fs.mkdirSync(path.join(r.dir, 'node_modules'));
+  fs.writeFileSync(path.join(r.dir, 'node_modules', 'pkg.js'), 'x\n');
+  fs.writeFileSync(path.join(r.dir, '.env'), 'SECRET=1\n');
+
+  // A worktree post-create hook legitimately produces these. Counting them would make every
+  // worktree permanently un-removable without --force, which is how a safety gate gets disabled.
+  assert.strictEqual(dirtyUntracked(r.dir), '');
+  assert.strictEqual(dirtyAny(r.dir), '');
+});
+
+test('#86: -uall names the FILES in a new directory, not the collapsed directory', () => {
+  const r = repo();
+  fs.mkdirSync(path.join(r.dir, 'newmod'));
+  fs.writeFileSync(path.join(r.dir, 'newmod', 'a.js'), 'a\n');
+  fs.writeFileSync(path.join(r.dir, 'newmod', 'b.js'), 'b\n');
+
+  // Default porcelain would emit a single `?? newmod/`. The gate is about to delete these, and a
+  // directory name does not tell a human which of their new sources is at stake.
+  const untracked = dirtyUntracked(r.dir);
+  assert.match(untracked, /newmod\/a\.js/);
+  assert.match(untracked, /newmod\/b\.js/);
+});
+
+test('#86: a clean tree reads clean on all three', () => {
+  const r = repo();
+  assert.strictEqual(dirtyTracked(r.dir), '');
+  assert.strictEqual(dirtyUntracked(r.dir), '');
+  assert.strictEqual(dirtyAny(r.dir), '');
+});
+
+test('#86: a path git cannot read degrades to clean, so a husk stays removable', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-test-notrepo-'));
+  TMP.push(dir);
+  fs.writeFileSync(path.join(dir, 'orphan.txt'), 'x\n');
+  // Deliberate, not fail-open-by-accident: `git status` failing where the directory exists means a
+  // worktree that is no longer a worktree (#62's husk), and refusing there would strand it forever.
+  assert.strictEqual(dirtyAny(dir), '');
 });

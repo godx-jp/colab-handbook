@@ -225,7 +225,7 @@ claimed — and the label remains the veto before any teardown.
 | **teardown-only** | `landed` — content already on its base, worktree lingering | remove worktree, release claims, close issues with evidence |
 | **claim-only** | no worktree; `in-progress` on work already shipped | release the claim, close the issue with evidence |
 | **unrecorded** | on disk, `colab worktrees`'s `unrecorded` list — no claim, no ports | **report only** — see below, never `code-wrap` |
-| **blocked** | uncommitted tracked work, or genuinely unfinished | **report — never force** |
+| **blocked** | uncommitted work — tracked changes or untracked files — or genuinely unfinished | **report — never force** |
 
 `teardown-only` is the common case and the most skipped. It is also the cheapest, so
 do these first — they shrink the list before you start the expensive ones.
@@ -339,7 +339,7 @@ wrapped         fix/import-115-114-113   → trunk a1b2c3d, #115 #114 closed, #1
 teardown-only   feat/console-shell-28    → content already on trunk, worktree removed
 claim-only      #26                      → shipped in e4f5g6h, claim released
 unrecorded      .worktrees/orphan-1      → landed vs main, no claim — removed by hand
-blocked         feat/session-types-26    → 3 uncommitted tracked files — needs a human
+blocked         feat/session-types-26    → 2 untracked files never committed — needs a human
 blocked         #58                      → trunk CI dead (billing), cannot merge
 ```
 
