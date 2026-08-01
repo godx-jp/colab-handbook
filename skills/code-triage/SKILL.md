@@ -539,6 +539,11 @@ with the blocker named:
       `git branch -a --list '*<n>*'` after `git fetch --prune`. A clean label does
       not prove clean ground: claims are released unconditionally at wrap, so an
       abandoned branch can exist with no claim on it at all.
+- [ ] **No pending design ruling** — no `needs-ruling` label (`CONVENTIONS.md` §5,
+      *Design ruling*). A design surface awaiting human pre-approval is not a start
+      candidate for anyone, manual or scheduled, until a human clears the label —
+      report it exactly as any other blocker, naming the label as what must be
+      cleared and by whom.
 
 ### 5.1 An open blocker is not one verdict — look at what state it is in
 

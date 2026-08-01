@@ -484,6 +484,25 @@ not being complete.
 **Not evidence:** quoting your own commit message · restating the ticked checklist ·
 "done in `feat/x-23`". All three assert the work happened; none show it did.
 
+**Made a significant design decision mid-work, without a pre-approved spec?** Add
+`design-not-preapproved` as plain text in the same comment, after the marker line
+(`CONVENTIONS.md` §5, *Design ruling*). Not a second marker — the marker's job is being
+findable, not enumerating every condition a comment might report — just a word a human
+reviewer greps for:
+
+```sh
+gh issue comment 88 -b "<!-- colab:evidence sha=a1b2c3d -->
+Shipped in \`a1b2c3d\` on <trunk>.
+design-not-preapproved — the spec did not cover the empty-state illustration; chose one
+consistent with the existing icon set. Flagging for review.
+\`app/Views/EmptyState.tsx:12\` — added the illustration and copy."
+```
+
+This is the human-review path for a design decision the `needs-ruling` gate did not
+catch because nobody could have: the surface did not look significant until someone was
+already building it. The session does not stop to request a ruling first — it continues
+on the designer's spec and lets the evidence comment carry the flag instead.
+
 ### B2c. Update the parent epic — if, and only if, it is hand-maintained
 
 `code-triage` instructs its readers to **trust the epic's checklist table over its

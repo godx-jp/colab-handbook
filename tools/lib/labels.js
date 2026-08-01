@@ -24,6 +24,14 @@
  * staying repo-local because an unattended decision now depends on it, the same bar the
  * other three met; contrast `TRACKING_LABEL` below, which stays opt-in because nothing
  * unattended reads it (yet).
+ *
+ * `needs-ruling` joined the set in #75: a designer producing a spec decides whether the
+ * surface needs a human pre-approval before code starts, and marks the issue so — a
+ * readiness gate exactly like an open hard blocker or `in-progress`, not a softer
+ * advisory. Absent this label a repo cannot apply that gate at all, and a surface nobody
+ * has ruled on reads as a normal start candidate to a human session or a scheduled driver
+ * alike (CONVENTIONS.md §5, *Design ruling*). It joins CONVENTION_LABELS for the same
+ * reason `epic` did: an unattended decision (a scheduler's start-or-skip) depends on it.
  */
 
 const CONVENTION_LABELS = [
@@ -31,6 +39,7 @@ const CONVENTION_LABELS = [
   { name: 'deps-checked', color: '0E8A16', description: 'Dependencies verified — no open blocker' },
   { name: 'agent-filed', color: 'C5DEF5', description: 'Filed by an agent on its own initiative — not human-approved' },
   { name: 'epic', color: '3E4B9E', description: 'Container for sub-issues — informative, never a start candidate, never claimed as a unit of work' },
+  { name: 'needs-ruling', color: 'B60205', description: 'Needs a human design ruling before this can start' },
 ];
 
 function conventionLabelNames() {
