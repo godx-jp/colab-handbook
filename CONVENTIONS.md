@@ -627,6 +627,66 @@ pure — facts in, verdict out — and takes its "is the blocker's code written 
 answer from `tools/lib/landed.js` rather than counting commits a second time. Prose states
 the rule; the module is one implementation of it; the tests keep them from drifting apart.
 
+#### Mechanical readiness — a weaker, honest claim for the empty case (#69)
+
+`deps-checked` asserts *somebody looked* — a reasoning session read the issue and judged it
+clear. That is a **stronger** claim than "the encoded dependency graph, read via the API,
+has zero edges": a blocker described only in prose — a comment saying "hold until the design
+call", an open question in the issue body, a relationship someone described but never
+encoded as an edge — is invisible to a mechanical read and visible to a reader. So a
+mechanical check must never be allowed to write `deps-checked` itself. Doing so would
+launder a weaker guarantee into a stronger one, silently, for every consumer that already
+trusts that label not to lie.
+
+What a mechanical read **can** assert, honestly, is its own claim: *the recorded graph is
+empty as of this read.* That is `graph-empty` — a second, distinct label, deliberately not a
+same-meaning color of `deps-checked`:
+
+```sh
+gh label create graph-empty --color BFDADC --description "Mechanical check: the recorded dependency graph reads empty — NOT a substitute for deps-checked"
+colab readiness <N> --mechanical           # reads blockedBy via the API; if truly empty, applies graph-empty + posts a receipt
+colab readiness <N> --mechanical --clear   # removes it
+```
+
+- **The write re-derives its own evidence.** `--mechanical` reads `blockedBy` itself rather
+  than trusting a flag from whoever called it — the label's whole claim is "the API said so",
+  so the command that writes it asks the API on every run instead of accepting a boolean it
+  cannot verify.
+- **A receipt, not a bare label.** The command posts a comment naming what was read and when
+  (`blockedBy totalCount = 0, read <timestamp>`). Auditability costs nothing once the read
+  already happened, and it is what lets a human later tell "the API found nothing" apart from
+  "somebody claimed the API found nothing" — the receipt option #69 asked for, attached to
+  the cheaper label rather than to `deps-checked` itself.
+- **Out of scope on purpose: sub-issue (parent/child) relations.** Readiness answers "can
+  this be started", which is the *blocking* half of the relationship model (`blocked_by`),
+  not the *parent/child* half (§5, above). A mechanical read here checks `blockedBy` only; it
+  says nothing about whether the issue is, or belongs to, an epic — `epic` and
+  `subIssuesSummary` already cover that separately (*Epics*, below).
+- **`readiness.classify()` keeps the two apart at the type level, not just at the label
+  name.** `graphEmpty` is a distinct input from `depsChecked`. An empty blocker list with
+  `graphEmpty` true but `depsChecked` false reads a fourth verdict, `unchecked-mechanical` —
+  `isStartable()` still says no, unchanged. A consumer that wants the faster, weaker lane
+  opts in explicitly (`isStartableMechanical()`); the conservative default — every existing
+  triage, every existing scheduled driver — is untouched by this label merely existing.
+- **Not in the convention label set ([§9](#9-adopting-this)), same reasoning as `tracking`
+  (below):** nothing unattended reads it yet, so adoption does not provision it and the audit
+  does not report it missing. A repo that wants the faster lane creates the label and opts a
+  consumer into `isStartableMechanical()`.
+- **No `readiness.marked` event for this.** The receiver has agreed that kind's payload as
+  `{state: 'checked'|'unchecked'}`, meaning `deps-checked` specifically (#45, #46) — emitting
+  the same kind for a weaker fact would hand the receiver a payload it cannot tell apart from
+  the judgement it already agreed to read as an optimistic hint. `--mechanical` writes the
+  label and the receipt and stops there; a new event kind for it is a separate negotiation
+  with the receiver, not this issue's to open.
+
+**This resolves #69's question as: no and yes.** No — provenance for the strong claim still
+requires a reasoning session; the argument that a mechanical read cannot see a prose-only
+blocker was correct and stands unchanged, so framing 2 ("widen the writer, keep the
+meaning") is rejected outright. Yes — a mechanical read can earn provenance for the *weaker*
+claim it is actually capable of making, which is framing 1 (split the value) doing the real
+work, surfaced to a consumer the way framing 3 sketched it: as an opt-in sibling signal that
+never changes what `deps-checked` means or what today's conservative consumers do by default.
+
 ### Provenance — who decided the work should exist
 
 Issues now arrive from three directions: a person, an agent that hit something while

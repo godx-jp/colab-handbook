@@ -18,6 +18,7 @@ const assert = require('node:assert');
 const {
   CONVENTION_LABELS, conventionLabelNames, missingConventionLabels,
   READINESS_LABEL, readinessLabelArgs, readinessMissingLabelHint,
+  MECHANICAL_READINESS_LABEL, mechanicalReadinessLabelArgs,
   GROUP_LABEL_PREFIX, isGroupLabel, groupLabelNames,
 } = require('./labels.js');
 
@@ -139,4 +140,28 @@ test('groupLabelNames tolerates empty / null / undefined the same way missingCon
   assert.deepStrictEqual(groupLabelNames([]), []);
   assert.deepStrictEqual(groupLabelNames(null), []);
   assert.deepStrictEqual(groupLabelNames(undefined), []);
+});
+
+// --- mechanical readiness marker (#69) ---------------------------------------
+// `graph-empty` is a deliberately SEPARATE, weaker claim from `deps-checked` — see
+// CONVENTIONS.md §5 "Mechanical readiness". These tests pin that it stays out of the set an
+// unattended adoption/sync/audit provisions (opt-in, like `tracking`), and that its write helper
+// never shares a name or a code path with `readinessLabelArgs`.
+
+test('graph-empty is not one of the four provisioned convention labels', () => {
+  assert.equal(MECHANICAL_READINESS_LABEL, 'graph-empty');
+  assert.ok(!conventionLabelNames().includes(MECHANICAL_READINESS_LABEL),
+    'a mechanical-only check must stay opt-in — forcing it defeats the point of a cheaper lane');
+});
+
+test('a repo missing graph-empty is never reported by missingConventionLabels — it is not in the set', () => {
+  assert.deepStrictEqual(missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic']), []);
+});
+
+test('mechanicalReadinessLabelArgs maps set⇒add and clear⇒remove against its OWN marker name', () => {
+  assert.deepStrictEqual(mechanicalReadinessLabelArgs(), ['--add-label', 'graph-empty']);
+  assert.deepStrictEqual(mechanicalReadinessLabelArgs({}), ['--add-label', 'graph-empty']);
+  assert.deepStrictEqual(mechanicalReadinessLabelArgs({ clear: true }), ['--remove-label', 'graph-empty']);
+  // And never the other marker's name — the two writers must not be interchangeable.
+  assert.notDeepStrictEqual(mechanicalReadinessLabelArgs(), readinessLabelArgs());
 });
