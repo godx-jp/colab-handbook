@@ -437,7 +437,10 @@ them automatically (see tools/README.md "Claim lifecycle").
 
 Options:
   --repo <path>       repo root (default: git root of cwd)
-  --worktree <name>   attach these claims to a worktree entity (ports live on the worktree)
+  --worktree <name>   attach these claims to a worktree entity (ports live on the worktree, and
+                      this is the key 'colab ship --worktree <name>' looks up FIRST — pass both
+                      --worktree and --branch on a worktree session so the claim is found either
+                      way; a branch-only claim still works, ship unions both keyed forms (#76))
   --branch <name>     branch these claims are worked on. Default: none (null) — a claim held on
                       the trunk checkout has no branch. Never the word "trunk": that is a role,
                       and a record holding it resolves to no ref (refused, exit 1)
@@ -3381,10 +3384,15 @@ function resolveShipSession(st, repoAbs, opts) {
   } else {
     throw new UserError('ship needs --worktree <name> or --branch <br>');
   }
-  // Claimed issues for this session: by worktree if we have one, else by branch.
+  // Claimed issues for this session: worktree-keyed AND branch-keyed claims are UNIONED (#76).
+  // `colab claim <N> --worktree <w> --branch <b>` writes worktree === w; the warning's own printed
+  // remedy — `colab claim <N> --branch <b>` (no --worktree) — writes worktree === null instead, and
+  // used to be invisible here once a worktree name was known, because the old filter picked ONE key
+  // space and stayed there: `name ? c.worktree === name : c.branch === branch`. A branch-keyed claim
+  // and a worktree-keyed claim on the SAME branch name the same work, so both count.
   const claims = Object.values(st.claims)
-    .filter((c) => c.repo === repoAbs && (name ? c.worktree === name : c.branch === branch));
-  const issues = claims.map((c) => normIssueNum(c.issue)).sort((a, b) => a - b);
+    .filter((c) => c.repo === repoAbs && ((name && c.worktree === name) || (branch && c.branch === branch)));
+  const issues = [...new Set(claims.map((c) => normIssueNum(c.issue)))].sort((a, b) => a - b);
   if (!session && !sessionName) { // fall back to a claim's identity
     const withId = claims.find((c) => c.session || c.sessionName);
     if (withId) { session = withId.session || ''; sessionName = withId.sessionName || ''; }
@@ -3702,6 +3710,14 @@ function cmdShip(argv) {
   // refuses, because then "no claims" is a lookup failure rather than a fact about the work.
   const brokenClaims = Object.values(st.claims).filter((c) => c.repo === repoAbs &&
     (records.branchProblem(c.branch) || (c.branch && !git.branchExists(repoAbs, c.branch))));
+  // The remedy a human/agent is told to run must be the WORKTREE-keyed form whenever ship already
+  // knows the worktree name (printed one line above, "· worktree <name>") — a claim written without
+  // --worktree used to be invisible to ship even after following this exact remedy (#76): `ship`
+  // resolves issues through name+branch now (the union above), but the shorter --branch-only form is
+  // still the one that used to silently do nothing, so don't keep telling people to run it.
+  const claimRemedy = sess.name
+    ? `colab claim <N> --worktree ${sess.name} --branch ${sess.branch}`
+    : `colab claim <N> --branch ${sess.branch}`;
   if (sess.issues.length === 0) {
     warn('this branch resolves to ZERO claimed issues — the squash will carry NO `Closes #N`,');
     warn('  so anything it fixes stays open with its code already merged (CONVENTIONS.md §4).');
@@ -3711,12 +3727,12 @@ function cmdShip(argv) {
         process.stderr.write(`    ${c.issue}  branch ${c.branch === null ? 'null' : `"${c.branch}"`}${c.worktree ? ` · worktree ${c.worktree}` : ''}\n`);
       }
       process.stderr.write('  so "no claims" here is a broken lookup, not a fact about this branch. Repair, then re-run:\n');
-      process.stderr.write(`    colab release <N> && colab claim <N> --branch ${sess.branch}\n`);
+      process.stderr.write(`    colab release <N> && ${claimRemedy}\n`);
       process.stderr.write('  (through the CLI — several sessions write ~/.colab/state.json, so a hand edit can lose one.)\n');
       return 1;
     }
     warn('  Nothing contradicts it, so ship continues. If this branch was meant to close an issue,');
-    warn(`  stop now and:  colab claim <N> --branch ${sess.branch}`);
+    warn(`  stop now and:  ${claimRemedy}`);
   } else if (brokenClaims.length) {
     warn(`${brokenClaims.length} claim(s) in this repo name a branch that resolves to no ref — run \`colab doctor\``);
   }

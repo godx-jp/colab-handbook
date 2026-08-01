@@ -190,6 +190,30 @@ test('ship refuses when the empty claim set is explained by a broken claim recor
   assert.ok(!/B1 squash/.test(r.out), `ship planned a merge anyway:\n${r.out}`);
 });
 
+test('ship sees a branch-keyed claim even when shipping by worktree name (#76)', () => {
+  const fx = fixture();
+  const branch = 'fix/branch-claim-76';
+  assert.strictEqual(colab(fx, ['worktree', 'new', branch, '--repo', fx.work]).code, 0);
+  // Follow the warning's own OLD printed remedy verbatim: `colab claim <N> --branch <branch>`, no
+  // --worktree. Before #76 this wrote a claim keyed only by branch, and `ship --worktree <name>`
+  // filtered on `c.worktree === name` exclusively — so the claim was invisible, the exact bug the
+  // warning's own suggested fix produced.
+  assert.strictEqual(colab(fx, ['claim', '76', '--branch', branch, '--repo', fx.work]).code, 0);
+
+  const r = colab(fx, ['ship', '--worktree', 'branch-claim-76', '--repo', fx.work, '--dry']);
+  assert.match(r.out, /#76/, `issue not resolved onto the ship session:\n${r.out}`);
+  assert.ok(!/ZERO claimed issues/.test(r.err), `still reported zero claims:\n${r.err}`);
+});
+
+test('the zero-claims remedy prints the worktree-keyed form once the worktree name is known (#76)', () => {
+  const fx = fixture();
+  assert.strictEqual(colab(fx, ['worktree', 'new', 'fix/unclaimed-77', '--repo', fx.work]).code, 0);
+  const r = colab(fx, ['ship', '--worktree', 'unclaimed-77', '--repo', fx.work, '--dry']);
+  // Not the bare --branch-only form: that is the exact remedy #76 found silently does nothing once
+  // a worktree name is already on record.
+  assert.match(r.err, /colab claim <N> --worktree unclaimed-77 --branch fix\/unclaimed-77/);
+});
+
 test('doctor reports the unusable record, and repairs only what the disk proves', () => {
   const fx = fixture();
   assert.strictEqual(colab(fx, ['worktree', 'new', 'fix/repairable-12', '--issues', '12', '--repo', fx.work]).code, 0);
