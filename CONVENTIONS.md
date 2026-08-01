@@ -262,6 +262,42 @@ gives a fleet-wide view. The file is the source of truth; the topic is for disco
 
 Full field reference: [`project.schema.md`](project.schema.md).
 
+### Boot recipe — an entry point the repo owns, not a table a consumer keeps
+
+`ports:` declares **where** a repo's trunk dev server listens. Nothing declares **how**
+it starts, so every consumer that wants to start one — a fleet dashboard, a supervisor, a
+scheduled job — has kept its own table of start commands, keyed by repo, outside the
+repo, maintained by people not working in it and never validated against it. That table
+forces a default onto any repo it has no entry for; there is no "unregistered" state,
+only a silently wrong one.
+
+**So the entry point is conventional, not a marker field:** if `<repo>/.colab/dev` exists
+and is executable, that is how the repo's trunk dev server starts — no arguments,
+foreground, exits when the server stops. Absent it, a caller falls back to its own
+ecosystem default exactly as before. The marker (`project.yml`) stays untouched — a boot
+recipe changes with the code (an interpreter moves, a build step appears, a service
+splits in two), so it belongs where the code's own history keeps step with it, not in a
+shared schema a consumer merely reads. `.colab/hooks/post-create` already set this
+precedent for worktree lifecycle ([§4](#4-branches-and-commits)); this is the same
+shape, generalized from "what happens once a worktree exists" to "how does the server
+start at all."
+
+Measured cost of the status quo: a repo with no manifest for the external table's
+default ecosystem silently inherited that default anyway. Pressing Start created a
+session, the session's command failed on the spot, the session closed, and the caller
+was told the start had **succeeded** while the port stayed dead — indefinitely, with
+nothing to flag it. The same repo also needed a virtualenv interpreter absent from a
+non-login shell's `PATH`, so even a corrected command written as a literal in that
+external table would have failed identically the next time the interpreter moved.
+
+**A start is verified by the declared port, never by the process manager's exit code.**
+A supervisor exits 0 the moment a session is created, not when the command inside it is
+still alive a second later — a command that dies on the spot looks exactly like one that
+started cleanly. The only evidence a dev server actually came up is the port named in
+`ports:` accepting a connection. A control surface that reports success from launch
+alone will keep offering to start a server that is not there, indefinitely, with no
+error and no red mark.
+
 ---
 
 ## 4. Branches and commits
@@ -845,6 +881,29 @@ Two rules already stated apply here with unusual force, because prose hides thei
   so taking its side wholesale silently reverts the other session's edit while looking like a
   clean resolution. Measured, on two adjacent edits to one paragraph — the correct resolution
   was their union, not either side.
+
+### Scope — diagnosing across repos is not license to act in them
+
+A recurring shape across a fleet of repos: a session working an issue in one repo
+traces the actual root cause to a different one — a shared tool repo this one depends
+on, a library, another service in the same system. **Reading and diagnosing across
+repos to find a root cause is expected.** Everything else in this section — the label,
+the worktree, the local cache, the human go-ahead before a trunk merge — is scoped to
+**the repo a session is nominally working in**, and none of it authorizes acting in a
+different one just because the diagnosis pointed there.
+
+**Acting in another repo — branching, committing, pushing, rebasing or force-pushing an
+existing branch, merging — requires that repo's own claim and its own explicit
+go-ahead, scoped to that repo**, even when the session is confident it found the real
+fix. The correct move is to report the finding — an Issue there, or a comment pointing
+at the existing branch — and stop.
+
+Measured: a session working a downstream repo's issue correctly traced the root cause
+to an existing branch in the upstream tool repo the issue pointed at, then — with no
+claim there and no go-ahead scoped to it — rebased that branch (which had drifted
+materially behind trunk) and force-pushed the result. It was caught and reverted before
+anything merged, so no lasting damage landed; the sequence of actions is what this rule
+exists to prevent, not the eventual outcome.
 
 ### Rules
 
