@@ -26,6 +26,7 @@ const records = require('./lib/records');
 const teardown = require('./lib/teardown');
 const solo = require('./lib/solo');
 const checklist = require('./lib/checklist');
+const groupLabels = require('./lib/group-labels');
 const {
   HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
   parseArgs, table, shortRepo,
@@ -1678,7 +1679,7 @@ function cmdWorktrees(argv) {
 // doctor
 // ---------------------------------------------------------------------------
 
-const HELP_DOCTOR = `colab doctor [--prune] [--ttl <hours>] [--json]
+const HELP_DOCTOR = `colab doctor [--prune] [--ttl <hours>] [--json] [--sync]
 
 Health-check the machine-local state and heal drift. This is the RECORD-points-nowhere
 direction; the mirror direction — a directory that exists with NO record — is reported by
@@ -1721,6 +1722,17 @@ in a cleanup cron.
   --prune   apply the fixes (default: report only)
   --ttl N   hours before a worktree-less claim is flagged stale (default 24)
   --json    machine-readable report
+  --sync    ALSO check each repo's tracker for spent \`group:<key>\` labels (#85). Off by
+            default because it is the only network work doctor does — one \`gh label list\`
+            per repo, plus one membership call per group label — and doctor is otherwise
+            fleet-wide and instant. Same opt-in shape as \`colab claims --sync\`.
+            With --prune, deletes the labels found SPENT (every member closed) — the
+            back-fill for groups \`ship\`'s B4 teardown can never reach: ones spent before
+            that feature existed, or closed by any route other than \`ship\`. A group with
+            an open member is mid-flight and is never reported; a group with NO members is
+            reported but never deleted (a label a triage session just created and has not
+            applied yet is indistinguishable from one whose members were all transferred
+            away — the labels API exposes no creation time, so a human decides).
 `;
 
 const EMPTY_SET = new Set();
@@ -1795,14 +1807,15 @@ function shippedBranches(repos, st) {
 
 function cmdDoctor(argv) {
   const opts = parseArgs(argv, {
-    values: { '--ttl': 'ttl' }, flags: { '--prune': 'prune', '--json': 'json', '-h': 'help', '--help': 'help' },
+    values: { '--ttl': 'ttl' }, flags: { '--prune': 'prune', '--json': 'json', '--sync': 'sync', '-h': 'help', '--help': 'help' },
   });
   if (opts.help) return print(HELP_DOCTOR);
   const config = state.loadConfig();
   const ttl = opts.ttl ? parseFloat(opts.ttl) : config.claimTTLHours;
 
   const report = { deadWorktrees: [], orphanClaims: [], staleClaims: [], orphanPorts: [], brokenRecords: [], prunedPorts: [],
-    mergedFlips: [], mergedSweep: [], mergedDirty: [], mergedHookFail: [], mergedRemoveFail: [], shippedBranches: [], ghostPorts: [], pruned: !!opts.prune };
+    mergedFlips: [], mergedSweep: [], mergedDirty: [], mergedHookFail: [], mergedRemoveFail: [], shippedBranches: [], ghostPorts: [],
+    spentGroupLabels: [], groupLabelsChecked: !!opts.sync, pruned: !!opts.prune };
 
   // One answer per (repo, branch) — pass 5b asks about the same branch from a worktree and from each
   // of its claims, and every miss costs two `git rev-parse` calls.
@@ -1994,6 +2007,46 @@ function cmdDoctor(argv) {
     }
   }
 
+  // 9. spent `group:<key>` labels (#85) — the back-fill for what ship's B4 teardown cannot reach.
+  //    B4 (#82) only considers labels carried by the issues the shipping branch just closed, which
+  //    is the right trigger going forward but leaves two populations stranded forever: groups whose
+  //    members all closed BEFORE that feature existed, and groups closed by any route other than
+  //    `ship`. Neither has an unshipped member left to trigger a ship, so nothing else will look.
+  //
+  //    Behind --sync because it is the ONLY network work doctor does, and doctor is otherwise
+  //    instant and fleet-wide — the same opt-in shape `colab claims --sync` already establishes.
+  //    Deletion additionally needs --prune, and only ever touches `spent`; see lib/group-labels.js
+  //    for why `empty` is reported but never deleted.
+  if (opts.sync) {
+    if (!git.ghAvailable()) {
+      warn('gh not available — --sync group-label check skipped');
+      report.groupLabelsChecked = false;
+    } else {
+      const st6 = state.loadState();
+      // Same repo set as pass 7 — the REGISTRY, not just repos with live state. A spent group
+      // label is by definition on a repo whose work is finished, so it typically has no worktree
+      // and no claim left; deriving repos from state alone would miss exactly the #85 case.
+      const repos = [...new Set([...(config.repos || []), ...knownRepos(config)].map((r) => path.resolve(r)))]
+        .filter((r) => repoLive(r));
+      for (const repo of repos) {
+        const verdicts = groupLabels.classifyGroupLabels(
+          git.ghListLabels(repo),
+          (name) => git.ghIssueListByLabel(repo, name, 'all', ['number', 'state']),
+        );
+        for (const v of groupLabels.reportableLabels(verdicts)) {
+          const entry = { repo: shortRepo(repo), label: v.name, verdict: v.verdict,
+            total: v.total, open: v.open, members: v.members, deleted: false, error: null };
+          if (opts.prune && v.verdict === 'spent') {
+            const del = git.ghLabelDelete(repo, v.name);
+            entry.deleted = !!del.ok;
+            if (!del.ok) entry.error = del.stderr || 'gh label delete failed';
+          }
+          report.spentGroupLabels.push(entry);
+        }
+      }
+    }
+  }
+
   if (opts.json) { print(JSON.stringify(report, null, 2)); return 0; }
 
   const verb = opts.prune ? 'Pruned' : 'Found';
@@ -2080,6 +2133,49 @@ function cmdDoctor(argv) {
     print(`    git -C <repo> branch -D ${ex.branch}${ex.remote ? `  &&  git -C <repo> push origin --delete ${ex.branch}` : ''}`);
     print('  NOT exhaustive: a branch whose work trunk later rewrote can conflict against trunk');
     print('  instead of matching it, and is omitted here rather than risk calling unmerged work spent.');
+  }
+  // Also after the verdict, and also not drift: a spent group label breaks nothing, it is picker
+  // noise on a tracker. Printed only under --sync, so silence here NEVER means "checked, clean" —
+  // which is why a --sync run that finds nothing says so explicitly below.
+  if (report.groupLabelsChecked) {
+    const spent = report.spentGroupLabels.filter((g) => g.verdict === 'spent');
+    const empty = report.spentGroupLabels.filter((g) => g.verdict === 'empty');
+    const unknown = report.spentGroupLabels.filter((g) => g.verdict === 'unknown');
+    if (!report.spentGroupLabels.length) {
+      print('');
+      print('Group labels: checked, none spent — every `group:<key>` still binds an open member.');
+    }
+    if (spent.length) {
+      print('');
+      const done = spent.filter((g) => g.deleted).length;
+      print(`${opts.prune ? `Deleted ${done}/${spent.length}` : `Spent group labels (${spent.length})`} — every member closed:`);
+      for (const g of spent) {
+        const marks = g.members.length ? ` (#${g.members.join(' #')})` : '';
+        print(`  ${g.label} [${g.repo}] ${g.total} member(s), 0 open${marks}${g.deleted ? '  ✓ deleted' : ''}${g.error ? `  ✗ ${g.error}` : ''}`);
+      }
+      if (!opts.prune) {
+        print('  Routine, not drift: `ship`\'s B4 tears these down going forward, but it can only see');
+        print('  labels the shipping branch\'s own issues carried — groups spent before that existed,');
+        print('  or closed by any route other than `ship`, have nothing left to trigger a teardown.');
+        print('  Re-run with --sync --prune to delete them, or by hand:');
+        print(`    gh label delete ${spent[0].label} --yes   # in ${spent[0].repo}`);
+      }
+    }
+    if (empty.length) {
+      print('');
+      print(`Group labels binding NO issue (${empty.length}) — reported, never auto-deleted:`);
+      for (const g of empty) print(`  ${g.label} [${g.repo}]`);
+      print('  Two histories produce this and GitHub cannot tell them apart: every member was');
+      print('  deleted/transferred (spent), or a triage session created it moments ago and has not');
+      print('  applied it yet (LIVE). The labels API exposes no creation time, so --prune leaves');
+      print('  these alone and you decide — deleting a group mid-formation is not recoverable in kind.');
+    }
+    if (unknown.length) {
+      print('');
+      print(`Group labels that could NOT be checked (${unknown.length}) — membership unreadable:`);
+      for (const g of unknown) print(`  ${g.label} [${g.repo}]`);
+      print('  Left in place. A failed lookup is not evidence of an empty group.');
+    }
   }
   if (report.ghostPorts.length) {
     issues += report.ghostPorts.length;
@@ -4606,7 +4702,9 @@ Commands:
                                         (the shared rule behind code-sweep's buckets — correct
                                         across squash merges, where "commits ahead" is not)
   promote [--repo P] [--message M] [--dry]   trunk → main (--no-ff); gated by deploy + promotion; never tags
-  doctor [--prune] [--ttl H] [--json]   heal dead worktrees / orphan + stale claims / orphan ports
+  doctor [--prune] [--ttl H] [--json] [--sync]
+                                        heal dead worktrees / orphan + stale claims / orphan ports
+                                        (--sync also: spent group:<key> labels)
   release-notes [<range>] [--repo P] [--out F] [--headline "..."]   grouped Markdown release summary
   release-status [<repo>...] [--repo P] [--json]   merged-but-UNRELEASED lag on tag-gated repos —
                                         read-only, never tags (#81)
