@@ -67,6 +67,20 @@ const READINESS_LABEL = 'deps-checked';
 // absence. A repo that wants the behaviour creates the label and applies it to its tracking issues.
 const TRACKING_LABEL = 'tracking';
 
+// The marker for a MECHANICAL readiness check (CONVENTIONS.md §5, Mechanical readiness — #69).
+// `deps-checked` asserts a reasoning session looked and judged the issue clear — a claim a bare
+// API read cannot make, because a blocker described only in prose is invisible to it. This label
+// asserts the strictly weaker thing a mechanical read CAN prove honestly: the recorded graph
+// (`blockedBy`) reads empty as of that read. It is a distinct name on purpose, never a synonym or
+// a second color for `deps-checked` — the whole point of #69's resolution is that the two claims
+// must not be allowed to collapse into one label a consumer cannot tell apart.
+//
+// Deliberately NOT in CONVENTION_LABELS, same reasoning as TRACKING_LABEL above: nothing
+// unattended reads it (yet), so adoption/sync do not force-provision it and the audit does not
+// report its absence. A repo that wants the faster, weaker lane creates the label itself and
+// opts a consumer into `readiness.isStartableMechanical()`.
+const MECHANICAL_READINESS_LABEL = 'graph-empty';
+
 // The `gh issue edit` label arguments for owning the readiness marker. Pure, so the mapping
 // "set ⇒ add, clear ⇒ remove" is pinned by a test without a network call: the command is a thin
 // shell around ghIssueEdit(repo, num, readinessLabelArgs(...)), and the part worth getting right
@@ -75,6 +89,16 @@ function readinessLabelArgs({ clear } = {}) {
   return clear
     ? ['--remove-label', READINESS_LABEL]
     : ['--add-label', READINESS_LABEL];
+}
+
+// The `gh issue edit` label arguments for owning the MECHANICAL readiness marker. Same shape as
+// readinessLabelArgs, kept as a separate function rather than a parameter on that one: the two
+// markers must never be writable through the same call site, or a caller could flip one when it
+// meant the other. See MECHANICAL_READINESS_LABEL above for what the label asserts.
+function mechanicalReadinessLabelArgs({ clear } = {}) {
+  return clear
+    ? ['--remove-label', MECHANICAL_READINESS_LABEL]
+    : ['--add-label', MECHANICAL_READINESS_LABEL];
 }
 
 // Given the label names a repo actually has, return the convention labels it is missing,
@@ -138,5 +162,6 @@ module.exports = {
   CONVENTION_LABELS, conventionLabelNames, missingConventionLabels,
   READINESS_LABEL, readinessLabelArgs, readinessMissingLabelHint,
   TRACKING_LABEL,
+  MECHANICAL_READINESS_LABEL, mechanicalReadinessLabelArgs,
   GROUP_LABEL_PREFIX, isGroupLabel, groupLabelNames,
 };

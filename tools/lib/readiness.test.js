@@ -21,8 +21,8 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const {
-  classify, classifyBlocker, isStartable,
-  READY, SOFT, BLOCKED, UNCHECKED, CLEAR, SOFT_BLOCK, HARD_BLOCK,
+  classify, classifyBlocker, isStartable, isStartableMechanical,
+  READY, SOFT, BLOCKED, UNCHECKED, UNCHECKED_MECHANICAL, CLEAR, SOFT_BLOCK, HARD_BLOCK,
 } = require('./readiness.js');
 const { landedState } = require('./landed.js');
 
@@ -191,4 +191,43 @@ test('isStartable fails closed on anything it does not recognise', () => {
   }
   assert.strictEqual(isStartable({ state: READY }), true);
   assert.strictEqual(isStartable({ state: SOFT }), true);
+});
+
+// --- mechanical readiness (#69): a weaker, distinct claim, opt-in only ------
+
+test('graphEmpty alone reads unchecked-mechanical, never ready — the API cannot see prose blockers', () => {
+  const v = classify({ blockers: [], graphEmpty: true });
+  assert.strictEqual(v.state, UNCHECKED_MECHANICAL);
+  assert.match(v.why, /nobody has judged/);
+  assert.strictEqual(isStartable(v), false, 'the conservative default must not move for this alone');
+});
+
+test('depsChecked still wins outright — a reasoning session outranks a bare API read', () => {
+  const v = classify({ blockers: [], depsChecked: true, graphEmpty: true });
+  assert.strictEqual(v.state, READY);
+});
+
+test('no marker at all is plain unchecked, not unchecked-mechanical', () => {
+  assert.strictEqual(classify({ blockers: [] }).state, UNCHECKED);
+  assert.strictEqual(classify({ blockers: [], graphEmpty: false }).state, UNCHECKED);
+});
+
+test('a real blocker outranks graphEmpty — an empty local read never overrides a present one', () => {
+  const v = classify({ blockers: [{ number: 7, open: true }], graphEmpty: true });
+  assert.strictEqual(v.state, BLOCKED, 'graphEmpty must never be read against a non-empty blocker list');
+});
+
+test('isStartableMechanical is a strict superset of isStartable, adding only unchecked-mechanical', () => {
+  const cases = [
+    { state: READY }, { state: SOFT }, { state: BLOCKED }, { state: UNCHECKED },
+    { state: UNCHECKED_MECHANICAL }, null, undefined, {}, { state: 'wat' },
+  ];
+  for (const v of cases) {
+    if (v && v.state === UNCHECKED_MECHANICAL) {
+      assert.strictEqual(isStartable(v), false, 'the conservative lane must not move on this');
+      assert.strictEqual(isStartableMechanical(v), true, 'the opt-in lane exists precisely for this');
+    } else {
+      assert.strictEqual(isStartableMechanical(v), isStartable(v), `diverged on ${JSON.stringify(v)}`);
+    }
+  }
 });
