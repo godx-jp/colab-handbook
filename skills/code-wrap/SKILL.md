@@ -393,6 +393,30 @@ untouched issue as untouched work and redoes what you already shipped. This is
 the same failure mode as `(#N)`: issues sitting open with their code long since
 merged (`CONVENTIONS.md` §4).
 
+**This sort is now MECHANICALLY checked, not honour-system (#74).** The
+incident that motivated it: an issue was closed by squash-merge with a third
+of its three-section scope unimplemented — the sections were prose, so
+nothing could catch it. If the issue's `## Plan` is a real GitHub checklist
+(`- [ ]` one line per deliverable — CONVENTIONS.md §4, *Merging*), `colab
+ship` parses it before composing the squash body and refuses to write
+`Closes #N` for any issue with an unticked box and no declared remainder —
+it writes `Refs #N` instead, leaves the issue open, and reports it (loud, not
+silent). Doing B2 **by hand** (no `colab ship`, or a repo without
+`autonomy: auto-trunk`): run the same check yourself before you write the
+commit message —
+
+```sh
+gh issue view $N --json body,comments -q '.body, (.comments[].body)' | grep -E '^\s*- \[[ ]\]|^Remainder: #'
+```
+
+any `- [ ]` line with no `Remainder: #M` anywhere in that output means **Partial**,
+not **Done** — file the remainder issue and tick what shipped (B2b's evidence
+template below) *before* you write `Closes #N`, the same order `colab ship`
+enforces mechanically. A `## Plan` with no checkboxes at all — written as
+prose — cannot be checked this way; that shape is itself a finding, worth a
+line in the Issue, but it does not block the close (nothing here can predate
+this convention and be held to it retroactively).
+
 ### B2. Squash-merge with `Closes #N`
 
 ```sh
@@ -444,6 +468,30 @@ what came back.** When `<base>` is a declared line, say so in the comment: that 
 **not in trunk yet**, and an evidence comment that implies otherwise will be read as
 "this is in the next release".
 
+**An issue with a real `## Plan` checklist gets a per-item verdict, not one prose
+paragraph (#74).** One line per box: shipped-with-evidence (the `file:line` that proves
+it), or moved to `#M` (the remainder issue). A single paragraph summarising "did the
+whole thing" is exactly the shape that let a partially-done issue close silently in the
+first place — a reader auditing later cannot tell which box a general paragraph actually
+covers.
+
+```sh
+gh issue comment 88 -b "<!-- colab:evidence sha=a1b2c3d -->
+Shipped in \`a1b2c3d\` on <trunk>.
+- [x] add the overtime_rate column — \`app/Models/Payroll.php:142\`; ran the payroll
+      fixture for a 25%-overtime employee, the premium now applies once, not twice.
+- [x] backfill existing rows — \`database/migrations/2026_08_01_backfill.php\`; ran
+      against a copy of prod data, 0 rows left at the old rate.
+- [ ] moved to #91 — the reporting-UI column was out of scope for this branch."
+```
+
+**UI-affecting issues additionally require a screenshot of the BUILT app**, not a DOM
+assertion and not a static mockup with tokens redefined to match the design system —
+both are blind to the real rendering cascade (measured 2026-08-01: a component passed
+every token-level assertion and still rendered wrong once actually built, because the
+mockup never went through the app's real CSS cascade). Run the app (`/run` skill),
+screenshot the changed surface, attach it to the evidence comment.
+
 **Prepend one invisible marker line** — a stable, machine-readable first line, exactly
 the pattern the claim comments already use (`CONVENTIONS.md` §5 *Rules*: a stable first
 line as wire format, everything after it human). It names the trunk sha the comment
@@ -469,6 +517,25 @@ not being complete.
 
 **Not evidence:** quoting your own commit message · restating the ticked checklist ·
 "done in `feat/x-23`". All three assert the work happened; none show it did.
+
+**Made a significant design decision mid-work, without a pre-approved spec?** Add
+`design-not-preapproved` as plain text in the same comment, after the marker line
+(`CONVENTIONS.md` §5, *Design ruling*). Not a second marker — the marker's job is being
+findable, not enumerating every condition a comment might report — just a word a human
+reviewer greps for:
+
+```sh
+gh issue comment 88 -b "<!-- colab:evidence sha=a1b2c3d -->
+Shipped in \`a1b2c3d\` on <trunk>.
+design-not-preapproved — the spec did not cover the empty-state illustration; chose one
+consistent with the existing icon set. Flagging for review.
+\`app/Views/EmptyState.tsx:12\` — added the illustration and copy."
+```
+
+This is the human-review path for a design decision the `needs-ruling` gate did not
+catch because nobody could have: the surface did not look significant until someone was
+already building it. The session does not stop to request a ruling first — it continues
+on the designer's spec and lets the evidence comment carry the flag instead.
 
 ### B2c. Update the parent epic — if, and only if, it is hand-maintained
 

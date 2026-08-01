@@ -864,6 +864,38 @@ Each step is checked; any failure aborts **before the push**, so trunk is never 
 | f. B3 teardown | `colab worktree rm` (releases claims + ports + `✅` comments) unless `--keep-worktree`. The **branch is kept**; `--delete-branch` removes it local + remote | branch deletion is best-effort — a failure warns, it never fails a ship that already pushed |
 | g/h. B4 + summary | verify each issue auto-closed; post `🚢 Shipped to <trunk> by colab ship — <sha>` | non-closing issues are reported, not fatal |
 
+#### If `ship` exits non-zero — establish which step it reached, don't guess
+
+The gated sequence above promises the abort case: "any failure aborts before the
+push, so trunk is never left half-shipped." It says nothing about the case an
+operator actually has to reason about — **the process exited non-zero and gave no
+usable signal for which side of the push it died on.**
+
+Observed once: `colab ship` exited **144** (128+16 — death by signal, not a code
+path the CLI itself returns; the handler only ever yields `0` or a caught error's
+`1`) having printed **nothing at all**, not even the header line a `--dry` run on
+the same branch printed immediately. So the exit code alone is not self-describing
+— "aborted safely, re-run it" and "fully shipped, re-running would double-merge
+the same content" are both plausible, and they call for opposite next actions.
+**Never re-run on a guess.** Check, in order — the sequence is ordered, so the
+last completed step bounds what did and did not happen:
+
+1. **Is the squash on the local target, and on the remote?**
+   (`git log --oneline -1 <trunk>` locally and `git log --oneline -1 origin/<trunk>`
+   — the push, step e, is the pivot: before it, nothing is shared.)
+2. **Is the worktree gone** from `git worktree list`, and its record gone from
+   `colab worktrees`?
+3. **Is the claim released**, and is the issue closed with its `🚢 Shipped`
+   evidence comment posted?
+4. **Is CI green** on the new target sha?
+
+A posted `🚢 Shipped` comment (the sequence's *last* step, g/h) means every step
+before it ran — so a "yes" on (3) settles all of it without needing (1)/(2)
+separately. Treat this as the recovery procedure, not a special case: re-running
+`ship` after a genuine partial failure is correct and re-running it after a
+successful ship whose reporting tail died is a second merge of the same content —
+the check above is what tells the two apart.
+
 #### The squash commit message
 
 With `--message`, the subject is yours and a `— Closes #N, …` trailer is appended. Without it, the

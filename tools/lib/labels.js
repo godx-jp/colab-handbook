@@ -24,6 +24,14 @@
  * staying repo-local because an unattended decision now depends on it, the same bar the
  * other three met; contrast `TRACKING_LABEL` below, which stays opt-in because nothing
  * unattended reads it (yet).
+ *
+ * `needs-ruling` joined the set in #75: a designer producing a spec decides whether the
+ * surface needs a human pre-approval before code starts, and marks the issue so — a
+ * readiness gate exactly like an open hard blocker or `in-progress`, not a softer
+ * advisory. Absent this label a repo cannot apply that gate at all, and a surface nobody
+ * has ruled on reads as a normal start candidate to a human session or a scheduled driver
+ * alike (CONVENTIONS.md §5, *Design ruling*). It joins CONVENTION_LABELS for the same
+ * reason `epic` did: an unattended decision (a scheduler's start-or-skip) depends on it.
  */
 
 const CONVENTION_LABELS = [
@@ -31,6 +39,7 @@ const CONVENTION_LABELS = [
   { name: 'deps-checked', color: '0E8A16', description: 'Dependencies verified — no open blocker' },
   { name: 'agent-filed', color: 'C5DEF5', description: 'Filed by an agent on its own initiative — not human-approved' },
   { name: 'epic', color: '3E4B9E', description: 'Container for sub-issues — informative, never a start candidate, never claimed as a unit of work' },
+  { name: 'needs-ruling', color: 'B60205', description: 'Needs a human design ruling before this can start' },
 ];
 
 function conventionLabelNames() {
@@ -58,6 +67,20 @@ const READINESS_LABEL = 'deps-checked';
 // absence. A repo that wants the behaviour creates the label and applies it to its tracking issues.
 const TRACKING_LABEL = 'tracking';
 
+// The marker for a MECHANICAL readiness check (CONVENTIONS.md §5, Mechanical readiness — #69).
+// `deps-checked` asserts a reasoning session looked and judged the issue clear — a claim a bare
+// API read cannot make, because a blocker described only in prose is invisible to it. This label
+// asserts the strictly weaker thing a mechanical read CAN prove honestly: the recorded graph
+// (`blockedBy`) reads empty as of that read. It is a distinct name on purpose, never a synonym or
+// a second color for `deps-checked` — the whole point of #69's resolution is that the two claims
+// must not be allowed to collapse into one label a consumer cannot tell apart.
+//
+// Deliberately NOT in CONVENTION_LABELS, same reasoning as TRACKING_LABEL above: nothing
+// unattended reads it (yet), so adoption/sync do not force-provision it and the audit does not
+// report its absence. A repo that wants the faster, weaker lane creates the label itself and
+// opts a consumer into `readiness.isStartableMechanical()`.
+const MECHANICAL_READINESS_LABEL = 'graph-empty';
+
 // The `gh issue edit` label arguments for owning the readiness marker. Pure, so the mapping
 // "set ⇒ add, clear ⇒ remove" is pinned by a test without a network call: the command is a thin
 // shell around ghIssueEdit(repo, num, readinessLabelArgs(...)), and the part worth getting right
@@ -66,6 +89,16 @@ function readinessLabelArgs({ clear } = {}) {
   return clear
     ? ['--remove-label', READINESS_LABEL]
     : ['--add-label', READINESS_LABEL];
+}
+
+// The `gh issue edit` label arguments for owning the MECHANICAL readiness marker. Same shape as
+// readinessLabelArgs, kept as a separate function rather than a parameter on that one: the two
+// markers must never be writable through the same call site, or a caller could flip one when it
+// meant the other. See MECHANICAL_READINESS_LABEL above for what the label asserts.
+function mechanicalReadinessLabelArgs({ clear } = {}) {
+  return clear
+    ? ['--remove-label', MECHANICAL_READINESS_LABEL]
+    : ['--add-label', MECHANICAL_READINESS_LABEL];
 }
 
 // Given the label names a repo actually has, return the convention labels it is missing,
@@ -129,5 +162,6 @@ module.exports = {
   CONVENTION_LABELS, conventionLabelNames, missingConventionLabels,
   READINESS_LABEL, readinessLabelArgs, readinessMissingLabelHint,
   TRACKING_LABEL,
+  MECHANICAL_READINESS_LABEL, mechanicalReadinessLabelArgs,
   GROUP_LABEL_PREFIX, isGroupLabel, groupLabelNames,
 };

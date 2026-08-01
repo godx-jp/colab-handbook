@@ -25,6 +25,7 @@ const labels = require('./lib/labels');
 const records = require('./lib/records');
 const teardown = require('./lib/teardown');
 const solo = require('./lib/solo');
+const checklist = require('./lib/checklist');
 const {
   HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
   parseArgs, table, shortRepo,
@@ -438,7 +439,10 @@ them automatically (see tools/README.md "Claim lifecycle").
 
 Options:
   --repo <path>       repo root (default: git root of cwd)
-  --worktree <name>   attach these claims to a worktree entity (ports live on the worktree)
+  --worktree <name>   attach these claims to a worktree entity (ports live on the worktree, and
+                      this is the key 'colab ship --worktree <name>' looks up FIRST — pass both
+                      --worktree and --branch on a worktree session so the claim is found either
+                      way; a branch-only claim still works, ship unions both keyed forms (#76))
   --branch <name>     branch these claims are worked on. Default: none (null) — a claim held on
                       the trunk checkout has no branch. Never the word "trunk": that is a role,
                       and a record holding it resolves to no ref (refused, exit 1)
@@ -684,7 +688,7 @@ function cmdSoloDone(repoAbs, doc) {
 // readiness — colab owns the deps-checked marker (CONVENTIONS.md §5)
 // ---------------------------------------------------------------------------
 
-const HELP_READINESS = `colab readiness <issue> [--clear] [--repo <path>]
+const HELP_READINESS = `colab readiness <issue> [--clear] [--mechanical] [--repo <path>]
 
 Own the readiness marker (§5) — the deps-checked label meaning "dependencies verified,
 no open blocker". Making colab the writer (rather than a raw \`gh issue edit\`) is the point:
@@ -704,12 +708,26 @@ an actionable message pointing at handbook-sync — never a success on a write t
 
 The label is DERIVED state, only ever as fresh as this last check: whoever adds a blocker
 clears it. Prefer leaving it off to leaving it wrong (CONVENTIONS.md §5).
+
+  colab readiness <N> --mechanical           add graph-empty    (reads blockedBy itself)
+  colab readiness <N> --mechanical --clear   remove graph-empty
+
+--mechanical writes a SEPARATE, weaker marker — CONVENTIONS.md §5 "Mechanical readiness"
+(#69). It never touches deps-checked, and deps-checked never touches graph-empty: the two
+claims must stay distinguishable, because a mechanical read cannot see a blocker described
+only in prose. It re-derives its own evidence rather than trusting the caller — it reads
+\`blockedBy\` via \`gh issue view\` on every run — and REFUSES rather than write the label if
+that read comes back non-empty or unreadable. On a successful ADD it also posts a receipt
+comment naming exactly what was read and when, so the claim is auditable rather than
+assumed. graph-empty is opt-in per repo (create the label yourself; adoption/sync/the audit
+do not provision it — same treatment as \`tracking\`), and it emits no observer event: the
+receiver has agreed \`readiness.marked\` to mean deps-checked specifically, and this is not that.
 `;
 
 function cmdReadiness(argv) {
   const opts = parseArgs(argv, {
     values: { '--repo': 'repo' },
-    flags: { '--clear': 'clear', '-h': 'help', '--help': 'help' },
+    flags: { '--clear': 'clear', '--mechanical': 'mechanical', '-h': 'help', '--help': 'help' },
   });
   if (opts.help || opts._.length === 0) return print(HELP_READINESS);
   const num = normIssueNum(opts._[0]);
@@ -723,6 +741,8 @@ function cmdReadiness(argv) {
   if (!isGhUsable(repoAbs)) {
     throw new UserError(`gh not usable here (no gh auth or no origin remote) — the ${labels.READINESS_LABEL} marker lives on GitHub and cannot be written local-only`);
   }
+
+  if (opts.mechanical) return cmdReadinessMechanical(repoAbs, num, opts);
 
   const r = git.ghIssueEdit(repoAbs, num, labels.readinessLabelArgs({ clear: opts.clear }));
   if (!r.ok) {
@@ -743,6 +763,58 @@ function cmdReadiness(argv) {
   // the provider's read-after-write lag (#46 §1, following #45 §1). Best-effort as ever: unset
   // notifyUrl is silence, a dead receiver costs nothing, and the label above is already written.
   pushEvent('readiness', { repo: repoAbs, issue: num, payload: { state: opts.clear ? 'unchecked' : 'checked' } });
+  return 0;
+}
+
+/**
+ * The --mechanical half of `colab readiness` (#69). Split out rather than interleaved with the
+ * deps-checked path above so the two writers can never accidentally share a branch of logic —
+ * CONVENTIONS.md §5 is explicit that the two claims must stay distinguishable at every layer,
+ * not just in the label name.
+ */
+function cmdReadinessMechanical(repoAbs, num, opts) {
+  if (opts.clear) {
+    const r = git.ghIssueEdit(repoAbs, num, labels.mechanicalReadinessLabelArgs({ clear: true }));
+    if (!r.ok) throw new UserError(`gh edit #${num} failed (${r.stderr.split('\n')[0] || r.code})`);
+    print(`Cleared ${labels.MECHANICAL_READINESS_LABEL} on #${num} in ${shortRepo(repoAbs)}`);
+    return 0;
+  }
+
+  // Opt-in label (CONVENTIONS.md §5): unlike deps-checked, adoption/sync never provision this
+  // one, so an absent label here is the ordinary case for a repo that has not opted in — point
+  // at self-provisioning, never at handbook-sync (there is nothing for sync to back-fill).
+  const present = git.ghListLabels(repoAbs);
+  if (present && !present.includes(labels.MECHANICAL_READINESS_LABEL)) {
+    throw new UserError(`this repo has no \`${labels.MECHANICAL_READINESS_LABEL}\` label — it is opt-in `
+      + `(CONVENTIONS.md §5, Mechanical readiness). Create it to use the mechanical lane: `
+      + `gh label create ${labels.MECHANICAL_READINESS_LABEL} --color BFDADC --description "Mechanical check: the recorded dependency graph reads empty — NOT a substitute for deps-checked"`);
+  }
+
+  // Re-derive the evidence ourselves — the whole point of #69's resolution is that this marker
+  // may never be written on a caller's say-so, only on what the API says right now.
+  const info = git.ghIssueView(repoAbs, num, ['blockedBy']);
+  if (!info || !info.blockedBy || typeof info.blockedBy.totalCount !== 'number') {
+    throw new UserError(`could not read #${num}'s blockedBy graph — refusing to write ${labels.MECHANICAL_READINESS_LABEL} on an unmeasured read`);
+  }
+  if (info.blockedBy.totalCount > 0) {
+    throw new UserError(`#${num} has ${info.blockedBy.totalCount} recorded blocker(s) — ${labels.MECHANICAL_READINESS_LABEL} asserts an EMPTY graph, so this read does not qualify`);
+  }
+
+  const r = git.ghIssueEdit(repoAbs, num, labels.mechanicalReadinessLabelArgs({ clear: false }));
+  if (!r.ok) throw new UserError(`gh edit #${num} failed (${r.stderr.split('\n')[0] || r.code})`);
+
+  // The receipt (#69, framing 2): auditable rather than assumed. Best-effort — the label write
+  // above already landed, and a comment that fails to post costs a human re-deriving "when was
+  // this checked" from the label's own timestamp, not a lost fact.
+  const ts = new Date().toISOString();
+  git.ghIssueComment(repoAbs, num,
+    `Mechanical readiness check (\`colab readiness --mechanical\`): \`blockedBy\` totalCount = 0, read ${ts}. `
+    + `This confirms the ENCODED graph only — it cannot see a blocker described only in prose. Applied \`${labels.MECHANICAL_READINESS_LABEL}\`, not \`${labels.READINESS_LABEL}\`.`);
+
+  print(`Marked #${num} in ${shortRepo(repoAbs)} ${labels.MECHANICAL_READINESS_LABEL} — blockedBy reads empty (receipt posted)`);
+  // Deliberately no pushEvent: the receiver has agreed `readiness.marked` to mean deps-checked
+  // specifically (#45, #46); this marker is not that claim and gets no event until a kind for it
+  // is separately agreed (CONVENTIONS.md §5, Mechanical readiness).
   return 0;
 }
 
@@ -3407,6 +3479,8 @@ Options:
 
                         { "ok": bool, "dry": true, "repo": "...", "branch": "...", "target": "...",
                           "worktree": "..." | null, "issues": [N, ...],
+                          "closeIssues": [N, ...], "refsIssues": [N, ...],
+                          "checklistFindings": [ { "issue": N, "unchecked": n, "total": n, "reason": "..." } ],
                           "checks": [ { "name": "...", "ok": bool, "class": "..." | null, "detail": "..." } ] }
 
                       \`checks\` has one entry per precondition — branch resolves, not an integration
@@ -3421,6 +3495,14 @@ Options:
                                         trunk checkout, a genuine merge conflict — retrying changes
                                         nothing until a person acts.
                       Never add a third value without updating every consumer of this field.
+
+                      \`closeIssues\`/\`refsIssues\` (#74) are \`issues\` split by what a real ship would
+                      write: Closes vs Refs, unioning --refs, the "tracking" label, and the close gate.
+                      \`checklistFindings\` lists only the issues the CLOSE GATE (not --refs, not the
+                      label) moved from close to ref — an unticked \`## Plan\` checklist with no
+                      declared \`Remainder: #M\`. Deliberately NOT folded into \`checks\`/\`ok\`: a
+                      checklist finding does not block this ship, it only redirects that one issue's
+                      trailer, so it must never read as a precondition failure to an unattended caller.
 `;
 
 /**
@@ -3489,10 +3571,15 @@ function resolveShipSession(st, repoAbs, opts) {
   } else {
     throw new UserError('ship needs --worktree <name> or --branch <br>');
   }
-  // Claimed issues for this session: by worktree if we have one, else by branch.
+  // Claimed issues for this session: worktree-keyed AND branch-keyed claims are UNIONED (#76).
+  // `colab claim <N> --worktree <w> --branch <b>` writes worktree === w; the warning's own printed
+  // remedy — `colab claim <N> --branch <b>` (no --worktree) — writes worktree === null instead, and
+  // used to be invisible here once a worktree name was known, because the old filter picked ONE key
+  // space and stayed there: `name ? c.worktree === name : c.branch === branch`. A branch-keyed claim
+  // and a worktree-keyed claim on the SAME branch name the same work, so both count.
   const claims = Object.values(st.claims)
-    .filter((c) => c.repo === repoAbs && (name ? c.worktree === name : c.branch === branch));
-  const issues = claims.map((c) => normIssueNum(c.issue)).sort((a, b) => a - b);
+    .filter((c) => c.repo === repoAbs && ((name && c.worktree === name) || (branch && c.branch === branch)));
+  const issues = [...new Set(claims.map((c) => normIssueNum(c.issue)))].sort((a, b) => a - b);
   if (!session && !sessionName) { // fall back to a claim's identity
     const withId = claims.find((c) => c.session || c.sessionName);
     if (withId) { session = withId.session || ''; sessionName = withId.sessionName || ''; }
@@ -3506,6 +3593,55 @@ function resolveShipSession(st, repoAbs, opts) {
 // two options it has today, parsing stderr prose or re-deriving the checks itself, both drift.
 const SELF_CLEARING = 'self-clearing'; // CI still running, a transient gh/preview read failure
 const HUMAN_GATED = 'human-gated';     // autonomy absent, a real failure, a decision only a person makes
+
+/**
+ * Splits a branch's claimed issues into CLOSE (`Closes #N`) and REF (`Refs #N`, kept open) sets,
+ * unioning THREE independent reasons an issue must stay open — #48's original two, plus #74's
+ * close gate:
+ *   - `--refs N[,M]`         explicit, per-ship
+ *   - the `tracking` label    declarative, durable across every session touching the domain
+ *   - an unticked `## Plan` checklist with no declared `Remainder: #M` (tools/lib/checklist.js) —
+ *     the issue's OWN recorded scope says it is not done. This is the one #74 exists for: the
+ *     incident was an issue closed by squash-merge with a third of its scope unimplemented, and
+ *     the scope was prose so nothing could have caught it mechanically. A checklist can be.
+ *
+ * `gh` unusable (no auth / no origin) degrades this to `--refs` only, same "degrade, never gate"
+ * posture the tracking-label check already had — nothing can be read, so nothing new is asserted,
+ * rather than refusing to ship over a read this function never attempted.
+ *
+ * Returns `gateFindings`: one entry per issue the CHECKLIST gate — not the flag, not the label —
+ * moved from close to ref. Callers report these distinctly: unlike an explicit `--refs` or a
+ * declared tracking issue, this one is a surprise the operator did not ask for, and the whole
+ * point of #74 is that it must be LOUD.
+ */
+function resolveCloseRefsSplit(repoAbs, gh, issues, refsFromFlag) {
+  const refsSet = new Set(issues.filter((n) => refsFromFlag.has(n)));
+  const gateFindings = [];
+  if (gh) {
+    for (const num of issues) {
+      if (refsSet.has(num)) continue;
+      const info = git.ghIssueView(repoAbs, num, ['labels']);
+      const names = info && Array.isArray(info.labels) ? info.labels.map((l) => l.name) : [];
+      if (names.includes(labels.TRACKING_LABEL)) refsSet.add(num);
+    }
+    // #74: the close gate. Only asked of issues that would otherwise CLOSE — one already kept
+    // open by --refs or the tracking label was never going to close anyway, so gating it a second
+    // way is pure noise.
+    for (const num of issues) {
+      if (refsSet.has(num)) continue;
+      const info = git.ghIssueView(repoAbs, num, ['body', 'comments']);
+      if (!info) continue; // read failed — degrade, never gate on a read we could not attempt
+      const gate = checklist.closeGate(info.body, info.comments);
+      if (!gate.ok) {
+        refsSet.add(num);
+        gateFindings.push({ issue: num, unchecked: gate.unchecked, total: gate.total, reason: gate.reason });
+      }
+    }
+  }
+  const closeIssues = issues.filter((n) => !refsSet.has(n));
+  const refsIssues = issues.filter((n) => refsSet.has(n));
+  return { closeIssues, refsIssues, refsSet, gateFindings };
+}
 
 /**
  * CI precondition for `ship --dry --json`, classified into the closed vocabulary above. Mirrors the
@@ -3596,10 +3732,17 @@ function cmdShipDryJson(opts) {
 
   const checks = [];
   let target = null;
+  // #74: the close-gate split (closeIssues/refsIssues/checklistFindings) is reported ALONGSIDE
+  // `checks`, never folded into it — a checklist-gated issue does not block this ship (it only
+  // redirects that one issue's Closes to a Refs), so it must not flip `ok` the way a real
+  // precondition failure does. `checks`' documented contract (HELP_SHIP) is "one entry per
+  // PRECONDITION, ok:false only on something that blocks" — additive new top-level fields keep
+  // that contract intact for every existing consumer of `ok`/`checks`.
+  let closeIssues = sess.issues, refsIssues = [], checklistFindings = [];
   const emit = (ok) => {
     print(JSON.stringify({
       ok, dry: true, repo: shortRepo(repoAbs), branch: sess.branch, worktree: sess.name || null,
-      target, issues: sess.issues, checks,
+      target, issues: sess.issues, closeIssues, refsIssues, checklistFindings, checks,
     }, null, 2));
     return ok ? 0 : 1;
   };
@@ -3640,6 +3783,13 @@ function cmdShipDryJson(opts) {
   // ---- (b) the rest of the preconditions, same rules as the prose path ----
   const gh = isGhUsable(repoAbs);
   checks.push(shipCiCheck(repoAbs, gh, target, trunk));
+
+  // #74: same close-gate split the prose path runs, reported via the additive fields above.
+  const refsFromFlagJson = new Set(
+    String(opts.refs || '').split(',').map((s) => s.trim().replace(/^#/, '')).filter(Boolean).map(Number),
+  );
+  const split = resolveCloseRefsSplit(repoAbs, gh, sess.issues, refsFromFlagJson);
+  closeIssues = split.closeIssues; refsIssues = split.refsIssues; checklistFindings = split.gateFindings;
 
   const migrations = newMigrations(repoAbs, target, sess.branch);
   const migOk = migrations.length === 0;
@@ -3737,29 +3887,24 @@ function cmdShip(argv) {
   const gh = isGhUsable(repoAbs);
   const checks = [];
 
-  // Which claimed issues are REFERENCED (Refs #N), not closed (#48). A long-lived memory/tracking
-  // issue is claimed to signal work in its domain but not completed by the branch — closing it would
-  // bury its accumulated knowledge and still-open checklist. Two sources, unioned:
-  //   • --refs N[,M]   explicit, per-ship
-  //   • TRACKING_LABEL on the issue   declarative, durable across every session touching the domain
-  // The claim is still released unconditionally (B3, unchanged) — only Closes→Refs changes (#48).
+  // Which claimed issues are REFERENCED (Refs #N), not closed — three sources unioned by
+  // resolveCloseRefsSplit (#48, #74): --refs, the tracking label, and #74's close gate (an
+  // unticked ## Plan checklist with no declared Remainder: #M). The claim is still released
+  // unconditionally either way (B3, unchanged) — only Closes→Refs changes.
   const refsFromFlag = new Set(
     String(opts.refs || '').split(',').map((s) => s.trim().replace(/^#/, '')).filter(Boolean).map(Number),
   );
   for (const n of refsFromFlag) {
     if (!sess.issues.includes(n)) warn(`--refs #${n} is not a claimed issue on this branch — ignored`);
   }
-  const refsSet = new Set(sess.issues.filter((n) => refsFromFlag.has(n)));
-  if (gh) {
-    for (const num of sess.issues) {
-      if (refsSet.has(num)) continue;
-      const info = git.ghIssueView(repoAbs, num, ['labels']);
-      const names = info && Array.isArray(info.labels) ? info.labels.map((l) => l.name) : [];
-      if (names.includes(labels.TRACKING_LABEL)) refsSet.add(num);
-    }
+  const { closeIssues, refsIssues, refsSet, gateFindings } = resolveCloseRefsSplit(repoAbs, gh, sess.issues, refsFromFlag);
+  // #74: a checklist-gated issue is a SURPRISE the operator did not ask for (unlike --refs or a
+  // tracking label, both deliberate) — call it out on its own, loud, not folded silently into the
+  // "issues:" line's "(ref — kept open)" annotation below.
+  for (const f of gateFindings) {
+    warn(`#${f.issue}: ${f.reason} — Closes withheld, Refs #${f.issue} written instead (does not block this ship).`);
+    warn(`  Tick what shipped with evidence, file \`Remainder: #M\` for the rest, then re-run to close it.`);
   }
-  const closeIssues = sess.issues.filter((n) => !refsSet.has(n));
-  const refsIssues = sess.issues.filter((n) => refsSet.has(n));
   // CI alive + green on the TARGET.
   //
   // On a declared line with NO runs at all, fall back to trunk's and say so. An ungated line is a
@@ -3810,6 +3955,14 @@ function cmdShip(argv) {
   // refuses, because then "no claims" is a lookup failure rather than a fact about the work.
   const brokenClaims = Object.values(st.claims).filter((c) => c.repo === repoAbs &&
     (records.branchProblem(c.branch) || (c.branch && !git.branchExists(repoAbs, c.branch))));
+  // The remedy a human/agent is told to run must be the WORKTREE-keyed form whenever ship already
+  // knows the worktree name (printed one line above, "· worktree <name>") — a claim written without
+  // --worktree used to be invisible to ship even after following this exact remedy (#76): `ship`
+  // resolves issues through name+branch now (the union above), but the shorter --branch-only form is
+  // still the one that used to silently do nothing, so don't keep telling people to run it.
+  const claimRemedy = sess.name
+    ? `colab claim <N> --worktree ${sess.name} --branch ${sess.branch}`
+    : `colab claim <N> --branch ${sess.branch}`;
   if (sess.issues.length === 0) {
     warn('this branch resolves to ZERO claimed issues — the squash will carry NO `Closes #N`,');
     warn('  so anything it fixes stays open with its code already merged (CONVENTIONS.md §4).');
@@ -3819,12 +3972,12 @@ function cmdShip(argv) {
         process.stderr.write(`    ${c.issue}  branch ${c.branch === null ? 'null' : `"${c.branch}"`}${c.worktree ? ` · worktree ${c.worktree}` : ''}\n`);
       }
       process.stderr.write('  so "no claims" here is a broken lookup, not a fact about this branch. Repair, then re-run:\n');
-      process.stderr.write(`    colab release <N> && colab claim <N> --branch ${sess.branch}\n`);
+      process.stderr.write(`    colab release <N> && ${claimRemedy}\n`);
       process.stderr.write('  (through the CLI — several sessions write ~/.colab/state.json, so a hand edit can lose one.)\n');
       return 1;
     }
     warn('  Nothing contradicts it, so ship continues. If this branch was meant to close an issue,');
-    warn(`  stop now and:  colab claim <N> --branch ${sess.branch}`);
+    warn(`  stop now and:  ${claimRemedy}`);
   } else if (brokenClaims.length) {
     warn(`${brokenClaims.length} claim(s) in this repo name a branch that resolves to no ref — run \`colab doctor\``);
   }
@@ -4434,7 +4587,7 @@ Commands:
   release <issue> [--repo P]                                          release one issue
   solo [--force] [--repo P] | solo --done [--repo P]                 entry-gated trunk-direct
                                         flow, \`ceremony: light\` only — no issue/claim/worktree (#83)
-  readiness <issue> [--clear] [--repo P]                             own the deps-checked marker (§5)
+  readiness <issue> [--clear] [--mechanical] [--repo P]              own the deps-checked / graph-empty markers (§5)
   claims [--json] [--sync]                                            list / reconcile with GitHub
 
   port alloc [--count N] [--range A-B] [--worktree N|--claim I|--label S]
