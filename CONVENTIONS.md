@@ -472,11 +472,39 @@ these prefixes. A commit with no prefix is invisible in release notes.
   commit — `code-wrap` B1b spells out the command. Motivating incident: an issue was closed
   by squash-merge with a third of its three-section scope unimplemented; the sections were
   prose, so nothing could have caught it before this rule existed.
+- **Every issue the merge closes must be corroborated by git, not by the claim registry
+  alone (#87).** The set of issues a merge closes is read at merge time, and a claim that a
+  *different, still-running* session wrote onto the same branch is indistinguishable from
+  one the merging session made. Measured: a branch carrying #71 and #76 resolved to
+  `[71, 74, 76]`, because a co-tenant claimed #74 onto the same worktree minutes after the
+  merge was authorised and had only just started work — nothing on the branch implemented
+  it. Both git-side sources are load-bearing here: the branch name's **trailing** number
+  group (§4's naming rule) and the `#N` references in **commit bodies**. An issue named by
+  neither is a finding — `colab ship` refuses; a hand merge must perform the same check.
+  Do not resolve it by quietly writing `Refs #N` instead: that hides the collision, and
+  `--refs` already exists for the case an operator actually means.
+- **A deliverable with no diff still has to close (#90).** A session can finish with a real
+  result and zero commits — a decision recorded on its issue, an investigation concluding
+  "no change needed", an artifact stored outside the repo. There is nothing to squash, so
+  `Closes #N` has no commit to ride on, and for a long time that meant the claim was
+  released, the worktree torn down, and the issue left open indefinitely. The completion
+  path lives in the tool, not in prose: `colab ship` detects `landed ∧ zero own commits`
+  (both **measured from git**, never declared by the session) and switches to
+  **evidence-close** — post evidence, close each issue, tear down; no merge, no push, and
+  no `--allow-empty` marker commit, because inventing a commit to satisfy a code path puts
+  a lie in the repo's history. It is gated on the issue **already carrying a comment the
+  tool did not write**, which is what replaces the otherwise-nice property that the tracker
+  never moves unless trunk moved.
 - **Before merging to trunk, check that trunk's last CI run is green — and that it ran at
-  all.** `gh run list --branch <trunk> -L 1` costs one command. Branch protection cannot do
-  this for us; the habit must. We once merged for 12 straight hours into repos whose CI was
-  silently dead (org billing lockout) — every run "failed" without starting, and nothing
-  noticed.
+  all.** Branch protection cannot do this for us; the habit must. We once merged for 12
+  straight hours into repos whose CI was silently dead (org billing lockout) — every run
+  "failed" without starting, and nothing noticed. **Ask by commit, not by recency (#92):**
+  `gh run list --branch <trunk> -L 1` reads whatever ran *last*, and under
+  `cancel-in-progress` concurrency two runs race on one push, one is cancelled by design,
+  and a cancelled straggler makes the gate report red while an identical run on the same
+  commit already passed — a deadlock nothing inside the merge can clear. The question is
+  "does a completed, successful run exist for this branch's current head sha?"; `colab ship`
+  asks it that way.
 
 ### Has it landed? — the one rule, because the obvious one is wrong
 
