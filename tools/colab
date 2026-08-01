@@ -26,6 +26,8 @@ const records = require('./lib/records');
 const teardown = require('./lib/teardown');
 const solo = require('./lib/solo');
 const checklist = require('./lib/checklist');
+const groupLabels = require('./lib/group-labels');
+const shipguard = require('./lib/shipguard');
 const {
   HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
   parseArgs, table, shortRepo,
@@ -1711,7 +1713,7 @@ function cmdWorktrees(argv) {
 // doctor
 // ---------------------------------------------------------------------------
 
-const HELP_DOCTOR = `colab doctor [--prune] [--ttl <hours>] [--json]
+const HELP_DOCTOR = `colab doctor [--prune] [--ttl <hours>] [--json] [--sync]
 
 Health-check the machine-local state and heal drift. This is the RECORD-points-nowhere
 direction; the mirror direction — a directory that exists with NO record — is reported by
@@ -1754,6 +1756,17 @@ in a cleanup cron.
   --prune   apply the fixes (default: report only)
   --ttl N   hours before a worktree-less claim is flagged stale (default 24)
   --json    machine-readable report
+  --sync    ALSO check each repo's tracker for spent \`group:<key>\` labels (#85). Off by
+            default because it is the only network work doctor does — one \`gh label list\`
+            per repo, plus one membership call per group label — and doctor is otherwise
+            fleet-wide and instant. Same opt-in shape as \`colab claims --sync\`.
+            With --prune, deletes the labels found SPENT (every member closed) — the
+            back-fill for groups \`ship\`'s B4 teardown can never reach: ones spent before
+            that feature existed, or closed by any route other than \`ship\`. A group with
+            an open member is mid-flight and is never reported; a group with NO members is
+            reported but never deleted (a label a triage session just created and has not
+            applied yet is indistinguishable from one whose members were all transferred
+            away — the labels API exposes no creation time, so a human decides).
 `;
 
 const EMPTY_SET = new Set();
@@ -1828,14 +1841,15 @@ function shippedBranches(repos, st) {
 
 function cmdDoctor(argv) {
   const opts = parseArgs(argv, {
-    values: { '--ttl': 'ttl' }, flags: { '--prune': 'prune', '--json': 'json', '-h': 'help', '--help': 'help' },
+    values: { '--ttl': 'ttl' }, flags: { '--prune': 'prune', '--json': 'json', '--sync': 'sync', '-h': 'help', '--help': 'help' },
   });
   if (opts.help) return print(HELP_DOCTOR);
   const config = state.loadConfig();
   const ttl = opts.ttl ? parseFloat(opts.ttl) : config.claimTTLHours;
 
   const report = { deadWorktrees: [], orphanClaims: [], staleClaims: [], orphanPorts: [], brokenRecords: [], prunedPorts: [],
-    mergedFlips: [], mergedSweep: [], mergedDirty: [], mergedHookFail: [], mergedRemoveFail: [], shippedBranches: [], ghostPorts: [], pruned: !!opts.prune };
+    mergedFlips: [], mergedSweep: [], mergedDirty: [], mergedHookFail: [], mergedRemoveFail: [], shippedBranches: [], ghostPorts: [],
+    spentGroupLabels: [], groupLabelsChecked: !!opts.sync, pruned: !!opts.prune };
 
   // One answer per (repo, branch) — pass 5b asks about the same branch from a worktree and from each
   // of its claims, and every miss costs two `git rev-parse` calls.
@@ -2029,6 +2043,46 @@ function cmdDoctor(argv) {
     }
   }
 
+  // 9. spent `group:<key>` labels (#85) — the back-fill for what ship's B4 teardown cannot reach.
+  //    B4 (#82) only considers labels carried by the issues the shipping branch just closed, which
+  //    is the right trigger going forward but leaves two populations stranded forever: groups whose
+  //    members all closed BEFORE that feature existed, and groups closed by any route other than
+  //    `ship`. Neither has an unshipped member left to trigger a ship, so nothing else will look.
+  //
+  //    Behind --sync because it is the ONLY network work doctor does, and doctor is otherwise
+  //    instant and fleet-wide — the same opt-in shape `colab claims --sync` already establishes.
+  //    Deletion additionally needs --prune, and only ever touches `spent`; see lib/group-labels.js
+  //    for why `empty` is reported but never deleted.
+  if (opts.sync) {
+    if (!git.ghAvailable()) {
+      warn('gh not available — --sync group-label check skipped');
+      report.groupLabelsChecked = false;
+    } else {
+      const st6 = state.loadState();
+      // Same repo set as pass 7 — the REGISTRY, not just repos with live state. A spent group
+      // label is by definition on a repo whose work is finished, so it typically has no worktree
+      // and no claim left; deriving repos from state alone would miss exactly the #85 case.
+      const repos = [...new Set([...(config.repos || []), ...knownRepos(config)].map((r) => path.resolve(r)))]
+        .filter((r) => repoLive(r));
+      for (const repo of repos) {
+        const verdicts = groupLabels.classifyGroupLabels(
+          git.ghListLabels(repo),
+          (name) => git.ghIssueListByLabel(repo, name, 'all', ['number', 'state']),
+        );
+        for (const v of groupLabels.reportableLabels(verdicts)) {
+          const entry = { repo: shortRepo(repo), label: v.name, verdict: v.verdict,
+            total: v.total, open: v.open, members: v.members, deleted: false, error: null };
+          if (opts.prune && v.verdict === 'spent') {
+            const del = git.ghLabelDelete(repo, v.name);
+            entry.deleted = !!del.ok;
+            if (!del.ok) entry.error = del.stderr || 'gh label delete failed';
+          }
+          report.spentGroupLabels.push(entry);
+        }
+      }
+    }
+  }
+
   if (opts.json) { print(JSON.stringify(report, null, 2)); return 0; }
 
   const verb = opts.prune ? 'Pruned' : 'Found';
@@ -2115,6 +2169,49 @@ function cmdDoctor(argv) {
     print(`    git -C <repo> branch -D ${ex.branch}${ex.remote ? `  &&  git -C <repo> push origin --delete ${ex.branch}` : ''}`);
     print('  NOT exhaustive: a branch whose work trunk later rewrote can conflict against trunk');
     print('  instead of matching it, and is omitted here rather than risk calling unmerged work spent.');
+  }
+  // Also after the verdict, and also not drift: a spent group label breaks nothing, it is picker
+  // noise on a tracker. Printed only under --sync, so silence here NEVER means "checked, clean" —
+  // which is why a --sync run that finds nothing says so explicitly below.
+  if (report.groupLabelsChecked) {
+    const spent = report.spentGroupLabels.filter((g) => g.verdict === 'spent');
+    const empty = report.spentGroupLabels.filter((g) => g.verdict === 'empty');
+    const unknown = report.spentGroupLabels.filter((g) => g.verdict === 'unknown');
+    if (!report.spentGroupLabels.length) {
+      print('');
+      print('Group labels: checked, none spent — every `group:<key>` still binds an open member.');
+    }
+    if (spent.length) {
+      print('');
+      const done = spent.filter((g) => g.deleted).length;
+      print(`${opts.prune ? `Deleted ${done}/${spent.length}` : `Spent group labels (${spent.length})`} — every member closed:`);
+      for (const g of spent) {
+        const marks = g.members.length ? ` (#${g.members.join(' #')})` : '';
+        print(`  ${g.label} [${g.repo}] ${g.total} member(s), 0 open${marks}${g.deleted ? '  ✓ deleted' : ''}${g.error ? `  ✗ ${g.error}` : ''}`);
+      }
+      if (!opts.prune) {
+        print('  Routine, not drift: `ship`\'s B4 tears these down going forward, but it can only see');
+        print('  labels the shipping branch\'s own issues carried — groups spent before that existed,');
+        print('  or closed by any route other than `ship`, have nothing left to trigger a teardown.');
+        print('  Re-run with --sync --prune to delete them, or by hand:');
+        print(`    gh label delete ${spent[0].label} --yes   # in ${spent[0].repo}`);
+      }
+    }
+    if (empty.length) {
+      print('');
+      print(`Group labels binding NO issue (${empty.length}) — reported, never auto-deleted:`);
+      for (const g of empty) print(`  ${g.label} [${g.repo}]`);
+      print('  Two histories produce this and GitHub cannot tell them apart: every member was');
+      print('  deleted/transferred (spent), or a triage session created it moments ago and has not');
+      print('  applied it yet (LIVE). The labels API exposes no creation time, so --prune leaves');
+      print('  these alone and you decide — deleting a group mid-formation is not recoverable in kind.');
+    }
+    if (unknown.length) {
+      print('');
+      print(`Group labels that could NOT be checked (${unknown.length}) — membership unreadable:`);
+      for (const g of unknown) print(`  ${g.label} [${g.repo}]`);
+      print('  Left in place. A failed lookup is not evidence of an empty group.');
+    }
   }
   if (report.ghostPorts.length) {
     issues += report.ghostPorts.length;
@@ -3428,6 +3525,18 @@ function branchCommits(mainRoot, trunk, branch) {
   });
 }
 
+/** Files one commit touched (#88's narrow-subject signal). [] when the read fails — never a guess. */
+function commitFiles(mainRoot, sha) {
+  const r = git.git(['show', '--pretty=format:', '--name-only', sha], mainRoot);
+  return r.ok ? [...new Set(r.stdout.split('\n').map((s) => s.trim()).filter(Boolean))] : [];
+}
+
+/** Files the whole branch changed against its base — the denominator for the same signal. */
+function branchChangedFiles(mainRoot, base, branch) {
+  const r = git.git(['diff', '--name-only', `${base}...${branch}`], mainRoot);
+  return r.ok ? r.stdout.split('\n').map((s) => s.trim()).filter(Boolean) : [];
+}
+
 /**
  * Default squash-commit message when --message is absent.
  *
@@ -3462,6 +3571,7 @@ promotes is an integration event of the same weight as a promotion, and stays hu
 Sequence (each step gated; any failure aborts before the push — the target is never half-shipped):
   a. autonomy gate      repo must grant auto-trunk (no --force override)
   b. preconditions      target CI alive+green · no new migrations on branch · trunk checkout clean
+                        · every closing claim corroborated by git (see below)
                         (an integration line with NO runs at all borrows trunk's verdict, advisory —
                         an ungated line is a normal early state; a RED line still blocks)
   c. B0 sync            merge the target INTO the branch; non-generated conflict → abort (human merge);
@@ -3478,10 +3588,41 @@ Sequence (each step gated; any failure aborts before the push — the target is 
                         LABEL OBJECT once no open issue carries it anymore (#82) — a live member
                         elsewhere leaves it in place
 
+CLAIMS ARE CROSS-CHECKED AGAINST GIT before anything closes (#87). The set ship would close comes
+from the claim registry, read AT SHIP TIME — so a claim a co-tenant session wrote onto this branch
+minutes ago is indistinguishable from one this session made. Measured: a branch carrying #71 and
+#76 reported issues [71, 74, 76], because a second session claimed #74 onto the same worktree after
+the ship was authorised and had only just begun; nothing on the branch implemented it. ship now
+asks git whether the BRANCH NAME's trailing group or any COMMIT BODY names each closing issue, and
+refuses when neither does. Fix it by deciding what is true — \`colab release <N>\` if the claim is
+not this branch's work, \`--refs <N>\` if it is related but not completed here — never by weakening
+the check: a wrong \`Closes #N\` closes the issue the instant trunk is pushed and stays in an
+immutable commit message afterwards.
+
 The default squash subject is the branch's HIGHEST-WEIGHT commit (breaking > feat > fix > perf >
 refactor > docs > test > chore, ties to the oldest) — NOT its newest commit, which on a well-run
 branch is the docs pass and used to retitle whole features as \`docs:\`, hiding them from the
 release notes. The body is unchanged: Closes per issue, other subjects as bullets, footers kept.
+
+Two ADVISORY subject checks run before the irreversible step (#88), and neither blocks: a
+type-mismatch (the chosen subject's type disagrees with the branch's own \`feat/\`/\`fix/\` prefix)
+and a narrow-subject (the titling commit touched a small fraction of the files the branch changed).
+Both catch the same measured failure from opposite sides — a branch shipping a convention plus +104
+lines of docs landed titled "fix(labels): correct mechanical-readiness tests…", because its only
+commit describing the deliverable was typed \`wip:\` and was therefore invisible to the ranking.
+Pass --message to title it by hand.
+
+EVIDENCE-CLOSE — a branch that finished with NO diff (#90). A design-consult session, an
+investigation concluding "no change needed", or a deliverable stored outside the repo ends with a
+real result and zero commits. That branch cannot be squashed (there is nothing to stage) and used to
+have no completion path at all: the claim was released, the worktree torn down, and the issue stayed
+open forever, because the only close mechanism in the system was \`Closes #N\` inside a squash commit.
+ship now detects \`landed AND zero own commits\` — both measured from git, never declared by the
+session — and switches to evidence-close: post an evidence comment, CLOSE each issue, tear down. No
+merge, no push, and deliberately NO --allow-empty marker commit, which would put a lie in the
+history of every repo that adopts this. The gate: an issue is closed this way only when it ALREADY
+carries a comment colab did not write (its own 🔒/✅/🚢/🔖 markers do not count). An issue without one
+is reported and LEFT OPEN while the rest proceed.
 
 B3 KEEPS the branch by default. Deleting refs from a shared remote is not something this command
 does unasked, however certain it is that the content landed: reporting is safe and reversible,
@@ -3513,15 +3654,23 @@ Options:
                       UNCHANGED by this flag — it is additive, never a second way to read the same run.
 
                         { "ok": bool, "dry": true, "repo": "...", "branch": "...", "target": "...",
-                          "worktree": "..." | null, "issues": [N, ...],
+                          "worktree": "..." | null, "mode": "squash" | "evidence-close",
+                          "issues": [N, ...],
                           "closeIssues": [N, ...], "refsIssues": [N, ...],
                           "checklistFindings": [ { "issue": N, "unchecked": n, "total": n, "reason": "..." } ],
                           "checks": [ { "name": "...", "ok": bool, "class": "..." | null, "detail": "..." } ] }
 
+                      \`mode\` says which completion path this branch has (#90). "evidence-close"
+                      means there is nothing to merge and ship will close the issues from evidence
+                      instead — an unattended caller must NOT read it as a no-op.
+
                       \`checks\` has one entry per precondition — branch resolves, not an integration
                       line, autonomy granted, target CI alive+green, no new migrations, trunk
                       checkout ready, no hand-merge conflict (a real preview merge, done in a
-                      throwaway detached worktree — nothing on disk here is touched by it). \`class\`
+                      throwaway detached worktree — nothing on disk here is touched by it), claims
+                      corroborated by git (#87), and branch has commits (#90 — TRUE, not false, when
+                      the branch qualifies for evidence-close: it is a different path, not a
+                      failure). \`class\`
                       is set ONLY on a failing check, from a CLOSED, STABLE-WIRE-FORMAT vocabulary:
                         self-clearing   CI still running, a transient gh/preview read failure — an
                                         unattended caller may retry later with NO human action.
@@ -3687,19 +3836,20 @@ function resolveCloseRefsSplit(repoAbs, gh, issues, refsFromFlag) {
 function shipCiCheck(repoAbs, gh, target, trunk) {
   const name = `${target === trunk ? 'trunk' : 'line'} CI green`;
   if (!gh) return { name, ok: false, class: SELF_CLEARING, detail: 'gh not usable (no auth / no origin) — cannot confirm CI' };
-  let run = git.ghRunLatest(repoAbs, target);
+  let run = git.ghRunForSha(repoAbs, target);
   let via = target;
   if (run && run.status === 'none' && target !== trunk) {
-    run = git.ghRunLatest(repoAbs, trunk);
+    run = git.ghRunForSha(repoAbs, trunk);
     via = `${trunk} (line "${target}" has no runs — ungated, advisory)`;
   }
   if (!run) return { name, ok: false, class: SELF_CLEARING, detail: 'gh run list failed' };
+  const at = `${via}@${shortSha(run.sha)}`;
   if (run.status === 'completed') {
-    if (run.conclusion === 'success') return { name, ok: true, class: null, detail: `latest run on ${via}: success` };
-    return { name, ok: false, class: HUMAN_GATED, detail: `latest run on ${via}: status=completed conclusion=${run.conclusion || 'none'}` };
+    if (run.conclusion === 'success') return { name, ok: true, class: null, detail: `run for ${at}: success` };
+    return { name, ok: false, class: HUMAN_GATED, detail: `run for ${at}: status=completed conclusion=${run.conclusion || 'none'}` };
   }
-  if (run.status === 'none') return { name, ok: false, class: HUMAN_GATED, detail: `latest run on ${via}: no runs at all — CI is not wired for this ref` };
-  return { name, ok: false, class: SELF_CLEARING, detail: `latest run on ${via}: status=${run.status} — still running, retry later` };
+  if (run.status === 'none') return { name, ok: false, class: HUMAN_GATED, detail: `no run for ${at} — CI is not wired for this ref, or never started for this commit` };
+  return { name, ok: false, class: SELF_CLEARING, detail: `run for ${at}: status=${run.status} — still running, retry later` };
 }
 
 /**
@@ -3774,10 +3924,14 @@ function cmdShipDryJson(opts) {
   // PRECONDITION, ok:false only on something that blocks" — additive new top-level fields keep
   // that contract intact for every existing consumer of `ok`/`checks`.
   let closeIssues = sess.issues, refsIssues = [], checklistFindings = [];
+  // #90: `mode` is additive and tells an unattended caller WHICH completion path this branch has —
+  // "squash" or "evidence-close". Without it, a zero-commit branch read `ok: true` and then hit
+  // B1's wall, because `checks[]` had no "branch has commits" precondition at all.
+  let mode = 'squash';
   const emit = (ok) => {
     print(JSON.stringify({
       ok, dry: true, repo: shortRepo(repoAbs), branch: sess.branch, worktree: sess.name || null,
-      target, issues: sess.issues, closeIssues, refsIssues, checklistFindings, checks,
+      target, mode, issues: sess.issues, closeIssues, refsIssues, checklistFindings, checks,
     }, null, 2));
     return ok ? 0 : 1;
   };
@@ -3853,7 +4007,149 @@ function cmdShipDryJson(opts) {
   const mc = shipMergeConflictCheck(repoAbs, target, sess.branch, generated, hasPreShip);
   checks.push({ name: 'no hand-merge conflict', ok: mc.ok, class: mc.ok ? null : (mc.unknown ? SELF_CLEARING : HUMAN_GATED), detail: mc.detail });
 
+  // ---- (d) the two checks the machine-facing path was missing entirely ----
+  const dryCommits = branchCommits(repoAbs, target, sess.branch);
+
+  // #87: B1b's cross-check, same rule as the prose path — only over the issues that would CLOSE.
+  const dryCorr = shipguard.corroborateIssues(closeIssues, sess.branch, dryCommits);
+  checks.push({ name: 'claims corroborated by git', ok: dryCorr.ok, class: dryCorr.ok ? null : HUMAN_GATED,
+    detail: dryCorr.ok
+      ? (closeIssues.length ? `${closeIssues.length} closing issue(s) named by the branch or its commits` : 'none to close')
+      : `${dryCorr.uncorroborated.map((u) => '#' + u.issue).join(' ')} claimed but named by NEITHER the branch name nor any commit body — a co-tenant claim would be closed by this ship` });
+
+  // #90: "branch has commits" — the precondition whose absence told an unattended caller `ok: true`
+  // about a branch that could not ship. It is NOT a failure when the branch qualifies for
+  // evidence-close; it is a different mode, and saying so is the whole point.
+  const dryMode = shipMode(repoAbs, target, sess.branch, dryCommits);
+  if (dryMode.evidenceClose) {
+    mode = 'evidence-close';
+    checks.push({ name: 'branch has commits', ok: true, class: null,
+      detail: `zero commits, and ${dryMode.why} — completion path is evidence-close (no merge, no push)` });
+  } else if (dryCommits.length === 0) {
+    checks.push({ name: 'branch has commits', ok: false, class: HUMAN_GATED,
+      detail: `no commits of its own vs ${target}, and it does not qualify for evidence-close ` +
+        `(landed verdict: ${dryMode.verdict.state} — ${dryMode.verdict.why}); a squash would stage nothing` });
+  } else {
+    checks.push({ name: 'branch has commits', ok: true, class: null, detail: `${dryCommits.length} vs ${target}` });
+  }
+
   return emit(checks.every((c) => c.ok));
+}
+
+/**
+ * Which completion path a branch has (#90): the ordinary squash-merge, or `evidence-close`.
+ *
+ * Evidence-close is for a branch that finished with a real deliverable and NO diff — a decision
+ * recorded on its issue, an investigation concluding "no change needed", an artifact stored outside
+ * the repo. It is not exotic; design-consult and investigation sessions end this way routinely.
+ *
+ * BOTH conditions are required, and they are not the same question:
+ *   - `landed` (lib/landed.js) — merging this branch would not change the base's tree;
+ *   - zero commits of its own — nothing on the branch's first-parent chain past the merge-base.
+ *
+ * A branch that is `landed` WITH commits is the ordinary squash-already-merged case, which has its
+ * own handling and must not be diverted here. Requiring both keeps this path to the shape it was
+ * ruled for, and both come from git — the session never declares its own zero-diff-ness.
+ *
+ * `unknown` is never evidence-close. lib/landed.js is explicit that `unknown` means "look", and
+ * routing an unmeasurable branch into a path that CLOSES ISSUES WITHOUT MERGING is exactly the
+ * direction that must fail safe.
+ */
+function shipMode(repoAbs, target, branch, commits) {
+  const verdict = landed.landedState(repoAbs, target, branch);
+  const zeroCommits = Array.isArray(commits) && commits.length === 0;
+  if (verdict.state === 'landed' && zeroCommits) {
+    return { evidenceClose: true, verdict, why: `landed vs ${target} (${verdict.why}) and zero commits of its own` };
+  }
+  return { evidenceClose: false, verdict, why: null };
+}
+
+/**
+ * The evidence-close path (#90). Posts evidence, CLOSES each closing issue, then tears down exactly
+ * as B3 does. No merge, no commit, no push — and deliberately no `--allow-empty` marker commit:
+ * inventing a commit to satisfy a code path would put a lie in the history of every repo that
+ * adopts this.
+ *
+ * THE GATE, and why it is this one. This is the first `gh issue close` in the CLI. Until now the
+ * tool expressed "this issue is done" exclusively as a commit trailer, which has a genuinely nice
+ * property: the tracker never moves unless trunk moved. Closing without a merge breaks that
+ * symmetry on purpose, so something has to replace it — an issue may be closed here only when it
+ * ALREADY carries a comment colab did not write (lib/shipguard.js `hasEvidence`). That mirrors the
+ * rule an adopting repo already uses for non-code delivery: closed ∧ evidence comment ⇒ landed.
+ *
+ * An issue with no evidence is REPORTED AND LEFT OPEN while the rest proceed. The alternative —
+ * refusing the whole ship — would put the session back in the stall this exists to end, and the
+ * other issues' evidence is not made worse by this one's absence.
+ */
+function shipEvidenceClose({ repoAbs, st, sess, target, trunk, gh, closeIssues, refsIssues, refsSet, mode, opts }) {
+  print(`E1: evidence-close — no merge into ${target}, nothing to push.`);
+  if (!gh) {
+    process.stderr.write('✗ E1: gh is not usable (no auth / no origin), so neither the evidence check nor the\n');
+    process.stderr.write('  close can be performed. Nothing was changed. Fix gh and re-run.\n');
+    return 1;
+  }
+
+  const head = git.git(['rev-parse', '--short', sess.branch], repoAbs).stdout || '(unknown)';
+  const closed = [];
+  const skipped = [];
+  for (const num of closeIssues) {
+    const info = git.ghIssueView(repoAbs, num, ['comments', 'state']);
+    if (!info) { skipped.push({ num, why: 'could not read the issue (gh)' }); continue; }
+    if (info.state === 'CLOSED') { closed.push(num); continue; } // already done — not a failure
+    if (!shipguard.hasEvidence(info.comments)) {
+      skipped.push({ num, why: 'no evidence comment — only colab\'s own markers' });
+      continue;
+    }
+    const shipSess = sessionCommentSuffix(sess.session, sess.sessionName);
+    const body = `✅ Closed by colab ship — **evidence-close**: this branch (\`${sess.branch}\` @ ${head}) ` +
+      `introduces no change to \`${target}\`, so there is no merge commit and no \`Closes #${num}\` to carry.\n\n` +
+      `The deliverable is recorded on this issue (see the comment(s) above), which is what authorised ` +
+      `the close — colab closes a zero-diff issue only when it already carries a comment colab did not ` +
+      `write. The zero-diff fact was measured from git: ${mode.why}.${shipSess}`;
+    const c = git.ghIssueComment(repoAbs, num, body);
+    if (!c.ok) warn(`could not post the evidence-close comment on #${num} — closing anyway`);
+    const r = git.run('gh', ['issue', 'close', String(num), '--reason', 'completed'], { cwd: repoAbs });
+    if (!r.ok) { skipped.push({ num, why: `gh issue close failed: ${(r.stderr || '').split('\n')[0]}` }); continue; }
+    closed.push(num);
+    print(`  #${num} closed with evidence.`);
+  }
+
+  for (const s of skipped) {
+    warn(`#${s.num} left OPEN — ${s.why}.`);
+    warn('  Record what was delivered as a comment on the issue, then re-run; colab will not invent');
+    warn('  the evidence for you, and closing without it is what the gate exists to prevent.');
+  }
+  for (const num of refsIssues) print(`  #${num} kept open (ref).`);
+
+  // The same events the merge path emits, minus the merge: there is no sha, so `issue.merged` — whose
+  // payload IS the merge commit — is deliberately not sent. A receiver must not be told a merge
+  // happened. The ship event carries the state honestly instead.
+  pushEvent('ship', {
+    repo: repoAbs, worktree: sess.name, session: sess.session,
+    issue: sess.issues.length === 1 ? sess.issues[0] : undefined,
+    payload: { state: 'evidence-closed', branch: sess.branch, target, sha: null, issues: closed },
+  });
+
+  // Teardown, exactly as B3 — the claims are released by worktree rm, as on every other path.
+  if (sess.name && !opts.keepWorktree) {
+    print(`E2: removing worktree ${sess.name} …`);
+    try { cmdWorktreeRm([sess.name, '--repo', repoAbs, '--force']); }
+    catch (e) { warn(`worktree rm reported: ${e.message}`); }
+  } else if (sess.name) {
+    print(`E2: keeping worktree ${sess.name} (--keep-worktree)`);
+  }
+
+  // The branch carried no content, so there is nothing for `handleShippedBranch` to reason about —
+  // but it is also not "shipped", and deleting it here would destroy the only record that the
+  // session existed. Left alone, and said so.
+  print(`E2: branch ${sess.branch} left in place (it carried no content to ship; delete it by hand if you want it gone).`);
+
+  if (skipped.length) {
+    process.stderr.write(`✗ evidence-close finished with ${skipped.length} issue(s) still open (see above).\n`);
+    return 1;
+  }
+  print(`✓ evidence-close complete: ${closed.map((n) => '#' + n).join(' ') || '(nothing to close)'}`);
+  return 0;
 }
 
 function cmdShip(argv) {
@@ -3960,20 +4256,32 @@ function cmdShip(argv) {
   const ciLabel = `${target === trunk ? 'trunk' : 'line'} CI green`;
   if (!gh) { checks.push(['✗', ciLabel, 'gh not usable (no auth / no origin) — cannot confirm CI']); }
   else {
-    let run = git.ghRunLatest(repoAbs, target);
+    let run = git.ghRunForSha(repoAbs, target);
     let via = target;
     if (run && run.status === 'none' && target !== trunk) {
-      run = git.ghRunLatest(repoAbs, trunk);
+      run = git.ghRunForSha(repoAbs, trunk);
       via = `${trunk} (line "${target}" has no runs — ungated, advisory)`;
     }
     if (!run) checks.push(['✗', ciLabel, 'gh run list failed']);
-    else if (run.status === 'completed' && run.conclusion === 'success') { ciOk = true; checks.push(['✓', ciLabel, `latest run on ${via}: success`]); }
-    else checks.push(['✗', ciLabel, `latest run on ${via}: status=${run.status} conclusion=${run.conclusion || 'none'} (fail-to-start counts as not green)`]);
+    else if (run.status === 'completed' && run.conclusion === 'success') { ciOk = true; checks.push(['✓', ciLabel, `run for ${via}@${shortSha(run.sha)}: success`]); }
+    else checks.push(['✗', ciLabel, `${via}@${shortSha(run.sha)}: status=${run.status} conclusion=${run.conclusion || 'none'} (fail-to-start counts as not green; a cancelled sibling of a passing run on this sha would read success, not this)`]);
   }
   // No new migrations on the branch, measured against what it will merge into
   const migrations = newMigrations(repoAbs, target, sess.branch);
   const migOk = migrations.length === 0;
   checks.push([migOk ? '✓' : '✗', 'no new migrations', migOk ? `none vs ${target}` : `${migrations.length} present — human must run Phase B: ${migrations.join(', ')}`]);
+
+  // ---- B1b's cross-check, run by the tool rather than by the reader (#87) ----
+  // The claim registry is read AT SHIP TIME, so a claim a co-tenant session wrote onto this branch
+  // minutes ago is indistinguishable from one this session made. Ask git whether the branch
+  // corroborates each issue that is about to be CLOSED — an issue kept open by --refs/tracking/the
+  // close gate was never going to close, so gating it a second way is pure noise.
+  const shipCommits = branchCommits(repoAbs, target, sess.branch);
+  const corr = shipguard.corroborateIssues(closeIssues, sess.branch, shipCommits);
+  checks.push([corr.ok ? '✓' : '✗', 'claims corroborated by git',
+    corr.ok
+      ? (closeIssues.length ? `${closeIssues.length} closing issue(s) named by the branch or its commits` : 'none to close')
+      : `${corr.uncorroborated.map((u) => '#' + u.issue).join(' ')} claimed but named by NEITHER the branch name nor any commit body`]);
   // The main checkout is on trunk and clean. Required whatever the target is: it is the repo's
   // at-rest invariant, and when the target is a line the merge happens in an ephemeral worktree
   // precisely so that this stays true.
@@ -3984,7 +4292,10 @@ function cmdShip(argv) {
   checks.push([treeOk ? '✓' : '✗', 'trunk checkout ready',
     !onTrunk ? `main checkout is on "${headBranch}", not "${trunk}"` : (dirty ? 'tracked changes uncommitted in trunk checkout' : `on ${trunk}, clean`)]);
 
-  const preOk = ciOk && migOk && treeOk;
+  // #87 gates the ship: writing `Closes #N` for work that has not started is unrecoverable — the
+  // issue can be reopened, but the false claim stays in trunk's immutable history, and GitHub will
+  // have closed it the instant trunk was pushed.
+  const preOk = ciOk && migOk && treeOk && corr.ok;
 
   // ---- report the table ----
   print(`ship ${shortRepo(repoAbs)} · branch ${sess.branch} → ${target}` +
@@ -4025,34 +4336,118 @@ function cmdShip(argv) {
   } else if (brokenClaims.length) {
     warn(`${brokenClaims.length} claim(s) in this repo name a branch that resolves to no ref — run \`colab doctor\``);
   }
+
+  // ---- #87: say what an uncorroborated claim means, and what to do about it ----
+  // Printed as a refusal rather than a warning because the failure is not recoverable after the
+  // fact: the issue can be reopened, but `Closes #N` stays in trunk's history forever.
+  if (!corr.ok) {
+    for (const u of corr.uncorroborated) {
+      warn(`#${u.issue} is claimed on this branch but NOTHING in git corroborates it — not the branch`);
+      warn(`  name's trailing group, not any commit body. The usual cause is a co-tenant session that`);
+      warn(`  claimed it onto this branch/worktree while this ship was being prepared; its work may not`);
+      warn(`  have started. Shipping would write "Closes #${u.issue}" into an immutable commit and close it.`);
+    }
+    warn('  Resolve by deciding what is true, then re-run:');
+    warn(`    colab release <N>                 # the claim is not this branch's work`);
+    warn(`    colab ship … --refs <N>           # it IS related, but this ship does not complete it`);
+    warn(`    (or land a commit whose body names #N, if the branch really does implement it)`);
+  }
+
+  // ---- #88 Case 1: does the inherited subject describe the unit being shipped? ----
+  // Both signals are advisory: they are printed before the irreversible step and never block, in
+  // line with #88's own ruling ("neither should block a ship on its own; both should be visible
+  // before the irreversible step"). `--message` replaces the subject outright, so neither applies.
+  if (!opts.message && shipCommits.length) {
+    const idx = squash.pickSubjectIndex(shipCommits);
+    if (idx >= 0) {
+      const chosen = shipCommits[idx];
+      const findings = shipguard.subjectSanity({
+        subject: chosen.subject,
+        branchName: sess.branch,
+        chosenFiles: commitFiles(repoAbs, chosen.sha),
+        branchFiles: branchChangedFiles(repoAbs, target, sess.branch),
+        commitCount: shipCommits.length,
+        parseSubject: squash.parseSubject,
+      });
+      for (const f of findings) {
+        warn(`squash subject (${f.kind}): ${f.detail}`);
+        warn(`  chosen from ${String(chosen.sha).slice(0, 7)} "${chosen.subject}" — pass --message "<subject>" to title it by hand.`);
+      }
+    }
+  }
+
+  // ---- surface the squash-subject blind spot BEFORE it ships (#88) ----
+  // A commit whose prefix isn't a recognised Conventional Commit type (`wip:`, or no prefix at
+  // all) can never win the squash subject on merit — pickSubjectIndex cannot see it, so a
+  // LOWER-WEIGHT recognised commit (often the closing `docs:` pass) wins instead, silently. Only
+  // meaningful on the composed path: `--message` replaces the subject outright.
+  if (!opts.message) {
+    const unweighted = squash.unweightedCommits(shipCommits);
+    if (unweighted.length) {
+      warn(`${unweighted.length} commit(s) on this branch carry no recognised Conventional Commit type`);
+      warn('  — invisible to the squash-subject ranking, however small the commit that wins instead:');
+      for (const c of unweighted) warn(`    ${String(c.sha || '').slice(0, 7)}  ${c.subject}`);
+      warn('  If one of these is the branch\'s real headline, re-word it to a recognised type, or ship');
+      warn('  with --message so the subject is not guessed.');
+    }
+  }
+  // ---- (b2) which completion path is this? squash-merge, or evidence-close (#90) ----
+  // A session can finish with a real deliverable and ZERO commits: a decision recorded on its
+  // issue, an investigation concluding "no change needed", a design artifact stored outside the
+  // repo. That branch classifies as `landed` (nothing to merge), so B1 used to refuse it AFTER
+  // B0's sync, the CI check and the push gate — and no path in either skill ever closed the issue,
+  // because the only close mechanism in the whole system was `Closes #N` inside a squash commit.
+  // The claim got released, the worktree torn down, and the issue stayed open forever.
+  //
+  // The zero-diff fact is measured from git, never declared by the session.
+  const mode = shipMode(repoAbs, target, sess.branch, shipCommits);
+
   print('');
   print(table(checks.map((c) => [c[0], c[1], c[2]]), ['', 'PRECONDITION', 'DETAIL']));
   print('');
 
+  if (mode.evidenceClose) {
+    print('→ MODE: evidence-close (the branch introduces no change to ' + target + ' — nothing to merge)');
+    print(`  ${mode.why}`);
+  }
+
   if (opts.dry) {
     print(preOk ? '→ READY: preconditions pass. Re-run without --dry to ship.' : '→ NOT READY: fix the ✗ rows above.');
+    if (mode.evidenceClose) {
+      print('  Plan: no merge, no commit, no push · post evidence comment + CLOSE each issue · ' +
+        (opts.keepWorktree ? 'keep worktree' : 'worktree rm') + ' (releases claims)');
+      print('  Gate: every closing issue must already carry an evidence comment — checked at run time.');
+    } else {
     print(`  Plan: B0 sync ${target}→branch · B1 squash-merge → ` + target + ' · B2 push · B3 ' +
       (opts.keepWorktree ? 'keep worktree' : 'worktree rm') + ' + ' +
       (opts.deleteBranch && !opts.keepWorktree ? 'delete branch (local+remote)' : 'keep branch') +
       ' · B4 verify closed · post 🚢 summary');
+    }
     // Show the subject the squash WOULD get. The whole point of issue #17 was that a wrong subject
     // is silent — nothing fails, CI is green, and it is only visible once it is in a published tag.
     // A dry run is the last moment it can be caught, so it must be on screen there.
     //
     // An empty default (#57) means the branch has no commits of its own to derive a subject from —
     // say that plainly rather than printing a blank line that reads like a rendering glitch.
-    let subjectLine;
-    if (opts.message) {
-      subjectLine = `${opts.message} [--message]`;
-    } else {
-      const built = buildSquashMessage(repoAbs, target, sess.branch, closeIssues, refsIssues);
-      subjectLine = built ? built.split('\n')[0] : '(none — branch has no commits of its own; pass --message)';
+    if (!mode.evidenceClose) {
+      let subjectLine;
+      if (opts.message) {
+        subjectLine = `${opts.message} [--message]`;
+      } else {
+        const built = buildSquashMessage(repoAbs, target, sess.branch, closeIssues, refsIssues);
+        subjectLine = built ? built.split('\n')[0] : '(none — branch has no commits of its own; pass --message)';
+      }
+      print('  Squash subject: ' + subjectLine);
     }
-    print('  Squash subject: ' + subjectLine);
     if (refsIssues.length) print(`  Refs (kept open, NOT closed): ${refsIssues.map((n) => '#' + n).join(' ')}`);
     return preOk ? 0 : 1;
   }
   if (!preOk) { process.stderr.write('✗ Aborting: one or more preconditions failed (see ✗ above). Nothing was pushed.\n'); return 1; }
+
+  // ---- (b3) evidence-close: the whole B0–B2 sequence is skipped, because there is nothing to merge ----
+  if (mode.evidenceClose) return shipEvidenceClose({
+    repoAbs, st, sess, target, trunk, gh, closeIssues, refsIssues, refsSet, mode, opts,
+  });
 
   // ---- (c) B0: merge the TARGET into the branch (in the worktree, or an ephemeral one) ----
   const generated = [...DEFAULT_GENERATED, ...(Array.isArray(doc.generated) ? doc.generated.map(String) : [])];
@@ -4112,10 +4507,10 @@ function cmdShip(argv) {
 
   // ---- (d) B1: re-verify CI, then squash-merge into the target ----
   if (gh) {
-    let run2 = git.ghRunLatest(repoAbs, target);
+    let run2 = git.ghRunForSha(repoAbs, target);
     // Same fallback as the precondition: an ungated line borrows trunk's verdict rather than
     // blocking. The two must agree, or a ship passes the table and dies at the re-check.
-    if (run2 && run2.status === 'none' && target !== trunk) run2 = git.ghRunLatest(repoAbs, trunk);
+    if (run2 && run2.status === 'none' && target !== trunk) run2 = git.ghRunForSha(repoAbs, trunk);
     if (!(run2 && run2.status === 'completed' && run2.conclusion === 'success')) {
       cleanupEphemeral();
       process.stderr.write(`✗ B1: CI for ${target} is no longer green — aborting before merge. Nothing pushed.\n`);
@@ -4290,7 +4685,7 @@ function cmdShip(argv) {
 // ---------------------------------------------------------------------------
 // landed — "has this branch's work landed on its base?", the one shared answer.
 //
-// code-sweep sorts candidates into wrap / teardown-only / claim-only / blocked, and code-wrap
+// code-sweep sorts candidates into wrap / teardown-only / claim-only / blocked / unlinked, and code-wrap
 // Phase B decides the same thing for one branch. Both used to decide it by prose and judgement,
 // and the obvious rule (count the commits ahead) misreports every squash-merge — see lib/landed.js
 // for the measurement and for exactly what the rule does and does not cover.
@@ -4518,10 +4913,10 @@ function cmdPromote(argv) {
   let ciOk = false;
   if (!gh) checks.push(['✗', 'trunk CI green', 'gh not usable (no auth / no origin) — cannot confirm CI']);
   else {
-    const run = git.ghRunLatest(repoAbs, trunk);
+    const run = git.ghRunForSha(repoAbs, trunk);
     if (!run) checks.push(['✗', 'trunk CI green', 'gh run list failed']);
-    else if (run.status === 'completed' && run.conclusion === 'success') { ciOk = true; checks.push(['✓', 'trunk CI green', 'latest run success']); }
-    else checks.push(['✗', 'trunk CI green', `latest run status=${run.status} conclusion=${run.conclusion || 'none'} (fail-to-start counts as not green)`]);
+    else if (run.status === 'completed' && run.conclusion === 'success') { ciOk = true; checks.push(['✓', 'trunk CI green', `run for ${trunk}@${shortSha(run.sha)}: success`]); }
+    else checks.push(['✗', 'trunk CI green', `${trunk}@${shortSha(run.sha)}: status=${run.status} conclusion=${run.conclusion || 'none'} (fail-to-start counts as not green)`]);
   }
 
   const localTrunk = git.git(['rev-parse', trunk], repoAbs);
@@ -4650,7 +5045,9 @@ Commands:
                                         (the shared rule behind code-sweep's buckets — correct
                                         across squash merges, where "commits ahead" is not)
   promote [--repo P] [--message M] [--dry]   trunk → main (--no-ff); gated by deploy + promotion; never tags
-  doctor [--prune] [--ttl H] [--json]   heal dead worktrees / orphan + stale claims / orphan ports
+  doctor [--prune] [--ttl H] [--json] [--sync]
+                                        heal dead worktrees / orphan + stale claims / orphan ports
+                                        (--sync also: spent group:<key> labels)
   release-notes [<range>] [--repo P] [--out F] [--headline "..."]   grouped Markdown release summary
   release-status [<repo>...] [--repo P] [--json]   merged-but-UNRELEASED lag on tag-gated repos —
                                         read-only, never tags (#81)
@@ -4673,6 +5070,8 @@ which of the two you are talking to.
 
 function print(s) { process.stdout.write(s.endsWith('\n') ? s : s + '\n'); return 0; }
 function warn(s) { process.stderr.write(`! ${s}\n`); }
+/** 7-char sha for a CI-verdict message, or '?' when `ghRunForSha` had none to report (#92). */
+function shortSha(sha) { return sha ? String(sha).slice(0, 7) : '?'; }
 
 function main(argv) {
   const cmd = argv[0];

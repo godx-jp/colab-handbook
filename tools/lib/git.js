@@ -271,17 +271,56 @@ function ghLabelDelete(repo, name) {
 }
 
 /**
- * Latest CI run for a branch: { status, conclusion } (e.g. {status:'completed', conclusion:'success'}),
- * or null if gh fails. An empty history returns {status:'none', conclusion:null} — treated as NOT green
- * by the caller, which is also how a billing-style fail-to-start (no run created) reads.
+ * CI verdict for a branch, judged by SHA rather than by recency (#92).
+ *
+ * The naive "read the newest run" reading breaks under the repo's own
+ * `concurrency: { cancel-in-progress: true }`: two runs can race on one push, one gets cancelled by
+ * design, and if THAT one happens to land last, the gate reports red while an identical run on the
+ * exact same commit already passed. Nothing inside `colab ship` can clear that — the branch that
+ * would produce a newer run is the one the gate is blocking — so it deadlocked every queued ship
+ * until a human re-ran the cancelled workflow by hand.
+ *
+ * Ask the right question instead: does a completed, successful run exist for `branch`'s CURRENT
+ * remote head? `git ls-remote` reads that head without touching local refs — this may run before
+ * any fetch, mid-precondition. `-L limit` widens the window past "the latest row" because the
+ * duplicate this exists for can be two runs deep.
+ *
+ * Returns { status, conclusion, sha }:
+ *   - a run for the head sha completed successfully  → {status:'completed', conclusion:'success', sha}
+ *   - the head sha has run(s), none succeeded         → {status, conclusion} of the most informative
+ *     one (a still-running row over a finished-but-failed/cancelled one), sha set
+ *   - the head sha has no run in the recent window     → {status:'none', conclusion:null, sha}
+ *     (still not green — this is also how a billing-style fail-to-start reads: no run was ever
+ *     created for the commit that would need one)
+ *   - the branch does not exist on origin, or `git`/`gh` failed → null
+ *
+ * A cancelled sibling of a passing run on the SAME sha is not evidence of anything — it is simply
+ * not read, because the passing run for that sha is what answers the question.
  */
-function ghRunLatest(repo, branch) {
-  const r = run('gh', ['run', 'list', '--branch', branch, '-L', '1', '--json', 'status,conclusion'], { cwd: repo });
+function ghRunForSha(repo, branch, limit = 10) {
+  const head = run('git', ['ls-remote', 'origin', `refs/heads/${branch}`], { cwd: repo });
+  if (!head.ok) return null;
+  const sha = (head.stdout.split('\n')[0] || '').split('\t')[0].trim();
+  if (!sha) return null; // branch does not exist on origin
+
+  const r = run('gh', ['run', 'list', '--branch', branch, '-L', String(limit), '--json', 'headSha,status,conclusion'], { cwd: repo });
   if (!r.ok) return null;
-  try {
-    const arr = JSON.parse(r.stdout);
-    return arr[0] || { status: 'none', conclusion: null };
-  } catch (_) { return null; }
+  let runs;
+  try { runs = JSON.parse(r.stdout); } catch (_) { return null; }
+  if (!Array.isArray(runs)) return null;
+
+  const forSha = runs.filter((x) => x && x.headSha === sha);
+  if (forSha.length === 0) return { status: 'none', conclusion: null, sha };
+
+  const success = forSha.find((x) => x.status === 'completed' && x.conclusion === 'success');
+  if (success) return { status: 'completed', conclusion: 'success', sha };
+
+  // None succeeded for this sha — report the most informative row: a run still in flight (it may
+  // yet succeed) over a finished-but-not-successful one (gh returns newest-first; forSha[0] is the
+  // newest of the non-successes either way).
+  const pending = forSha.find((x) => x.status !== 'completed');
+  const pick = pending || forSha[0];
+  return { status: pick.status, conclusion: pick.conclusion || null, sha };
 }
 
 /**
@@ -300,6 +339,6 @@ module.exports = {
   run, git, repoRoot, mainRepoRoot, originUrl, detectTrunk, branchExists,
   worktreeList, worktreeListDetailed, dirtyTracked, dirtyUntracked, dirtyAny,
   ghAvailable, ghIssueEdit, ghListLabels, ghAssignedIssues,
-  ghCurrentLogin, ghIssueView, ghIssueComment, ghRunLatest,
+  ghCurrentLogin, ghIssueView, ghIssueComment, ghRunForSha,
   ghIssueListByLabel, ghLabelDelete,
 };

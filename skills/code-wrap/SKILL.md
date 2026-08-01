@@ -297,6 +297,26 @@ colab landed --worktree <name>      # landed · cargo · unknown
   straight to B2b (evidence), B3 (release claims) and B4 (teardown).
 - **unknown** → treat as cargo and look by hand before merging.
 
+**`landed` with ZERO commits of its own is a different thing, and it has its own
+door (#90).** A session can finish with a real deliverable and no diff at all: a
+decision recorded on its issue, an investigation concluding "no change needed", a
+design artifact stored outside the repo. That is not an exotic shape, and the route
+above does not close it — B2b wants "the `<base>` squash sha", which does not exist
+here, and no step in this skill has ever run `gh issue close`. Measured: the claim was
+released, the worktree torn down, and the issue stayed open until a human said in
+prose that finishing with no commit was acceptable.
+
+```sh
+colab ship --worktree <name> --dry     # → MODE: evidence-close, if that is this branch
+colab ship --worktree <name>           # posts evidence, CLOSES each issue, tears down
+```
+
+It merges nothing, pushes nothing, and writes no empty marker commit. It is gated on
+each issue **already carrying a comment colab did not write** — so record what you
+delivered on the Issue first (A1 is where that happens anyway), or ship will report
+the issue and leave it open. The zero-diff fact is measured from git; you do not
+declare it.
+
 **Never decide this by counting commits.** A squash-merge mints a new sha, so a
 shipped branch's own commits look permanently unmerged — a count-only check calls
 *every branch we have ever shipped* unshipped and invites re-merging finished work.
