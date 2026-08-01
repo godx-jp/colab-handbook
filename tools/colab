@@ -2035,6 +2035,226 @@ function cmdReleaseNotes(argv) {
 }
 
 // ---------------------------------------------------------------------------
+// release-status — measure merged-but-UNRELEASED lag on tag-gated repos (#81)
+//
+// CONVENTIONS §6 tells an agent: "if you believe a release is overdue ... say so explicitly in
+// your report." Nothing computed whether one IS overdue — this does, read-only. It never promotes,
+// never tags, never suggests running a release ritual unattended: the release itself stays a
+// human's on every repo, exactly as everywhere else in this CLI (see `promote`, `ship` above).
+//
+// THE MEASUREMENT GOTCHA THIS IS BUILT AROUND. On a dual-trunk repo (trunk `dev`, promoted into
+// `main`) tags live on `main` and are NOT ancestors of the trunk. `git describe` run from the trunk
+// checkout returns a STALE tag — the promotion that would have made it current hasn't happened yet,
+// by definition, in exactly the case this command exists to measure. Lag is therefore ALWAYS
+// computed against `main` (preferring `origin/main`, falling back to the local branch), never
+// against the trunk checkout's HEAD, whatever ref happens to be checked out when this runs.
+// ---------------------------------------------------------------------------
+
+/** `origin/<name>` if it resolves, else the local `<name>`, else null. Never guesses a third ref. */
+function bestRef(repoAbs, name) {
+  if (git.git(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${name}`], repoAbs).ok) return `origin/${name}`;
+  if (git.git(['rev-parse', '--verify', '--quiet', `refs/heads/${name}`], repoAbs).ok) return name;
+  return null;
+}
+
+/**
+ * Conventional-Commit subjects in <range> (no-merges), classified by CC_TYPES, plus whether any
+ * carries a breaking marker — either `!` right before the subject's colon, or a body-level
+ * `BREAKING CHANGE:` footer, which a subject-only scan would miss entirely.
+ */
+function ccSummary(repoAbs, range) {
+  const log = git.git(['log', range, '--no-merges', '--format=%s'], repoAbs);
+  const subjects = log.ok ? log.stdout.split('\n').filter(Boolean) : [];
+  const re = new RegExp(`^(${CC_TYPES.join('|')})(\\([^)]*\\))?(!)?:`);
+  const counts = Object.fromEntries(CC_TYPES.map((t) => [t, 0]));
+  let breaking = false;
+  for (const s of subjects) {
+    const m = s.match(re);
+    if (m) { counts[m[1]]++; if (m[3]) breaking = true; }
+  }
+  if (!breaking && log.ok) {
+    const bc = git.git(['log', range, '--no-merges', '-i', '-E', '--grep=^BREAKING CHANGE:', '--format=%H'], repoAbs);
+    breaking = bc.ok && !!bc.stdout;
+  }
+  return { total: subjects.length, counts, breaking, subjects };
+}
+
+/**
+ * feat -> minor, fix -> patch, a breaking change -> major. ADVISORY ONLY: the version number is
+ * always the human's — this does arithmetic on Conventional-Commit types, never chooses a release.
+ */
+function semverSuggestion(cc) {
+  if (cc.breaking) return { bump: 'major', why: 'a breaking change (! or BREAKING CHANGE:) since the last tag' };
+  if (cc.counts.feat) return { bump: 'minor', why: `${cc.counts.feat} feat commit(s) since the last tag` };
+  if (cc.counts.fix) return { bump: 'patch', why: `${cc.counts.fix} fix commit(s) since the last tag` };
+  if (cc.total === 0) return { bump: null, why: 'nothing merged since the last tag' };
+  return { bump: null, why: 'only non-user-facing commits since the last tag (docs/chore/refactor/test/perf)' };
+}
+
+/**
+ * One tag-gated repo's release-status row — or an `applicable: false` row with a stated reason
+ * (not tag-gated, no working tree, an audit-only slug), the same posture `colab update` uses for a
+ * repo it cannot assess. Never throws: a repo this cannot read about is a row, not a crash, because
+ * fleet mode must finish the sweep even when one repo is in a bad state.
+ */
+function inspectReleaseStatus(repoAbs) {
+  const label = shortRepo(repoAbs);
+  if (!fs.existsSync(repoAbs) || !git.repoRoot(repoAbs)) {
+    return { repo: label, path: repoAbs, applicable: false, reason: 'no working tree here' };
+  }
+  const doc = projectDoc(repoAbs);
+  const deploy = doc.deploy ? String(doc.deploy) : '';
+  if (deploy !== 'tag') {
+    return { repo: label, path: repoAbs, applicable: false, reason: `not tag-gated (deploy: ${deploy || 'absent'})` };
+  }
+  const trunk = resolveTrunk(repoAbs, doc) || 'main';
+  const dualTrunk = trunk !== 'main';
+
+  // Best-effort refresh. A read-only status command must still degrade to whatever is on disk
+  // rather than fail the whole row when offline — it says so (`stale: true`) instead of reporting
+  // nothing, the same asymmetry `landed.js` and B0's CI re-check apply elsewhere in this file.
+  const fetchMain = git.git(['fetch', 'origin', 'main'], repoAbs);
+  const fetchTrunk = dualTrunk ? git.git(['fetch', 'origin', trunk], repoAbs) : { ok: true };
+  const stale = !fetchMain.ok || !fetchTrunk.ok;
+
+  const mainRef = bestRef(repoAbs, 'main');
+  if (!mainRef) return { repo: label, path: repoAbs, applicable: false, reason: 'no "main" ref found locally or on origin — tags are expected to live there' };
+  const trunkRef = dualTrunk ? bestRef(repoAbs, trunk) : mainRef;
+  if (dualTrunk && !trunkRef) return { repo: label, path: repoAbs, applicable: false, reason: `no "${trunk}" ref found locally or on origin` };
+
+  // unpromoted — dual-trunk only. A single-trunk tag-gated repo (deploy: tag, trunk: main) has
+  // nothing that "isn't on main yet" by construction: promotion isn't a step it has.
+  let unpromoted = null;
+  if (dualTrunk) {
+    const cc = ccSummary(repoAbs, `${mainRef}..${trunkRef}`);
+    unpromoted = { commits: cc.total, fixFlag: cc.counts.fix > 0 || cc.breaking, subjects: cc.subjects };
+  }
+
+  // unreleased — always against main. See the measurement-gotcha note above the section header.
+  const describe = git.git(['describe', '--tags', '--abbrev=0', mainRef], repoAbs);
+  let unreleased;
+  let suggestion = { bump: null, why: 'no tags yet — nothing to suggest against' };
+  if (!describe.ok || !describe.stdout) {
+    unreleased = { tag: null, commits: null, days: null, fixFlag: false, subjects: [] };
+  } else {
+    const tag = describe.stdout;
+    const cc = ccSummary(repoAbs, `${tag}..${mainRef}`);
+    const created = git.git(['for-each-ref', '--format=%(creatordate:iso-strict)', `refs/tags/${tag}`], repoAbs);
+    const days = created.ok && created.stdout ? Math.floor((Date.now() - new Date(created.stdout).getTime()) / 86400000) : null;
+    unreleased = { tag, commits: cc.total, days, fixFlag: cc.counts.fix > 0 || cc.breaking, subjects: cc.subjects };
+    suggestion = semverSuggestion(cc);
+  }
+
+  const flag = !!(unreleased.fixFlag || (unpromoted && unpromoted.fixFlag));
+  return { repo: label, path: repoAbs, applicable: true, trunk, dualTrunk, stale, unpromoted, unreleased, flag, semverSuggestion: suggestion };
+}
+
+const HELP_RELEASE_STATUS = `colab release-status [<repo> ...] [--repo <path>] [--json]
+
+Read-only. Measures merged-but-UNRELEASED lag on tag-gated repos (deploy: tag) — the rung
+CONVENTIONS.md §6 asks a human to notice by eye ("if you believe a release is overdue, say so") and
+nothing computed until now. NEVER promotes, never tags, never suggests running a release ritual
+unattended — the release itself stays a human's on every repo, exactly as \`promote\`/\`ship\` above.
+
+  <repo> ...     limit a fleet sweep the same way \`colab update\` does — an absolute path, or a
+                 trailing path segment ("my-repo", "company/project"). Ignored together with --repo.
+  --repo <path>  ONE repo only, instead of a fleet sweep.
+  --json         machine-readable
+
+FLEET MODE (default, no --repo): sweeps every repo in <COLAB_HOME>/repos.txt — the same registry
+\`colab update\` sweeps. A repo whose project.yml isn't \`deploy: tag\` is reported n-a with a reason,
+not silently skipped; an owner/name slug (audit-only, no working tree here) is n-a too.
+
+Per tag-gated repo:
+  unpromoted        dual-trunk repos only (trunk != main): commits on trunk not yet on main.
+  unreleased        commits on main past the last v* tag, plus days since that tag was created.
+  flag              true when a fix:-typed (or breaking) commit sits in EITHER gap — the exact class
+                     of commit CONVENTIONS §6 already singles out ("an unreleased production fix ...
+                     has bitten before").
+  semverSuggestion  ADVISORY ONLY, from Conventional-Commit types since the last tag: a breaking
+                     change (! or a BREAKING CHANGE: footer) -> major, else feat -> minor, else
+                     fix -> patch, else no suggestion. The version number is always the human's.
+
+Each row best-effort fetches \`origin/main\` (and \`origin/<trunk>\` on a dual-trunk repo) first; a
+fetch failure does not abort the row — it degrades to whatever is on disk and says so (stale: true)
+rather than reporting nothing.
+
+Exit code: 0 when nothing is flagged, 1 when at least one tag-gated repo is (an unpromoted or
+unreleased fix/breaking commit) — same posture as \`colab update\`'s "behind" tally.
+`;
+
+function cmdReleaseStatus(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--repo': 'repo' },
+    flags: { '--json': 'json', '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help) return print(HELP_RELEASE_STATUS);
+
+  let rows;
+  if (opts.repo) {
+    rows = [inspectReleaseStatus(resolveRepo(opts))];
+  } else {
+    const registryPath = reposTxtPath();
+    const entries = reposTxtEntries(readReposTxt());
+    if (!entries.length) throw new UserError(`No repos registered (${registryPath}) — add one with: colab register [<path>]`);
+    const filters = opts._;
+    const selected = filters.length
+      ? entries.filter((e) => filters.some((f) => {
+        if (e === f || e === path.resolve(f)) return true;
+        const norm = e.replace(/\/+$/, '');
+        return norm.endsWith(`/${f.replace(/^\/+|\/+$/g, '')}`);
+      }))
+      : entries;
+    if (filters.length && !selected.length) throw new UserError(`No registered repo matches: ${filters.join(', ')} — see \`colab register --list\``);
+    rows = selected.map((e) => (isSlug(e)
+      ? { repo: e, path: e, applicable: false, reason: 'owner/name slug — audit-only, no working tree here' }
+      : inspectReleaseStatus(e)));
+  }
+
+  const flagged = rows.filter((r) => r.applicable && r.flag);
+
+  if (opts.json) {
+    print(JSON.stringify({
+      generated: nowISO(), rows,
+      summary: { repos: rows.length, applicable: rows.filter((r) => r.applicable).length, flagged: flagged.length },
+    }, null, 2));
+    return flagged.length ? 1 : 0;
+  }
+
+  const printable = rows.filter((r) => r.applicable);
+  const skipped = rows.filter((r) => !r.applicable);
+  if (!printable.length) {
+    print('No tag-gated repo to report on.');
+  } else {
+    const tableRows = printable.map((r) => {
+      const up = r.unpromoted ? `${r.unpromoted.commits}${r.unpromoted.fixFlag ? ' ⚠' : ''}` : '—';
+      const un = r.unreleased.tag ? `${r.unreleased.commits}${r.unreleased.fixFlag ? ' ⚠' : ''} (${r.unreleased.days}d since ${r.unreleased.tag})` : 'no tags yet';
+      return [r.repo, up, un, r.semverSuggestion.bump || '—', r.flag ? '⚠ FLAGGED' : ''];
+    });
+    print(table(tableRows, ['REPO', 'UNPROMOTED', 'UNRELEASED', 'SUGGEST', '']));
+  }
+  if (skipped.length) {
+    print('');
+    print(`${skipped.length} repo(s) not assessed:`);
+    for (const s of skipped) print(`  ${s.repo}  —  ${s.reason}`);
+  }
+  const staleRepos = printable.filter((r) => r.stale);
+  if (staleRepos.length) {
+    print('');
+    warn(`${staleRepos.length} repo(s) could not fetch origin — numbers reflect what is on disk, may be stale: ${staleRepos.map((r) => r.repo).join(', ')}`);
+  }
+  print('');
+  if (flagged.length) {
+    print(`${flagged.length} repo(s) FLAGGED — a fix or breaking commit is sitting unreleased/unpromoted:`);
+    for (const r of flagged) print(`  ${r.repo}`);
+    print('Releasing is a human decision on every repo (CONVENTIONS §6) — this only measures the gap.');
+  } else {
+    print('Nothing flagged.');
+  }
+  return flagged.length ? 1 : 0;
+}
+
+// ---------------------------------------------------------------------------
 // register — keep the TWO machine-local registries in sync in one act
 //
 // The fleet lives in two files that used to be hand-edited separately (the two-places-drift
@@ -3013,7 +3233,7 @@ function buildSquashMessage(mainRoot, trunk, branch, closes, refs = [], conflict
   return squash.composeSquashMessage(branchCommits(mainRoot, trunk, branch), closes, refs, conflicts);
 }
 
-const HELP_SHIP = `colab ship [--repo <path>] [--worktree <name> | --branch <br>] [--message "<msg>"] [--refs <N[,M]>] [--keep-worktree] [--delete-branch] [--dry]
+const HELP_SHIP = `colab ship [--repo <path>] [--worktree <name> | --branch <br>] [--message "<msg>"] [--refs <N[,M]>] [--keep-worktree] [--delete-branch] [--dry] [--json]
 
 The ONE sanctioned door for code-wrap Phase B: squash-merge a session branch into the BASE IT WAS
 CUT FROM — trunk for an ordinary session, or the declared integration line recorded on its worktree
@@ -3072,6 +3292,27 @@ Options:
   --keep-worktree     do not remove the worktree after shipping
   --delete-branch     delete the branch (local + remote) after shipping — off by default
   --dry               print the plan + precondition table and change NOTHING
+  --json              with --dry ONLY: emit ONE machine-readable JSON object instead of the prose
+                      table, for an unattended caller (#70's scheduled drivers) that must act on the
+                      answer mechanically. Exit-code semantics and the plain --dry prose output are
+                      UNCHANGED by this flag — it is additive, never a second way to read the same run.
+
+                        { "ok": bool, "dry": true, "repo": "...", "branch": "...", "target": "...",
+                          "worktree": "..." | null, "issues": [N, ...],
+                          "checks": [ { "name": "...", "ok": bool, "class": "..." | null, "detail": "..." } ] }
+
+                      \`checks\` has one entry per precondition — branch resolves, not an integration
+                      line, autonomy granted, target CI alive+green, no new migrations, trunk
+                      checkout ready, no hand-merge conflict (a real preview merge, done in a
+                      throwaway detached worktree — nothing on disk here is touched by it). \`class\`
+                      is set ONLY on a failing check, from a CLOSED, STABLE-WIRE-FORMAT vocabulary:
+                        self-clearing   CI still running, a transient gh/preview read failure — an
+                                        unattended caller may retry later with NO human action.
+                        human-gated     autonomy absent, an unresolvable branch record, a declared
+                                        integration line, a real CI failure, new migrations, a dirty
+                                        trunk checkout, a genuine merge conflict — retrying changes
+                                        nothing until a person acts.
+                      Never add a third value without updating every consumer of this field.
 `;
 
 /**
@@ -3151,12 +3392,182 @@ function resolveShipSession(st, repoAbs, opts) {
   return { name, branch, wtPath, issues, session, sessionName };
 }
 
+// The closed refusal-class vocabulary for `ship --dry --json` (#77) — a STABLE WIRE FORMAT, same
+// posture as the CLAIM_MARK/RELEASE_MARK comment markers above. An unattended caller (a scheduled
+// driver, #70) needs to tell "retry later, unattended" apart from "park it, a human must act" — the
+// two options it has today, parsing stderr prose or re-deriving the checks itself, both drift.
+const SELF_CLEARING = 'self-clearing'; // CI still running, a transient gh/preview read failure
+const HUMAN_GATED = 'human-gated';     // autonomy absent, a real failure, a decision only a person makes
+
+/**
+ * CI precondition for `ship --dry --json`, classified into the closed vocabulary above. Mirrors the
+ * prose path's rule exactly (same fallback: an integration line with NO runs at all borrows trunk's
+ * verdict, advisory) so the two never disagree about whether CI is green — only about how the
+ * reason for "no" is labelled.
+ */
+function shipCiCheck(repoAbs, gh, target, trunk) {
+  const name = `${target === trunk ? 'trunk' : 'line'} CI green`;
+  if (!gh) return { name, ok: false, class: SELF_CLEARING, detail: 'gh not usable (no auth / no origin) — cannot confirm CI' };
+  let run = git.ghRunLatest(repoAbs, target);
+  let via = target;
+  if (run && run.status === 'none' && target !== trunk) {
+    run = git.ghRunLatest(repoAbs, trunk);
+    via = `${trunk} (line "${target}" has no runs — ungated, advisory)`;
+  }
+  if (!run) return { name, ok: false, class: SELF_CLEARING, detail: 'gh run list failed' };
+  if (run.status === 'completed') {
+    if (run.conclusion === 'success') return { name, ok: true, class: null, detail: `latest run on ${via}: success` };
+    return { name, ok: false, class: HUMAN_GATED, detail: `latest run on ${via}: status=completed conclusion=${run.conclusion || 'none'}` };
+  }
+  if (run.status === 'none') return { name, ok: false, class: HUMAN_GATED, detail: `latest run on ${via}: no runs at all — CI is not wired for this ref` };
+  return { name, ok: false, class: SELF_CLEARING, detail: `latest run on ${via}: status=${run.status} — still running, retry later` };
+}
+
+/**
+ * Previews whether B0's merge (target INTO the branch) would conflict — WITHOUT touching the real
+ * worktree, the branch, or the network beyond a fetch — so `ship --dry --json`'s "no hand-merge
+ * conflict" check is a real measurement, not a guess. Today's plain `--dry` never attempts this at
+ * all: a hand-merge conflict is discovered only by running a real `colab ship` and hitting B0 (#77).
+ *
+ * Mirrors B0's own generated-file exemption exactly (isGeneratedPath + .colab/hooks/pre-ship), so
+ * this verdict and the outcome a real ship would reach never disagree.
+ *
+ * Runs in a throwaway DETACHED worktree so nothing here can move the branch or the main checkout —
+ * the same invariant every other worktree use in this file honours. `unknown: true` means the
+ * preview itself could not be attempted (disk, a git too old, a locked repo); callers must NOT read
+ * unknown as a clean merge.
+ */
+function shipMergeConflictCheck(repoAbs, target, branch, generated, hasPreShip) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'colab-ship-preview-'));
+  const add = git.git(['worktree', 'add', '--detach', tmp, branch], repoAbs);
+  if (!add.ok) {
+    try { fs.rmdirSync(tmp); } catch (_) { /* best-effort */ }
+    return { ok: false, unknown: true, detail: `could not preview the merge: ${add.stderr.split('\n')[0] || 'worktree add failed'}` };
+  }
+  try {
+    git.git(['fetch', 'origin', target], tmp);
+    let mergeRef = `origin/${target}`;
+    if (!git.git(['rev-parse', '--verify', '--quiet', mergeRef], tmp).ok) mergeRef = target;
+    const merge = git.git(['merge', '--no-commit', '--no-edit', mergeRef], tmp);
+    const uf = git.git(['diff', '--name-only', '--diff-filter=U'], tmp).stdout.split('\n').filter(Boolean);
+    git.git(['merge', '--abort'], tmp); // harmless no-op when the merge already finished clean
+    if (uf.length === 0) {
+      if (merge.ok) return { ok: true, unknown: false, detail: `clean merge into ${target}` };
+      return { ok: false, unknown: true, detail: `merge could not be previewed: ${(merge.stderr || 'unknown reason').split('\n')[0]}` };
+    }
+    const nonGen = uf.filter((f) => !isGeneratedPath(f, generated));
+    if (nonGen.length) return { ok: false, unknown: false, detail: `${nonGen.length} conflict(s) in non-generated file(s): ${nonGen.join(', ')}` };
+    if (!hasPreShip) return { ok: false, unknown: false, detail: `generated-file conflict(s) with no .colab/hooks/pre-ship to resolve them: ${uf.join(', ')}` };
+    return { ok: true, unknown: false, detail: `only generated-file conflict(s), auto-resolved at B0 by .colab/hooks/pre-ship: ${uf.join(', ')}` };
+  } finally {
+    git.git(['worktree', 'remove', '--force', tmp], repoAbs);
+  }
+}
+
+/**
+ * `ship --dry --json` — the whole feature, isolated in its own function on purpose (#77). The prose
+ * `--dry` path just below stays byte-identical to before this landed; this does its own resolution
+ * rather than threading a json branch through it, so the two can never accidentally cross-affect
+ * each other's output.
+ *
+ * Unlike the prose path's three hard early-refusals (branch doesn't resolve / is an integration
+ * line / autonomy absent), autonomy failing here does NOT stop the remaining checks from being
+ * computed — an unattended caller wants the WHOLE picture in one read, not one reason at a time.
+ * Branch-doesn't-resolve and is-an-integration-line still short-circuit: everything downstream
+ * (target, CI, migrations) is meaningless without a real branch to ship.
+ */
+function cmdShipDryJson(opts) {
+  const repoAbs = resolveRepo(opts);
+  if (!git.repoRoot(repoAbs)) throw new UserError(`${repoAbs} is not a git repo`);
+  const doc = projectDoc(repoAbs);
+  const st = state.loadState();
+  const sess = resolveShipSession(st, repoAbs, opts);
+  const trunk = resolveTrunk(repoAbs, doc);
+  if (!trunk) throw new UserError('Could not determine trunk branch (set project.yml trunk:)');
+  if (sess.branch === trunk) throw new UserError(`Refusing: --branch is the trunk itself (${trunk}) — nothing to ship`);
+
+  const checks = [];
+  let target = null;
+  const emit = (ok) => {
+    print(JSON.stringify({
+      ok, dry: true, repo: shortRepo(repoAbs), branch: sess.branch, worktree: sess.name || null,
+      target, issues: sess.issues, checks,
+    }, null, 2));
+    return ok ? 0 : 1;
+  };
+
+  // ---- the recorded branch must RESOLVE, before anything else is computed (mirrors the prose gate) ----
+  if (!git.branchExists(repoAbs, sess.branch)) {
+    const shown = sess.branch === null || sess.branch === undefined ? 'null (no branch)' : `"${sess.branch}"`;
+    checks.push({ name: 'branch resolves', ok: false, class: HUMAN_GATED,
+      detail: `the branch recorded for this session is ${shown} — it resolves to no ref` });
+    return emit(false);
+  }
+  checks.push({ name: 'branch resolves', ok: true, class: null, detail: `"${sess.branch}"` });
+
+  // ---- the branch itself must not be a declared integration line ----
+  const integration = resolveIntegration(repoAbs, doc, trunk);
+  if (integration.includes(sess.branch)) {
+    checks.push({ name: 'not an integration line', ok: false, class: HUMAN_GATED,
+      detail: `"${sess.branch}" is a declared integration line (project.yml integration:) — merging it into ${trunk} is a human act` });
+    return emit(false);
+  }
+  checks.push({ name: 'not an integration line', ok: true, class: null, detail: 'ordinary session branch' });
+
+  // ---- the recorded base must still be declared ----
+  target = resolveBase(st, repoAbs, sess.name, trunk);
+  if (target !== trunk && !integration.includes(target)) {
+    checks.push({ name: 'declared base', ok: false, class: HUMAN_GATED,
+      detail: `recorded base "${target}" is no longer a declared base (allowed: ${allowedBases(repoAbs, doc, trunk).join(', ')})` });
+    return emit(false);
+  }
+  checks.push({ name: 'declared base', ok: true, class: null, detail: target });
+
+  // ---- (a) AUTONOMY GATE — does NOT short-circuit here; an unattended caller wants the whole table ----
+  const autonomy = doc.autonomy ? String(doc.autonomy) : 'manual';
+  const autonomyOk = autonomy === 'auto-trunk';
+  checks.push({ name: 'autonomy granted', ok: autonomyOk, class: autonomyOk ? null : HUMAN_GATED,
+    detail: autonomyOk ? 'auto-trunk' : `project.yml autonomy: ${doc.autonomy ? autonomy : 'absent'} — a human must trigger Phase B` });
+
+  // ---- (b) the rest of the preconditions, same rules as the prose path ----
+  const gh = isGhUsable(repoAbs);
+  checks.push(shipCiCheck(repoAbs, gh, target, trunk));
+
+  const migrations = newMigrations(repoAbs, target, sess.branch);
+  const migOk = migrations.length === 0;
+  checks.push({ name: 'no new migrations', ok: migOk, class: migOk ? null : HUMAN_GATED,
+    detail: migOk ? `none vs ${target}` : `${migrations.length} present — human must run Phase B: ${migrations.join(', ')}` });
+
+  const headBranch = git.git(['rev-parse', '--abbrev-ref', 'HEAD'], repoAbs).stdout;
+  const onTrunk = headBranch === trunk;
+  const dirty = git.dirtyTracked(repoAbs);
+  const treeOk = onTrunk && !dirty;
+  checks.push({ name: 'trunk checkout ready', ok: treeOk, class: treeOk ? null : HUMAN_GATED,
+    detail: !onTrunk ? `main checkout is on "${headBranch}", not "${trunk}"` : (dirty ? 'tracked changes uncommitted in trunk checkout' : `on ${trunk}, clean`) });
+
+  // ---- (c) no hand-merge conflict — NEW: the plain --dry prose path never checks this today ----
+  const generated = [...DEFAULT_GENERATED, ...(Array.isArray(doc.generated) ? doc.generated.map(String) : [])];
+  const hasPreShip = fs.existsSync(path.join(repoAbs, '.colab', 'hooks', 'pre-ship'));
+  const mc = shipMergeConflictCheck(repoAbs, target, sess.branch, generated, hasPreShip);
+  checks.push({ name: 'no hand-merge conflict', ok: mc.ok, class: mc.ok ? null : (mc.unknown ? SELF_CLEARING : HUMAN_GATED), detail: mc.detail });
+
+  return emit(checks.every((c) => c.ok));
+}
+
 function cmdShip(argv) {
   const opts = parseArgs(argv, {
     values: { '--repo': 'repo', '--worktree': 'worktree', '--branch': 'branch', '--message': 'message', '--refs': 'refs' },
-    flags: { '--keep-worktree': 'keepWorktree', '--delete-branch': 'deleteBranch', '--dry': 'dry', '-h': 'help', '--help': 'help' },
+    flags: { '--keep-worktree': 'keepWorktree', '--delete-branch': 'deleteBranch', '--dry': 'dry', '--json': 'json', '-h': 'help', '--help': 'help' },
   });
   if (opts.help) return print(HELP_SHIP);
+  // --json is scoped to --dry only (#77): a machine-readable READ of the preconditions. Reporting
+  // the PERFORMED result of a real ship as JSON is a different, not-yet-built feature (see HELP_SHIP)
+  // — refuse the combination rather than silently ignore --json on a real ship.
+  if (opts.json && !opts.dry) throw new UserError('--json currently only applies together with --dry — see `colab ship --help`');
+  // A fully separate code path, deliberately: the prose/table path below is unchanged by this
+  // feature (CONVENTIONS/#77 requires it stay byte-identical), so --dry --json does its own
+  // resolution rather than threading a json branch through the existing one.
+  if (opts.dry && opts.json) return cmdShipDryJson(opts);
   const repoAbs = resolveRepo(opts);
   if (!git.repoRoot(repoAbs)) throw new UserError(`${repoAbs} is not a git repo`);
   const doc = projectDoc(repoAbs);
@@ -3904,14 +4315,18 @@ Commands:
   worktree rm <name> [--force] [--repo P]
   worktrees [--json]
 
-  ship [--worktree N | --branch B] [--message M] [--refs N,M] [--keep-worktree] [--dry]   code-wrap
-                                        Phase B → the branch's recorded base (trunk, or a declared line)
+  ship [--worktree N | --branch B] [--message M] [--refs N,M] [--keep-worktree] [--dry] [--json]
+                                        code-wrap Phase B → the branch's recorded base (trunk, or a
+                                        declared line). --json (--dry only): machine-readable
+                                        preconditions with a closed refusal-class vocabulary (#77)
   landed [--worktree N | --branch B | --all] [--base B] [--json]   has this work already landed?
                                         (the shared rule behind code-sweep's buckets — correct
                                         across squash merges, where "commits ahead" is not)
   promote [--repo P] [--message M] [--dry]   trunk → main (--no-ff); gated by deploy + promotion; never tags
   doctor [--prune] [--ttl H] [--json]   heal dead worktrees / orphan + stale claims / orphan ports
   release-notes [<range>] [--repo P] [--out F] [--headline "..."]   grouped Markdown release summary
+  release-status [<repo>...] [--repo P] [--json]   merged-but-UNRELEASED lag on tag-gated repos —
+                                        read-only, never tags (#81)
   template [<name>] [--dest F] [--repo P] [--force]   copy a handbook workflow template, stamped
   update [<repo>...] [--apply] [--json] [--quiet]   sweep the fleet for stamped copies that fell
                                         behind a changed template; --apply refreshes the pristine
@@ -3949,6 +4364,7 @@ function main(argv) {
     case 'promote': return cmdPromote(rest);
     case 'doctor': return cmdDoctor(rest);
     case 'release-notes': return cmdReleaseNotes(rest);
+    case 'release-status': return cmdReleaseStatus(rest);
     case 'template': return cmdTemplate(rest);
     case 'update': return cmdUpdate(rest);
     case 'register': return cmdRegister(rest);

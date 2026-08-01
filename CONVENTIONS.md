@@ -961,6 +961,16 @@ is still owed. Manual fallback, same output:
 colab release-notes v1.1.0..v1.2.0 | gh release create v1.2.0 --notes-file - --generate-notes
 ```
 
+**Merged is not released — measure the gap, don't wait to notice it by eye.** An agent's report is
+asked to flag an overdue release (`CLAUDE.md`, *Releases* — "that situation has bitten us in
+payroll"), but nothing computed whether one was until `colab release-status [--repo P] [--json]`
+(#81): read-only, per tag-gated repo, it reports commits on `dev` not yet promoted, commits on
+`main` past the last `v*` tag (plus days since that tag), and flags whichever gap holds a
+`fix:`-typed or breaking commit — exactly the class that has bitten before. It also suggests the
+next tag's SemVer bump from the Conventional-Commit types since the last tag, advisory only: the
+version number stays the human's. Tags live on `main`, not on the trunk — `git describe` run from
+a `dev` checkout answers a stale question, so the lag is always measured against `main`.
+
 Do not tag from `dev`. Do not tag a commit that has not passed the full suite on `main`.
 
 ---
