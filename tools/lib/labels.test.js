@@ -173,14 +173,17 @@ test('groupLabelNames tolerates empty / null / undefined the same way missingCon
 // unattended adoption/sync/audit provisions (opt-in, like `tracking`), and that its write helper
 // never shares a name or a code path with `readinessLabelArgs`.
 
-test('graph-empty is not one of the four provisioned convention labels', () => {
+test('graph-empty is not one of the five provisioned convention labels', () => {
   assert.equal(MECHANICAL_READINESS_LABEL, 'graph-empty');
   assert.ok(!conventionLabelNames().includes(MECHANICAL_READINESS_LABEL),
     'a mechanical-only check must stay opt-in — forcing it defeats the point of a cheaper lane');
 });
 
 test('a repo missing graph-empty is never reported by missingConventionLabels — it is not in the set', () => {
-  assert.deepStrictEqual(missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic']), []);
+  assert.deepStrictEqual(
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling']),
+    [],
+  );
 });
 
 test('mechanicalReadinessLabelArgs maps set⇒add and clear⇒remove against its OWN marker name', () => {
