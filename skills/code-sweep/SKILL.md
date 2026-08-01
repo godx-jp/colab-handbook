@@ -222,7 +222,7 @@ claimed — and the label remains the veto before any teardown.
 | Bucket | What it looks like | Action |
 |---|---|---|
 | **wrap** | `cargo` (or `unknown`), **and** at least one claimed issue | full [`code-wrap`](../code-wrap/SKILL.md) |
-| **teardown-only** | `landed` — content already on its base, worktree lingering | remove worktree, release claims, close issues with evidence |
+| **teardown-only** | `landed` — content already on its base, worktree lingering | remove worktree, release claims; close via `colab ship` when it has zero commits (evidence-close, #90), else close by hand with evidence |
 | **claim-only** | no worktree; `in-progress` on work already shipped | release the claim, close the issue with evidence |
 | **unrecorded** | on disk, `colab worktrees`'s `unrecorded` list — no claim, no ports | **report only** — see below, never `code-wrap` |
 | **blocked** | uncommitted tracked work, or genuinely unfinished | **report — never force** |
@@ -230,6 +230,18 @@ claimed — and the label remains the veto before any teardown.
 
 `teardown-only` is the common case and the most skipped. It is also the cheapest, so
 do these first — they shrink the list before you start the expensive ones.
+
+**That row used to promise a close it could not perform (#90).** It said "close issues
+with evidence", and nothing in either skill implemented a close: the only close
+mechanism in the whole system was `Closes #N` inside a squash commit, and a landed
+branch is not being merged again. So the claim was released, the worktree removed, and
+the issue stayed open — the documented step existed in prose only. For the specific
+shape where the branch has **zero commits of its own**, `colab ship` now performs it
+(evidence-close: it posts evidence, closes each issue, and tears down, gated on the
+issue already carrying a comment colab did not write). For a landed branch that DID
+have commits, the close is still yours to do by hand — that content reached the base
+through some earlier merge whose `Closes #N` either fired or did not, so check before
+you close.
 
 ### `unrecorded` — a worktree colab never held a claim for
 

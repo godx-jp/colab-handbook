@@ -165,3 +165,78 @@ test('--dry --json: a branch with no commits of its own to ship is a clean, all-
   assert.match(notOk[0].name, /CI green/);
   assert.strictEqual(notOk[0].class, 'self-clearing');
 });
+
+// --- #87 / #90: the two preconditions the machine-facing path was missing -----
+
+/**
+ * Writes claims straight into the test's private state.json. `colab claim` would need gh, which a
+ * bare on-disk origin does not provide — and the property under test is what ship DOES with a
+ * claim, not how the claim got written. Shape mirrors tools/colab's own writer exactly.
+ */
+function seedClaims(fx, repoAbs, entries) {
+  const file = path.join(fx.home, 'state.json');
+  const st = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { version: 1, worktrees: {}, claims: {}, ports: {} };
+  st.claims = st.claims || {};
+  for (const e of entries) {
+    st.claims[`${repoAbs}#${e.issue}`] = {
+      issue: `#${e.issue}`, repo: repoAbs, worktree: e.worktree || null, branch: e.branch,
+      host: 'test', created: new Date().toISOString(),
+    };
+  }
+  fs.mkdirSync(fx.home, { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(st, null, 2));
+}
+
+test('--dry --json: a claim git does not corroborate fails the table (#87, the co-tenant case)', () => {
+  const fx = fixture(PROJECT_YML_AUTO_TRUNK);
+  fx.g(fx.work, 'checkout', '-q', '-b', 'fix/thing-71-76');
+  fs.writeFileSync(path.join(fx.work, 'g.txt'), 'work\n');
+  fx.g(fx.work, 'add', '-A');
+  fx.g(fx.work, 'commit', '-q', '-m', 'fix: the thing\n\nCloses #71');
+  fx.g(fx.work, 'checkout', '-q', 'main');
+  // #74 is claimed on this branch but named NOWHERE in git — the exact shape #87 measured.
+  seedClaims(fx, fs.realpathSync(fx.work), [
+    { issue: 71, branch: 'fix/thing-71-76' },
+    { issue: 74, branch: 'fix/thing-71-76' },
+    { issue: 76, branch: 'fix/thing-71-76' },
+  ]);
+
+  const r = colab(fx, ['ship', '--branch', 'fix/thing-71-76', '--repo', fx.work, '--dry', '--json']);
+  const body = JSON.parse(r.out);
+  const check = body.checks.find((c) => c.name === 'claims corroborated by git');
+  assert.ok(check, 'the corroboration check is missing from checks[]');
+  assert.strictEqual(check.ok, false);
+  assert.strictEqual(check.class, 'human-gated');
+  assert.match(check.detail, /#74/);
+  assert.doesNotMatch(check.detail, /#71|#76/); // both ARE corroborated — only 74 is the finding
+  assert.strictEqual(body.ok, false);
+});
+
+test('--dry --json: a zero-commit landed branch reports mode evidence-close, not a false ok (#90)', () => {
+  const fx = fixture(PROJECT_YML_AUTO_TRUNK);
+  // Branched off main and never committed: the design-consult / "no change needed" shape.
+  fx.g(fx.work, 'branch', 'docs/decision-90');
+
+  const r = colab(fx, ['ship', '--branch', 'docs/decision-90', '--repo', fx.work, '--dry', '--json']);
+  const body = JSON.parse(r.out);
+  assert.strictEqual(body.mode, 'evidence-close');
+  const check = body.checks.find((c) => c.name === 'branch has commits');
+  assert.ok(check, 'the branch-has-commits precondition is missing from checks[]');
+  assert.strictEqual(check.ok, true);
+  assert.match(check.detail, /evidence-close/);
+});
+
+test('--dry --json: an ordinary branch with commits stays mode squash', () => {
+  const fx = fixture(PROJECT_YML_AUTO_TRUNK);
+  fx.g(fx.work, 'checkout', '-q', '-b', 'feat/ordinary-9');
+  fs.writeFileSync(path.join(fx.work, 'h.txt'), 'x\n');
+  fx.g(fx.work, 'add', '-A');
+  fx.g(fx.work, 'commit', '-q', '-m', 'feat: ordinary');
+  fx.g(fx.work, 'checkout', '-q', 'main');
+
+  const body = JSON.parse(colab(fx, ['ship', '--branch', 'feat/ordinary-9', '--repo', fx.work, '--dry', '--json']).out);
+  assert.strictEqual(body.mode, 'squash');
+  const check = body.checks.find((c) => c.name === 'branch has commits');
+  assert.strictEqual(check.ok, true);
+  assert.match(check.detail, /1 vs main/);
+});
