@@ -95,6 +95,38 @@ cat .github/project.yml        # tier, trunk, production, deploy, stack, ports
   now, at step 4, because the base is what the session ships back into. Never cut
   from a branch that is not trunk and not declared there.
 
+### `ceremony: light`? Check the solo-flow shortcut before steps 2–4
+
+A `ceremony: light` repo (CONVENTIONS.md, *Solo flow*) may let this whole session skip
+issue, claim, and worktree — but only through the entry gate, never on your own say-so:
+
+```sh
+colab solo --session "$SESSION_URL" --session-name "<label>"
+```
+
+- **`doc.ceremony` is not `light`** → `colab solo` refuses outright before checking
+  anything else. Continue at step 2 below as normal; solo flow does not apply here.
+- **Refused for a held reason** (a worktree, a claim, an unpushed branch elsewhere, a
+  dirty tree, someone else's solo lock) → the repo qualifies in principle but ground
+  isn't clean *right now*. Report what was held and fall through to steps 2–4, full
+  ceremony — do not retry solo automatically; the holder is somebody's unfinished work.
+- **Opens** → this session may commit **straight to `<trunk>`** with plain Conventional
+  Commits, no pre-filed issue and no worktree. Skip steps 2–4 entirely — there is
+  nothing to load (no Issue is required to exist), nothing to claim, nothing to branch.
+  File an Issue only if a decision needs to survive this sitting (same `gh issue create`
+  as step 2, used on demand rather than as a gate). Go straight to committing the actual
+  work, then close with **code-wrap's solo exit path** (`colab solo --done`) instead of
+  its Phase A/B — there is no worktree to tear down and no claim to release, because
+  solo flow made neither.
+- Report the same as step 5's shape, minus what solo flow never created: no Issue URL
+  unless you filed one, no branch/worktree line, and say plainly that this was a solo
+  session so a reader does not go looking for a claim that was never made.
+
+Never take this path on a hunch that "surely nobody else is touching this repo right
+now" — that is exactly the honor-system judgement the entry gate exists to replace with
+a mechanical answer. If `colab` is not installed, solo flow has no gate to run through,
+so it is not available here: fall through to the full flow below.
+
 ## 2. Load context from the feature's Issue — don't re-read the code
 
 ```sh

@@ -30,6 +30,9 @@
  *   },
  *   ports: {                             // flat registry — one entry per allocated port
  *     "5230": { port:5230, owner:{type:"worktree"|"claim"|"manual", ref:"<name|key|label>"}, host, created }
+ *   },
+ *   solo: {                              // `ceremony: light` only — one lock per repo per machine
+ *     "<repoAbs>": { host, session, sessionName, since }
  *   }
  * }
  *
@@ -47,6 +50,11 @@
  *
  * `session`, `sessionName`, `status` and `base` are backward-compatible: entries written before
  * they existed simply lack them, and readers must tolerate that — no migration is performed.
+ *
+ * `solo` is keyed by repo, not by issue or worktree: solo flow (CONVENTIONS.md, Solo flow) makes
+ * no claim and creates no worktree, so it needs its own lock or two solo sessions on one machine
+ * could commit to the same trunk checkout at once with nothing recording either. `colab solo`
+ * is the only writer; `--done` is the only remover.
  */
 
 const fs = require('fs');
@@ -91,7 +99,7 @@ function ensureDir() {
 }
 
 function emptyState() {
-  return { version: STATE_VERSION, worktrees: {}, claims: {}, ports: {} };
+  return { version: STATE_VERSION, worktrees: {}, claims: {}, ports: {}, solo: {} };
 }
 
 function loadConfig() {
@@ -126,6 +134,7 @@ function migrate(st) {
   st.worktrees = st.worktrees || {};
   st.claims = st.claims || {};
   st.ports = st.ports || {};
+  st.solo = st.solo || {};
   // Future migrations key off st.version here.
   return st;
 }

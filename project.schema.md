@@ -361,6 +361,13 @@ session fleet, port space, and claim state as the most serious repo.
 Known drift risk: a repo marked `light` "for now" that grows real users. Rule 1 is the
 backstop — the moment `production:` gains a URL the audit flags the pair.
 
+**`ceremony: light` also enables solo flow** (`CONVENTIONS.md`, *Solo flow*) — trunk-direct
+commits with no pre-filed issue, claim or worktree, entry-gated by `colab solo`. No new
+field: solo flow is a session-time *option* a light repo permits, not a repo-time state a
+descriptor declares, so there is nothing here for a repo to opt into beyond `light` itself.
+`colab solo` refuses outright on any repo that is not `ceremony: light` — see that section
+for the entry gate and the five rules it never relaxes.
+
 ### `promotion` — optional
 
 ```yaml

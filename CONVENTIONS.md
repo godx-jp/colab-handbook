@@ -225,6 +225,66 @@ audit trail — the same class of finding as `tier: A` + `deploy: push-main`), a
 not combine with `autonomy: auto-trunk` (an unattended merge with no evidence trail is a
 closure nobody can audit).
 
+### Solo flow — trunk-direct, issue-on-demand, entry-gated (`ceremony: light` only)
+
+`ceremony: light` (above) relaxed the record-keeping *end* of a session. The *start* —
+pre-filed issue, claim, branch, worktree — was left at full weight even there, and on at
+least one personal Tier B repo the reality had already diverged from the ritual: every
+commit landed straight on trunk with clean Conventional prefixes, issues were used as
+*decision memory* rather than pre-work permission slips, and the only branch in the repo
+was a stale leftover whose issue had long since closed — the one piece of ceremony
+attempted was the one piece that rotted.
+
+**Why this is safe, and why it is not safe everywhere.** The start-side invariants
+(claim before you touch it, branch off trunk, worktree so the main checkout stays at
+rest) exist to protect *other sessions* — they matter exactly when session multiplicity
+is greater than one. A repo one person codes directly, in one conversation-driven
+session, has no other session to protect against. Solo flow makes that condition
+explicit and machine-checked, rather than a discipline someone merely feels is true:
+
+1. **Entry gate, not honor system** — `colab solo` checks, on every invocation, never
+   from a cached answer: no live solo session already open, no worktree, no claim, the
+   checkout on trunk with no unpushed branch anywhere in the repo, and a clean tree
+   (tracked and untracked). Anything held refuses outright — full ceremony, no
+   exception, no partial credit for "mostly clean". *(Cross-machine note: on a
+   file-synced checkout, a dirty file or an unpushed commit syncs too, so the clean-tree
+   check on one machine can see a session mid-flight on another. The residual
+   sync-window race is accepted deliberately — solo flow means a human is personally
+   driving, watching the one checkout, not a fleet of unattended sessions.)*
+2. **Trunk-direct commits are allowed.** Small Conventional Commits go straight to
+   trunk; CI validates after the push. On a Tier B repo with no production and no
+   consumers, a red push costs only the repo itself — nobody downstream is exposed
+   between the push and the fix. Branching remains available whenever a squash unit is
+   actually wanted; solo flow does not forbid it, it just stops requiring it.
+3. **An Issue is filed on demand, not on entry.** File one when recording a decision, or
+   when the work will span more than this sitting. Otherwise the Conventional Commit
+   *is* the memory — it is what release-notes grouping already reads, and a permission
+   slip for work nobody else could be colliding with adds narration with no reader.
+4. **Exit check, not teardown.** `colab solo --done` re-derives, fresh: tree clean,
+   everything pushed. There is nothing to tear down, because solo flow made no worktree
+   and holds no claim to release.
+5. **Never relaxed, even solo** — these are not ceremony, they are the floor under every
+   tier and every repo: CI secret scan · reserved ports · Conventional Commits ·
+   `production: null` (already required by `ceremony: light` itself) · not
+   `autonomy: auto-trunk`, and no scheduled driver. A driver is already incompatible
+   with `light` ([§2](#2-tiers) above); it is doubly so here, because a driver planning
+   against a repo means reading its Issues, and a solo repo may have none open at all.
+
+**The boundary is concurrency reality, not a discipline preference someone gets to
+skip.** A repo more than one session touches — a fleet-shared Tier A/B/C repo with
+active worktrees, a repo a scheduled driver reads — can never legally run solo flow,
+because the very thing the entry gate checks (no other live session, no other claim, no
+other worktree) is false by construction the moment a second session exists. `ceremony:
+light` is necessary for solo flow but not sufficient: a light repo currently host to
+someone else's worktree still fails `colab solo`'s check, correctly.
+
+**Consumers that infer activity from worktrees or claims will under-report a solo
+session.** A solo sitting produces neither, so a fleet dashboard or a triage sweep that
+reads only those two surfaces sees the repo as idle while it is, in fact, being worked.
+Whether and how to surface a solo session (e.g. from `state.solo` — machine-local,
+see `tools/README.md`) is each such consumer's own call; this convention does not
+mandate a fix on their side.
+
 ---
 
 ## 3. `.github/project.yml` — the marker

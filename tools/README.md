@@ -507,6 +507,10 @@ Design notes, in case a future change is tempted to relax one:
   "ports": {
     "5230": { "port": 5230, "owner": { "type": "worktree", "ref": "import-fixes-115-114-113" },
               "host": "machine", "created": "<iso>" }
+  },
+  "solo": {
+    "/abs/repo": { "host": "machine", "session": "https://claude.ai/code/session_…",
+                   "sessionName": "colab-handbook", "since": "<iso>" }
   }
 }
 ```
@@ -525,6 +529,12 @@ Design notes, in case a future change is tempted to relax one:
 - **This file has readers outside this repo** — an internal dashboard joins worktrees and claims to
   live sessions straight from it. Treat the shape as a published contract: adding a field is safe,
   renaming or removing one breaks consumers you cannot grep for.
+- **`solo` is keyed by repo, not by issue or worktree.** Solo flow (CONVENTIONS.md, *Solo flow*;
+  `ceremony: light` only) makes no claim and no worktree, so it needed its own machine-local lock —
+  `colab solo` writes it after its entry gate passes (no worktree/claim held, checkout on trunk, no
+  unpushed branch, clean tree), and `colab solo --done` is the only remover, after re-checking clean
+  + pushed. A consumer that infers activity from `worktrees`/`claims` alone will under-report a repo
+  running solo — reading `solo` too is that consumer's own call, same as the readiness label's.
 
 ### Records that cannot be acted on
 
@@ -643,6 +653,7 @@ Run `colab <cmd> --help` for full detail.
 |---|---|
 | `claim <issue>... [--worktree N] [--branch B] [--session S] [--session-name S] [--force] [--repo P]` | claim one or many issues (atomic; onto one worktree). **Enforced** — see *Claim lifecycle* below |
 | `release <issue> [--repo P]` | release a single issue; siblings + worktree survive |
+| `solo [--force] [--session S] [--session-name S] [--repo P]` \| `solo --done [--repo P]` | entry-gated trunk-direct flow — `ceremony: light` only, no issue/claim/worktree (see *Solo flow*, CONVENTIONS.md) |
 | `readiness <issue> [--clear] [--repo P]` | own the `deps-checked` marker (§5): add it after verifying no open blocker, `--clear` on a new blocker or reopen. Journaled; refuses when `gh` is unusable (the marker has no local-only form) |
 | `claims [--json] [--sync [--prune]]` | list (grouped by worktree); `--sync` **adds** claims found on GitHub (assigned + in-progress); `--prune` also **removes** local claims GitHub no longer shows |
 | `port alloc [--count N] [--range A-B \| --at p1,p2,...] [--worktree N \| --claim I \| --label S]` | allocate consecutive free ports, or pin exact ports with `--at` |

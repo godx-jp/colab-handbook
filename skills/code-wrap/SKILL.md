@@ -21,6 +21,40 @@ evidence comment is skipped entirely (the squash's `Closes #N` suffices). Every
 other step in this file — claim discipline, worktree teardown, squash + `Closes
 #N`, the quality gate — runs exactly the same regardless of `ceremony`.
 
+### Did this session open with `colab solo`? Its exit is different, not thinner
+
+Solo flow (CONVENTIONS.md, *Solo flow*) made no worktree and holds no claim, so
+there is nothing here for Phase A/B to harvest or tear down — this is not `ceremony:
+light` again, it is a genuinely different shape, and running the sections below
+against it produces confusing no-ops (B1b finds no branch to extract issues from;
+B3 finds no claim to release; B4 finds no worktree). The solo exit is its own,
+short path:
+
+1. **Run the quality gate anyway** (A3) — solo flow relaxes ceremony, never the gate.
+2. **Distill onto an Issue only if a decision emerged** this sitting (A1's spirit,
+   not its letter) — solo flow's whole premise is that the commit *is* the memory
+   when nothing needs to outlive the session; do not manufacture a narration Issue
+   for the sake of having one.
+3. **Verify clean and pushed, then release the lock:**
+   ```sh
+   colab solo --done
+   ```
+   `--done` re-derives both facts itself (tree clean, fully pushed to
+   `origin/<trunk>`) and refuses if either is false — it is the check, not a
+   formality that trusts you. A refusal means finish the commit/push first; it is
+   not a signal to fall back into Phase A/B's worktree-shaped steps.
+4. **Nothing else runs.** No B0 sync, no B1 CI gate beyond what already ran on
+   trunk post-push, no B2 squash (there is no branch to squash), no B2c/B2d/B3/B4.
+   A Tier A release (B5) is unaffected either way — solo flow is `ceremony: light`
+   only, which already requires `production: null`.
+
+If you are unsure whether this session is a solo session, check
+`colab claims`/`colab worktrees` for a row naming your branch — none, on a
+`ceremony: light` repo, is the signature of solo flow. When genuinely unsure,
+treat it as the ordinary worktree flow below; the ordinary steps degrade safely
+(they just find nothing to do), where the solo path degrades unsafely if run
+against a session that DOES hold a claim or worktree.
+
 ## Principle
 
 **Agents prepare releases; humans perform them.** Your job ends with the trunk

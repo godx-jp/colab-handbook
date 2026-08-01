@@ -24,6 +24,7 @@ const journal = require('./lib/journal');
 const labels = require('./lib/labels');
 const records = require('./lib/records');
 const teardown = require('./lib/teardown');
+const solo = require('./lib/solo');
 const {
   HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
   parseArgs, table, shortRepo,
@@ -572,6 +573,110 @@ function cmdRelease(argv) {
   } else if (out.wtName) {
     print(`  worktree "${out.wtName}" still has ${out.remaining} claim(s)`);
   }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// solo — the entry gate for solo flow (CONVENTIONS.md, Solo flow; #83).
+//
+// Solo flow lets a `ceremony: light` repo skip pre-filed issue / claim / worktree and commit
+// straight to trunk — legal ONLY because the start-side rails (claim discipline, worktree
+// isolation) exist to protect OTHER sessions, and a solo session has none. This command is the
+// mechanical check that condition actually holds, not the honor system: every rule it enforces
+// is read fresh from git + state.json on every call, never assumed from a prior run.
+//
+// The lock (`state.solo[repoAbs]`) is its own thing, not a claim or a worktree — solo flow makes
+// neither, so there is nothing else in state.json a second solo attempt could collide with.
+// ---------------------------------------------------------------------------
+
+const HELP_SOLO = `colab solo [--repo <path>] [--force] [--session <url>] [--session-name <name>]
+colab solo --done [--repo <path>]
+
+Entry gate for solo flow (CONVENTIONS.md, Solo flow) — legal ONLY on a \`ceremony: light\` repo.
+Trunk-direct commits with no pre-filed issue, claim or worktree are safe exactly when nobody
+else could be colliding with them; this command checks that mechanically instead of trusting it.
+
+  colab solo            check + LOCK: no live solo session, no worktree, no claim, checked out
+                         on trunk, no unpushed branch anywhere, clean tree. Any one held → refuse,
+                         full ceremony, no exception.
+  colab solo --done     exit check: tree clean AND pushed, then releases the lock.
+  colab solo --force    take over a lock THIS command already holds in this repo (e.g. a crashed
+                         session) — never bypasses the other checks, only a stale lock of your own.
+
+Not honor system: nothing here is read once and cached — every check re-derives its answer from
+git and ~/.colab/state.json on this invocation. The lock is machine-local, one repo at a time.
+`;
+
+function cmdSolo(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--repo': 'repo', '--session': 'session', '--session-name': 'sessionName' },
+    flags: { '--done': 'done', '--force': 'force', '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help) return print(HELP_SOLO);
+  const repoAbs = resolveRepo(opts);
+  const doc = projectDoc(repoAbs);
+  if (doc.ceremony !== 'light') {
+    throw new UserError(`solo flow requires \`ceremony: light\` in .github/project.yml — this repo ` +
+      `is ${doc.ceremony ? `\`ceremony: ${doc.ceremony}\`` : 'unset (standard)'}. Full ceremony applies ` +
+      `(CONVENTIONS.md, Solo flow).`);
+  }
+
+  if (opts.done) return cmdSoloDone(repoAbs, doc);
+
+  const st = state.loadState();
+  const held = (st.solo || {})[repoAbs];
+  if (held && !opts.force) {
+    print(`✗ solo already OPEN in ${shortRepo(repoAbs)} — held by ${held.host}` +
+      (held.sessionName || held.session ? ` (${displayIdentity(held.sessionName, held.session)})` : '') +
+      ` since ${held.since}.`);
+    print('  Close it first (colab solo --done), or --force if it is stale (that host crashed/is gone).');
+    return 1;
+  }
+
+  const trunk = resolveTrunk(repoAbs, doc);
+  const problems = solo.entryProblems(st, repoAbs, trunk);
+  if (problems.length) {
+    print(`✗ solo refused in ${shortRepo(repoAbs)} — full ceremony required:`);
+    for (const p of problems) print(`  - ${p}`);
+    return 1;
+  }
+
+  const session = resolveSession(opts);
+  const sessionName = resolveSessionName(opts);
+  warnHalfIdentity(session, sessionName, 'solo lock', null);
+
+  state.mutate((s) => {
+    s.solo = s.solo || {};
+    s.solo[repoAbs] = { host: HOST, session, sessionName, since: nowISO() };
+  });
+
+  // No pushEvent here: `solo` is not in notify.js's ACTION_KIND (closed vocabulary, agreed with the
+  // receiver per action — same reasoning as readiness's commented-out emission, #45/#46). This lock
+  // is COLAB-LOCAL and already in state.json for anything polling it; inventing a kind unilaterally
+  // is exactly what that module's contract forbids.
+  print(`✓ solo flow OPEN in ${shortRepo(repoAbs)} (trunk "${trunk}") — commit straight to trunk with`);
+  print('  Conventional Commits; file an Issue only for a decision that outlives this session.');
+  print('  `colab solo --done` when finished.');
+  return 0;
+}
+
+function cmdSoloDone(repoAbs, doc) {
+  const st = state.loadState();
+  const held = (st.solo || {})[repoAbs];
+  if (!held) throw new UserError(`No solo lock held in ${shortRepo(repoAbs)} — nothing to release.`);
+
+  const trunk = resolveTrunk(repoAbs, doc);
+  const problems = solo.exitProblems(repoAbs, trunk);
+  if (problems.length) {
+    print(`✗ solo --done refused in ${shortRepo(repoAbs)}:`);
+    for (const p of problems) print(`  - ${p}`);
+    return 1;
+  }
+
+  state.mutate((s) => {
+    if (s.solo) delete s.solo[repoAbs];
+  });
+  print(`✓ solo flow CLOSED in ${shortRepo(repoAbs)} — tree clean, pushed, lock released.`);
   return 0;
 }
 
@@ -4327,6 +4432,8 @@ Three independent capabilities (each works standalone):
 Commands:
   claim <issue> [<issue>...] [--worktree N] [--branch B] [--repo P]   claim issue(s)
   release <issue> [--repo P]                                          release one issue
+  solo [--force] [--repo P] | solo --done [--repo P]                 entry-gated trunk-direct
+                                        flow, \`ceremony: light\` only — no issue/claim/worktree (#83)
   readiness <issue> [--clear] [--repo P]                             own the deps-checked marker (§5)
   claims [--json] [--sync]                                            list / reconcile with GitHub
 
@@ -4376,6 +4483,7 @@ function main(argv) {
   switch (cmd) {
     case 'claim': return cmdClaim(rest);
     case 'release': return cmdRelease(rest);
+    case 'solo': return cmdSolo(rest);
     case 'readiness': return cmdReadiness(rest);
     case 'claims': return cmdClaims(rest);
     case 'port': return cmdPort(rest);
