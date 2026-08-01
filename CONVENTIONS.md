@@ -774,13 +774,29 @@ that wrote it. **Whoever breaks a group removes the label from the members it no
 covers.** Prefer leaving it off to leaving it wrong — an absent label costs one triage
 pass, a stale one costs the merge-over the label exists to prevent.
 
-**Who writes it, who reads it, and what needs no cleanup.** `code-triage` writes it: it
+**Who writes it, who reads it, and who tears it down.** `code-triage` writes it: it
 is the step that judges which files an issue touches, and a judgement no tool can
 re-derive is exactly the kind that has to be persisted. `code-start` reads it before it
 branches, alongside the check that a clean `in-progress` label does not prove clean
-ground. **Wrapping adds no step** — closing the members removes them from every query
-that matters, and a `group:` label left on a closed issue is a true record of how that
-work moved.
+ground.
+
+**`colab ship`'s B4 tears it down (#82) — the label OBJECT, not just an issue's use of it.**
+Left alone, a fully-closed group is picker noise forever: one fleet repo measured
+~12 stale `group:*` labels whose every member was closed, and this repo grew two more
+within an hour of adopting them. So after B4 posts its per-issue comments, ship unions
+the `group:` labels the branch's issues carried and, for each one, asks whether any
+issue anywhere still carries it in the **open** state. None left → the label object is
+deleted (`gh label delete`). One still open → it is left exactly as it was, because it
+still binds that remainder. `code-sweep` inherits the same check for free — it wraps
+each candidate through the same path, never a batch.
+
+This does not erase the record. Deleting the label removes it from *future* queries
+(`gh issue list --label group:$key` returns nothing once it is gone) — it does not
+touch the closed issues' own timelines, which keep showing the label was applied, and
+it does not touch the `Because:` comment each member carries: that is the durable
+record of *why* the group existed, by design (#43), independent of whether the label
+object survives. Only `group:*` labels are ever in scope for this — never the
+operational set (`in-progress`, `deps-checked`, `agent-filed`, `epic`).
 
 **Why not "the group is whatever was claimed to one worktree".** It costs no new
 vocabulary and is true by construction, and it still does not close the hole: that record

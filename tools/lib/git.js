@@ -203,6 +203,29 @@ function ghListLabels(repo) {
 }
 
 /**
+ * `gh issue list --label <name> --state <state>` → array of parsed objects (the requested JSON
+ * fields), or null on failure (gh missing, no remote, network). Null means "could not read" —
+ * the same contract as ghIssueView; a caller must not read a failed call as "no issues".
+ */
+function ghIssueListByLabel(repo, label, state, fields) {
+  const r = run('gh', ['issue', 'list', '--label', label, '--state', state,
+    '--json', fields.join(','), '--limit', '200'], { cwd: repo });
+  if (!r.ok) return null;
+  try { return JSON.parse(r.stdout); }
+  catch (_) { return null; }
+}
+
+/**
+ * `gh label delete <name> --yes` — returns {ok, stderr}. Deletes the LABEL OBJECT from the
+ * repo's tracker, not one issue's use of it — every issue that carried it loses it. Callers
+ * that mean "remove this label from one issue" want ghIssueEdit(..., ['--remove-label', name])
+ * instead; this is only for tearing down a spent `group:<key>` label (CONVENTIONS.md §5).
+ */
+function ghLabelDelete(repo, name) {
+  return run('gh', ['label', 'delete', name, '--yes'], { cwd: repo });
+}
+
+/**
  * Latest CI run for a branch: { status, conclusion } (e.g. {status:'completed', conclusion:'success'}),
  * or null if gh fails. An empty history returns {status:'none', conclusion:null} — treated as NOT green
  * by the caller, which is also how a billing-style fail-to-start (no run created) reads.
@@ -233,4 +256,5 @@ module.exports = {
   worktreeList, worktreeListDetailed, dirtyTracked,
   ghAvailable, ghIssueEdit, ghListLabels, ghAssignedIssues,
   ghCurrentLogin, ghIssueView, ghIssueComment, ghRunLatest,
+  ghIssueListByLabel, ghLabelDelete,
 };

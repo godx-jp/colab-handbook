@@ -492,6 +492,30 @@ sub-issues if the owner wants it — then this step stops applying forever.
    rule, and editing it would tick a line that tracks nothing. Verified against that
    body: the anchored pattern rejects it, a `-.*#N` pattern accepts it.
 
+### B2d. Tear down a spent `group:<key>` label (#82)
+
+**`colab ship` does this for you** — its B4 unions the `group:` labels the branch's
+issues carried and, per label, checks whether any issue anywhere still carries it
+**open**. None left → the label OBJECT is deleted (`gh label delete`); one still open
+→ left exactly as it was, because it still binds the remainder. Nothing here to do on
+that path — it runs automatically, after the evidence comments in B2b.
+
+**Only if you merged by hand** (no `colab ship` — a repo without `autonomy:
+auto-trunk`), do the equivalent yourself, once B2 has pushed:
+
+```sh
+for GL in $(gh issue view $N --json labels -q '.labels[].name' | grep '^group:'); do
+  gh issue list --label "$GL" --state open --json number -q length \
+    | grep -qx 0 && gh label delete "$GL" --yes
+done
+```
+
+Only `group:*` labels are ever in scope — never `in-progress`, `deps-checked`,
+`agent-filed`, or `epic`. Deleting the label does not erase the record: the closed
+issues' timelines still show it was applied, and each member's `Because:` comment
+(`CONVENTIONS.md` §5, *Grouping*) is the durable evidence of *why*, independent of
+whether the label object survives.
+
 ### B3. Release the claim(s)
 
 ```sh

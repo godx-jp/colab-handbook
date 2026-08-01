@@ -3262,6 +3262,9 @@ Sequence (each step gated; any failure aborts before the push — the target is 
   f. B3 teardown        colab worktree rm (releases claims + ports + ✅ comments) unless --keep-worktree.
                         The BRANCH IS KEPT — pass --delete-branch to remove it (local + remote).
   g. B4 verify + h.     confirm each issue auto-closed; post "🚢 Shipped to <trunk>" per issue
+  i. group teardown     for every group:<key> label the branch's issues carried, delete the
+                        LABEL OBJECT once no open issue carries it anymore (#82) — a live member
+                        elsewhere leaves it in place
 
 The default squash subject is the branch's HIGHEST-WEIGHT commit (breaking > feat > fix > perf >
 refactor > docs > test > chore, ties to the oldest) — NOT its newest commit, which on a well-run
@@ -3935,15 +3938,17 @@ function cmdShip(argv) {
   handleShippedBranch(repoAbs, target, sess.branch, { deleteBranch: opts.deleteBranch, worktreeKept, integration });
 
   // ---- (g/h) B4 verify + post summary per issue ----
+  const groupLabelsCarried = new Set(); // union across every issue this branch carried — for (i) below
   if (gh) {
     for (const num of sess.issues) {
       const isRef = refsSet.has(num);
-      const info = git.ghIssueView(repoAbs, num, ['state']);
+      const info = git.ghIssueView(repoAbs, num, ['state', 'labels']);
       // A closed issue must have auto-closed; a ref'd (tracking) issue must have STAYED open. The
       // second check catches the one case the pure layer cannot fix: a carried commit body that
       // literally says `Closes #N` for a ref issue — GitHub honours it and closes the memory issue.
       if (!isRef && info && info.state !== 'CLOSED') warn(`#${num} did not auto-close (state=${info.state}) — the Closes trailer needs a push to the DEFAULT branch; close it by hand if ${target} isn't default`);
       if (isRef && info && info.state === 'CLOSED') warn(`#${num} was meant to stay open (Refs, tracking issue) but is CLOSED — a commit body likely carries "Closes #${num}"; reopen it by hand`);
+      for (const gl of labels.groupLabelNames(info && info.labels)) groupLabelsCarried.add(gl);
       const shipSess = sessionCommentSuffix(sess.session, sess.sessionName); // markdown link when both present
       // Name the branch it actually landed on. An issue whose code is on a long-lived line is NOT
       // in trunk, and a comment saying otherwise would be read as "this is in the next release".
@@ -3953,6 +3958,24 @@ function cmdShip(argv) {
         : `🚢 Shipped to ${target} by colab ship — ${sha}${onLine}${shipSess}`;
       const r = git.ghIssueComment(repoAbs, num, body);
       if (!r.ok) warn(`could not post ship comment on #${num}`);
+    }
+  }
+
+  // ---- (i) group-label teardown (#82) ----
+  // A `group:<key>` label (CONVENTIONS.md §5, Grouping) records that a set of issues had to
+  // share one branch — it stops being useful the moment every member is closed, and left in
+  // place it is picker noise forever (measured: ~12 stale entries on one fleet repo). Only the
+  // issues THIS branch carried can trigger a check — that is the set whose state just changed —
+  // but membership is read fresh per label, because a group can outlive the branch that closed
+  // its last member.
+  if (gh) {
+    for (const gl of groupLabelsCarried) {
+      const openMembers = git.ghIssueListByLabel(repoAbs, gl, 'open', ['number']);
+      if (openMembers === null) { warn(`could not check membership of ${gl} — left in place`); continue; }
+      if (openMembers.length > 0) continue; // still binds the remainder — leave it
+      const del = git.ghLabelDelete(repoAbs, gl);
+      if (del.ok) print(`  deleted spent group label ${gl} (every member now closed)`);
+      else warn(`could not delete spent group label ${gl}: ${del.stderr || 'gh label delete failed'}`);
     }
   }
 

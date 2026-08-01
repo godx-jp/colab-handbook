@@ -96,8 +96,38 @@ function readinessMissingLabelHint(present) {
     + `(§7) to create the convention label set, then re-run the command.`;
 }
 
+// The GROUP label prefix (CONVENTIONS.md §5, Grouping). `group:<key>` records that a set of
+// issues must share one branch — the key is the branch slug minus its trailing issue numbers.
+// Deliberately NOT in CONVENTION_LABELS: it is per-group (one label PER key, not one fixed
+// name), created on demand by whoever computes the grouping (`code-triage`), not provisioned
+// up front the way the fixed convention set is.
+const GROUP_LABEL_PREFIX = 'group:';
+
+// Is this label name a group marker? Guards against the bare prefix itself ("group:" with no
+// key) reading as one — that string names no group and nothing should ever try to delete it.
+function isGroupLabel(name) {
+  return typeof name === 'string' && name.length > GROUP_LABEL_PREFIX.length && name.startsWith(GROUP_LABEL_PREFIX);
+}
+
+// The group label names carried by a label list — same tolerant shape as missingConventionLabels
+// (bare strings or {name} objects), so a caller can hand this `info.labels` straight off
+// `gh issue view` / `gh issue list` without mapping first. Order-preserving, deduplicated: a
+// caller unioning group labels across several issues (colab ship's B4, per #82) must not visit
+// the same key twice.
+function groupLabelNames(present) {
+  const out = [];
+  const seen = new Set();
+  for (const n of (present || [])) {
+    const name = n && typeof n === 'object' ? n.name : n;
+    const s = name === undefined || name === null ? '' : String(name);
+    if (isGroupLabel(s) && !seen.has(s)) { seen.add(s); out.push(s); }
+  }
+  return out;
+}
+
 module.exports = {
   CONVENTION_LABELS, conventionLabelNames, missingConventionLabels,
   READINESS_LABEL, readinessLabelArgs, readinessMissingLabelHint,
   TRACKING_LABEL,
+  GROUP_LABEL_PREFIX, isGroupLabel, groupLabelNames,
 };
