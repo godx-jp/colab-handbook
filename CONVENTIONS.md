@@ -665,6 +665,41 @@ default be *excluded, and started only when a person clicks* — which makes the
 approval. A tool cannot construct that gate from an issue's contents; only whoever filed
 it knows the answer, and only at filing time.
 
+### Design ruling — a human must approve the design first
+
+*Readiness* and *Provenance* each answer a different question about whether an issue may
+be picked up. A third belongs beside them, for one specific class of surface: **has a
+human been asked to rule on the design this issue implements, when the surface needed
+one?**
+
+A designer producing a spec decides, while producing it, whether the surface is
+significant enough to need a human pre-approval before code starts — a new page
+template, a brand-facing surface, anything where a wrong default is expensive to unwind
+once code exists. When it does, the designer marks the issue `needs-ruling` and attaches
+the design artifact. Triage may pre-flag the obvious cases, but the call belongs to
+whoever is producing the spec — no mechanical rule infers it from an issue's title or
+labels.
+
+**`needs-ruling` blocks starting the issue** — a readiness gate exactly like an open hard
+blocker or a live `in-progress` claim, not a softer advisory — until a human reviews the
+artifact and removes the label. No session starts an issue that still carries it, manual
+or scheduled (*Scheduled drivers*, below, names the scheduled case explicitly). The label
+joins the convention set provisioned in [§9](#9-adopting-this).
+
+**A session that discovers a significant design decision mid-work — one the spec did not
+anticipate — does not stop and file a ruling request.** It continues on the designer's
+spec (parking mid-feature to request a ruling is its own cost, and the spec already on
+hand is the best available answer) and instead records `design-not-preapproved` in its
+wrap evidence ([code-wrap §B2b](skills/code-wrap/SKILL.md)), so the closure itself is
+what a human reviews — after the fact, rather than blocking the session on it. This is a
+deliberately different remedy from the gate above: the gate stops a known-significant
+surface before code starts; the marker flags a surface that turned out to matter only
+once someone was already building it.
+
+Applies in every mode. A human-opened session and a scheduled driver honor the identical
+gate, for the identical reason *Scheduled drivers* gives for `agent-filed` and `epic`: a
+label a person has not cleared is not a decision a tool gets to infer around.
+
 ### Scheduled drivers — provenance and autonomy meet a caller that is not a person
 
 Everything above — provenance, readiness, the autonomy ladder — was written assuming the
@@ -689,6 +724,12 @@ rather than the one time a human clicks a button:
   still not be a pick-up-and-code task, because it is a container for sub-issues, not a
   unit of work itself (*Epics*, below). A driver that cannot tell the two apart starts the
   umbrella instead of its children.
+- **`needs-ruling` issues are excluded from what a scheduler starts, for a third reason
+  again.** *Design ruling* (above) asks a question neither of the other two do: has a
+  human approved *the design* this issue implements — not the decision to do the work at
+  all, and not whether the issue is a unit of work. An issue can be human-filed, unblocked,
+  and a genuine leaf task, and still sit on a design nobody has ruled on. A scheduler that
+  starts it anyway builds against a spec no human has actually seen.
 - **The only admission is a human act on the issue itself: removing the label.** A scheduler
   has no other door in — it cannot decide an `agent-filed` issue has "become" approved by
   reading its content, its age, or how many times it has been proposed. The label is the whole
@@ -897,6 +938,62 @@ Two rules already stated apply here with unusual force, because prose hides thei
   so taking its side wholesale silently reverts the other session's edit while looking like a
   clean resolution. Measured, on two adjacent edits to one paragraph — the correct resolution
   was their union, not either side.
+
+#### Design conclusions are three units, not two
+
+A design ruling is the conclusion above, plus one part a prose conclusion does not need:
+**an immutable visual record.** Repo files drift and supersede — the two-unit shape above
+already assumes that — but a design ruling needs the *option that was approved* preserved
+exactly as it looked, independent of whatever the file becomes next. So a design
+conclusion is three units:
+
+1. **The ruling** — on the Issue, immediately, exactly as Step 1 above: chosen option,
+   why, what was rejected. This is the comment
+   [`needs-ruling`](#design-ruling--a-human-must-approve-the-design-first) consumes to
+   clear itself.
+2. **The artifact** — a repo file under `docs/design/`, named `<slug>-<N>-mockup.html` or
+   `<slug>-<N>-spec.md` — the issue number is the join key, mirroring branch naming
+   ([§4](#4-branches-and-commits)). It lands via a claimed docs branch exactly as Step 2
+   above describes; being a design file exempts it from nothing. **Superseded artifacts
+   are marked, never deleted** — trunk carries the design lineage, and a preview link made
+   months ago keeps resolving.
+3. **The frozen evidence** — a screenshot of the approved option, attached to the ruling
+   comment. Immutable where the repo file is not: a later session can edit the file, never
+   the screenshot. Rejected alternatives need never land on trunk at all — their
+   screenshot on the Issue is the whole record they were considered.
+
+**Container rule:** the index of what lives under `docs/design/` belongs in that directory
+itself — a README, or the spec document's own header — never accreted into the repo's
+`CLAUDE.md`, for the identical reason the
+[router-not-archive rule](skills/code-wrap/SKILL.md#claudemd-is-a-router-not-an-archive)
+gives: a file loaded into every session is the worst place for an archive that only grows.
+`CLAUDE.md` gets one pointer row into `docs/design/`; the design index maintains itself
+there.
+
+#### Design exploration files its Issue first — before the first mockup, not after
+
+A mockup happens before any coding session exists for the feature, so the ordinary
+sequencing note above — own Issue, claim, branch off trunk — needs one further promise:
+**the Issue number has to exist before the first mockup is drawn, not retrofitted once one
+is approved.** Filing is one command, cheaper than a single mockup iteration, and it is
+what makes Step 2's naming possible at all — a file named `<slug>-<N>-mockup.html` cannot
+be named until `N` exists. The provenance shape above already covers exactly this session:
+`Filed-by: boss (via discussion session <name>)` for a design exploration a person asked
+for, with no code written yet.
+
+From there: a small feature continues on that same Issue through implementation. A large
+one turns the design Issue into the
+[epic](#epics--a-container-is-not-a-start-candidate) parent, with implementation
+sub-issues hanging off it — the spec inherited by reference, never re-attached, and the
+branch/worktree names for those children arriving with their own sessions rather than at
+mockup time.
+
+**Boundary:** [`ceremony: light`](project.schema.md#ceremony--optional) repos are exempt
+from the file ceremony above — a mockup lives as a preview link in conversation, and units
+1 and 3 collapse into one screenshot-bearing Issue comment when the decision is worth
+keeping at all. This section defines storage, reference and sequencing; the approval gate
+itself is [*Design ruling*](#design-ruling--a-human-must-approve-the-design-first) — the
+two land together where grouped, but rule on different things.
 
 ### Scope — diagnosing across repos is not license to act in them
 
@@ -1252,7 +1349,7 @@ here.
    production exists, not whether shipping is automated ([§2](#2-tiers)).
 2. **Write `.github/project.yml`** ([§3](#3-githubprojectyml--the-marker)).
 3. **Create the labels — the whole set, not a subset.** They will not exist yet. All
-   four are required, because each powers a check that silently *cannot fire* while its
+   five are required, because each powers a check that silently *cannot fire* while its
    label is absent — and a check that never fires reads exactly like one that always
    passes:
    ```sh
@@ -1260,6 +1357,7 @@ here.
    gh label create deps-checked --color 0E8A16 --description "Dependencies verified — no open blocker"  2>/dev/null || true
    gh label create agent-filed  --color C5DEF5 --description "Filed by an agent on its own initiative — not human-approved"  2>/dev/null || true
    gh label create epic         --color 3E4B9E --description "Container for sub-issues — informative, never a start candidate, never claimed as a unit of work"  2>/dev/null || true
+   gh label create needs-ruling --color B60205 --description "Needs a human design ruling before this can start"  2>/dev/null || true
    ```
    The `|| true` makes this **idempotent** — partial adoption is the normal case, so
    re-running must be safe. What each absence costs:
@@ -1276,6 +1374,10 @@ here.
      tracking/umbrella record apart from codeable work — absent, an epic that carries
      `deps-checked` and no claim passes every readiness gate and reads as a normal
      start candidate to an unattended tool ([§5](#5-claiming-work--how-to-say-im-on-this)).
+   - **`needs-ruling`** must exist before a designer can mark a surface pending a design
+     ruling ([§5](#5-claiming-work--how-to-say-im-on-this), *Design ruling*) — absent, that
+     gate cannot be applied at all, and a surface nobody has approved reads as a normal
+     start candidate to a human session or a scheduled driver alike.
 
    This full set is provisioned again on every sync, not only at adoption: a repo that
    adopted at an older handbook version — before a label entered the set — never
