@@ -15,12 +15,22 @@
  *
  * Each entry carries color + description so a provisioner (`gh label create`) and the
  * audit's presence check share not just the names but how the label is meant to look.
+ *
+ * `epic` joined the set in #78: the scheduled-drivers model (#70) needs a driver to
+ * exclude tracking/umbrella records from what it starts unattended, exactly the way it
+ * already excludes `agent-filed` issues (CONVENTIONS.md §5, *Provenance*). An
+ * `epic`-labelled issue is informative — a container for sub-issues — never a start
+ * candidate and never claimed as a unit of work. It joins CONVENTION_LABELS rather than
+ * staying repo-local because an unattended decision now depends on it, the same bar the
+ * other three met; contrast `TRACKING_LABEL` below, which stays opt-in because nothing
+ * unattended reads it (yet).
  */
 
 const CONVENTION_LABELS = [
   { name: 'in-progress', color: 'FBCA04', description: 'Claimed by an active session' },
   { name: 'deps-checked', color: '0E8A16', description: 'Dependencies verified — no open blocker' },
   { name: 'agent-filed', color: 'C5DEF5', description: 'Filed by an agent on its own initiative — not human-approved' },
+  { name: 'epic', color: '3E4B9E', description: 'Container for sub-issues — informative, never a start candidate, never claimed as a unit of work' },
 ];
 
 function conventionLabelNames() {

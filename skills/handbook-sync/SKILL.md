@@ -113,9 +113,10 @@ set** while you are there, not just the claim label:
 gh label create in-progress  --color FBCA04 --description "Claimed by an active session"  2>/dev/null || true
 gh label create deps-checked --color 0E8A16 --description "Dependencies verified — no open blocker"  2>/dev/null || true
 gh label create agent-filed  --color C5DEF5 --description "Filed by an agent on its own initiative — not human-approved"  2>/dev/null || true
+gh label create epic         --color 3E4B9E --description "Container for sub-issues — informative, never a start candidate, never claimed as a unit of work"  2>/dev/null || true
 ```
 
-Only `in-progress` is ordering-critical (the claim below needs it), but the set is three
+Only `in-progress` is ordering-critical (the claim below needs it), but the set is four
 cheap idempotent lines, and creating a subset is the exact bug this leads to: a
 `deps-checked` never created leaves a readiness column that can never fill, and nothing
 downstream can tell *free* from *nobody looked*. Create the set, not the claim label
@@ -280,10 +281,16 @@ and the audit is what catches it:
   gh label create in-progress  --color FBCA04 --description "Claimed by an active session"  2>/dev/null || true
   gh label create deps-checked --color 0E8A16 --description "Dependencies verified — no open blocker"  2>/dev/null || true
   gh label create agent-filed  --color C5DEF5 --description "Filed by an agent on its own initiative — not human-approved"  2>/dev/null || true
+  gh label create epic         --color 3E4B9E --description "Container for sub-issues — informative, never a start candidate, never claimed as a unit of work"  2>/dev/null || true
   ```
   This is a GitHub-side change, not a committed one, so it needs no entry in §8's
   commit — but note it in the Issue so the back-fill is recorded. A remote-less repo
   has no labels to create; say so rather than leave it looking undone.
+- **`ceremony:` is optional, and syncing never adds it uninvited.** Unlike the label
+  set, this is a `project.yml` field the repo opts into (project.schema.md#ceremony--optional)
+  — omission already behaves as `standard`, so there is nothing to back-fill. Only
+  raise it if the repo's own owner asks whether it qualifies for `light`, and never
+  set it yourself as part of a routine sync.
 
 Fix what is genuinely wrong; **report what you are unsure about** rather than
 guessing. A `project.yml` that contradicts reality is worse than one that admits it.

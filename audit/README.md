@@ -131,6 +131,28 @@ the handbook's current version, so a scheduled run is self-documenting.
   Both thresholds are explicitly a starting point offered by the issue for calibration
   across adopting repos, not a settled gate — hence `warn`, not `fail`.
 
+- **Convention labels present on the tracker** (`in-progress`, `deps-checked`,
+  `agent-filed`, `epic` — `tools/lib/labels.js`) — **advisory**, and only when the repo
+  is adopted (has a `project.yml`) and the label set could actually be read (remote-less
+  or offline audits stay silent rather than claim a label is missing they could not see).
+  A repo that adopted at an older handbook version never back-fills a label added later
+  on its own; the check that label powers then silently cannot fire (`CONVENTIONS.md`
+  §8, *Labels reconcile too*).
+- **`ceremony:` coherence (#79)** — an optional field scaling memory-ceremony depth
+  (project.schema.md#ceremony--optional). An unrecognised value is a **finding**; two
+  coherence rules are also findings, both scoped to `ceremony: light` only:
+  - `light` + a non-null `production` — a live repo cannot opt out of its own audit
+    trail, the same class of finding as `tier: A` + `deploy: push-main`.
+  - `light` + `autonomy: auto-trunk` — an unattended merge with no evidence trail is a
+    closure nobody can audit.
+  Omitting `ceremony:` entirely, or setting `ceremony: standard`, triggers neither rule.
+  `light` also **downgrades the handbook-reconciliation stamp check** (above) from
+  `fail` to `warn` — but only for a **non-CI** template (the CLAUDE conventions block,
+  a deploy template, …). A stamped `ci-*` workflow that has drifted stays a hard
+  finding on every repo regardless of `ceremony`, because build/secret-scan integrity
+  is never optional — and it cannot reach a live repo anyway, since rule 1 above
+  already requires `production: null` wherever `light` applies.
+
 `stack` is intentionally **not** validated — it is a free-form string now.
 
 ## The repo list — resolution order

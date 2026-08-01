@@ -13,6 +13,14 @@ merge into (from `.github/project.yml`; `main` for Tier B, `dev` for Tier A) ·
 `<base>` = **the branch this session ships into** — `<trunk>`, unless it was cut
 from a declared `integration:` line, in which case it is that line (B0).
 
+**Read `ceremony:` from `.github/project.yml` before Phase A's first write.**
+Absent, or `ceremony: standard` — everything below applies as written. `ceremony:
+light` (project.schema.md#ceremony--optional) thins two specific steps and nothing
+else: A1's narration distills real gotchas only, no progress commentary, and B2b's
+evidence comment is skipped entirely (the squash's `Closes #N` suffices). Every
+other step in this file — claim discipline, worktree teardown, squash + `Closes
+#N`, the quality gate — runs exactly the same regardless of `ceremony`.
+
 ## Principle
 
 **Agents prepare releases; humans perform them.** Your job ends with the trunk
@@ -37,6 +45,9 @@ gh issue comment $N -b "**<YYYY-MM-DD>** — did X, decided Y, left Z open."
 - Record **reusable knowledge** — a decision and *why*, a gotcha, a dead end —
   not a copy of the diff. The code is already in git.
 - No GitHub remote? Write the same into the session notes file from code-start.
+- **`ceremony: light` repo** — distill real gotchas only; skip the progress-commentary
+  comment (the `**<YYYY-MM-DD>** — did X…` line above). A tick of the checklist and a
+  genuine decision/gotcha still belong here — this thins commentary, not knowledge.
 
 #### Filing a follow-up here? It is agent-filed, and it must say so
 
@@ -380,6 +391,10 @@ is a human integration event of a promotion's weight.
 
 ### B2b. Post evidence on EVERY issue — including the auto-closed ones
 
+**`ceremony: light` repo? Skip this whole step.** The squash's `Closes #N` is the
+record; there is no evidence comment to post (project.schema.md#ceremony--optional).
+Everything below applies only on `standard` (the default — absent `ceremony:` key).
+
 `Closes #N` closes the issue the instant trunk is pushed: silently, with nothing
 attached. So the best-evidenced rule in the handbook is exactly the one that skips
 the evidence step — the issue goes green and no one ever records *what* shipped.
@@ -395,12 +410,28 @@ what came back.** When `<base>` is a declared line, say so in the comment: that 
 **not in trunk yet**, and an evidence comment that implies otherwise will be read as
 "this is in the next release".
 
+**Prepend one invisible marker line** — a stable, machine-readable first line, exactly
+the pattern the claim comments already use (`CONVENTIONS.md` §5 *Rules*: a stable first
+line as wire format, everything after it human). It names the trunk sha the comment
+attests, so an external consumer (a closure-review view on a fleet dashboard, say) can
+find and verify the evidence comment without heuristics — "first comment after merge
+by the closing actor" is brittle; a stable marker is not.
+
 ```sh
-gh issue comment 88 -b "Shipped in \`a1b2c3d\` on <trunk>.
+gh issue comment 88 -b "<!-- colab:evidence sha=a1b2c3d -->
+Shipped in \`a1b2c3d\` on <trunk>.
 \`app/Models/Payroll.php:142\` — added the \`overtime_rate\` column.
 Checked: ran the payroll fixture for a 25%-overtime employee; the premium is now
 applied once, not twice — the double-count this issue reported is gone."
 ```
+
+**Degrade, never gate.** The marker is an upgrade to an already-required comment, never
+a new requirement of its own: a comment missing it (an older wrap, a hand-written one)
+still counts as evidence and must never be treated as absent by anything reading these
+comments. Everything after the marker line stays free prose — **not** a structured
+evidence format. A schema with fields invites padding (a 3-line honest comment becomes
+a 15-line template of restated obviousness); the marker's whole job is being findable,
+not being complete.
 
 **Not evidence:** quoting your own commit message · restating the ticked checklist ·
 "done in `feat/x-23`". All three assert the work happened; none show it did.

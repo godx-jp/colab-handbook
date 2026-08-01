@@ -323,6 +323,18 @@ Two conditions on that, both of which have teeth:
   before putting it in a report — §3 already warns that refs rot, and a cached line number
   is a ref that rots invisibly.
 
+**A container, not a task** — cheapest pass of the three, so run it first:
+
+```sh
+gh issue list --state open --label epic --json number -q '.[].number'
+```
+
+An `epic`-labelled issue is informative, never a start candidate (`CONVENTIONS.md` §5,
+*Epics*) — leave it off the ranked list entirely, the same way a taken issue is left off,
+but for a different reason: it is not that someone else holds it, it is that there is no
+code to write for it directly. Still report it, in its own bucket, so it does not read as
+silently dropped — see §6.
+
 ## 3. Group — this is a correctness constraint, not tidiness
 
 **Issues that touch the same files must become one branch.** Two sessions editing
@@ -453,6 +465,15 @@ relationship is the part the readiness gate above (and any other tool) reads.
   `deps-checked` label, and the `group:` label plus its evidence comment (§3).
 
 ### Single-issue mode
+
+**`ceremony: light` repo (project.schema.md#ceremony--optional)? Order and group as
+normal, but skip the `deps-checked` labeling pass below** — ordering and grouping are
+judgements this skill still owes every repo; the label write is the one step that is
+pure cost here. It is coherent specifically because a `light` repo can never carry
+`autonomy: auto-trunk` (the audit enforces that pairing as a finding), so nothing
+unattended ever consumes the readiness column — an empty column that nothing reads
+costs nothing, while a filled one on a repo few humans revisit is ceremony with no
+consumer.
 
 Given one specific issue rather than a backlog, do the same work scoped to it: is *this*
 ready? Run §2 and the §5 gate against it alone, then leave the answer **where a machine
@@ -601,13 +622,20 @@ Then, briefly:
 - **blocked** — one line each, naming the blocker and who could clear it.
 - **taken** — who holds it, and since when.
 - **close these** — already shipped, with the evidence you found.
+- **epics** — one line each, naming the container and (if its table is hand-maintained)
+  whether it looks current. Never a start candidate; see §2.
 
 **Do not let an Issue vanish.** Every open number ends the pass in exactly one
-bucket — ready, blocked, taken, or close-it. A number that quietly falls off the
+bucket — ready, blocked, taken, epic, or close-it. A number that quietly falls off the
 list gets re-triaged from scratch next time, which is how the same work gets
 discovered three times.
 
 ### Then persist each verdict — the report is not the only consumer
+
+**`ceremony: light` repo? Skip this whole subsection** — same reasoning as §4's
+single-issue mode: nothing unattended ever reads the column on a repo that cannot
+also carry `autonomy: auto-trunk`, so the write is pure cost. Rank and report as
+normal; just do not journal the marker.
 
 A ranked report is what a *human* reads. The other consumer is event-driven
 (§0): its status column moves only on a write this skill journals, and §4's

@@ -268,10 +268,10 @@ function satisfiesConstraint(version, constraint) {
 
 // Run all stamp/reconciliation checks for one repo, pushing findings via fail/warn.
 // Silent when there is nothing to say (the common, healthy case).
-function checkStamps(src, hb, tmplNames, fail, warn) {
+function checkStamps(src, hb, tmplNames, fail, warn, { ceremony = "standard" } = {}) {
   const cur = hb.version;
 
-  const compareStamp = (kind, name, stampVersion, files) => {
+  const compareStamp = (kind, name, stampVersion, files, { isCi = false } = {}) => {
     // Deactivated while the handbook is untagged — a global note already says so.
     if (hb.untagged || !hb.hasGit) return;
     if (name !== null && !tmplNames.has(name)) {
@@ -288,7 +288,15 @@ function checkStamps(src, hb, tmplNames, fail, warn) {
       return;
     }
     if (changed) {
-      fail(`${kind} copied @ ${stampVersion} — template changed since (${cur}): review, re-copy via colab template`);
+      // ceremony: light (#79) downgrades drift on a NON-CI template to an advisory — CI/secret-scan
+      // integrity is never optional, on any ceremony value, so a `ci-*` template copy stays a hard
+      // finding regardless. This is the "stamp drift on non-CI templates" item project.schema.md's
+      // ceremony section names; it exists to stop beta noise from drowning real findings, not to
+      // let a live repo's CI drift unnoticed — and it cannot reach CI because `light` already
+      // requires `production: null` (no live repo can carry it).
+      const msg = `${kind} copied @ ${stampVersion} — template changed since (${cur}): review, re-copy via colab template`;
+      if (ceremony === "light" && !isCi) warn(`${msg} (ceremony: light — advisory, not a build/secret-scan template)`);
+      else fail(msg);
     }
   };
 
@@ -298,7 +306,8 @@ function checkStamps(src, hb, tmplNames, fail, warn) {
     const stem = wf.replace(/\.ya?ml$/, "");
     const stamp = parseWorkflowStamp(text);
     if (stamp) {
-      compareStamp(`${wf}`, stamp.name, stamp.version, [`templates/${stamp.name}.yml`, `templates/${stamp.name}.yaml`]);
+      const isCi = /^ci-/.test(stamp.name);
+      compareStamp(`${wf}`, stamp.name, stamp.version, [`templates/${stamp.name}.yml`, `templates/${stamp.name}.yaml`], { isCi });
     } else {
       // Content decides, never the filename — a workflow that merely SHARES a template's name
       // was not copied from it, and saying otherwise pushes people toward asserting a lineage
@@ -613,6 +622,13 @@ const INTEGRATION_BRANCHES = new Set(["main", "dev", "master", "trunk"]);
 // labels, not grades — C is not "worse than B"; B has no production at all.
 const VALID_TIERS = new Set(["A", "B", "C"]);
 const VALID_DEPLOY = new Set(["tag", "manual", "push-main", "none"]);
+// `ceremony` scales memory/record-keeping DEPTH, never the safety rails (claim discipline,
+// worktree isolation, reserved ports, squash + Closes #N, CI secret scan + build stay full-
+// strength on every value). Omission means "standard" — no existing repo's behaviour changes
+// by this field merely existing. `light` is for beta/throwaway repos nobody will comb through
+// history on; the two coherence rules below keep it from drifting onto a repo where that is
+// no longer true (project.schema.md "ceremony — optional").
+const VALID_CEREMONY = new Set(["standard", "light"]);
 // `deploy` answers HOW a repo reaches production, never WHETHER it is tier A — the tier
 // test is "does a deploy target exist today?". `manual` describes the honest third case:
 // production exists, but shipping is a human running a documented runbook (rsync, compose
@@ -668,6 +684,12 @@ function auditRepo(target, ctx) {
   const trunk = cfg?.trunk ?? null;
   const production = cfg?.production ?? null;
   const deploy = cfg?.deploy ?? null;
+  // Omission means "standard" (#9 step 3's "no existing repo changes behavior" guarantee) —
+  // so the raw value (possibly absent) is what gets validated against the enum, while the
+  // defaulted value is what the coherence rules below reason from.
+  const ceremonyRaw = "ceremony" in (cfg || {}) ? cfg.ceremony : null;
+  const ceremony = ceremonyRaw ?? "standard";
+  const autonomy = cfg?.autonomy ?? null;
   info.tier = tier;
 
   if (cfg) {
@@ -676,6 +698,20 @@ function auditRepo(target, ctx) {
     // Only when the key exists but is blank — a wholly absent key is already
     // reported by the missing-keys check above, and saying it twice is noise.
     if ("stack" in cfg && (cfg.stack === null || cfg.stack === "")) warn("stack is empty — set a free-form string describing the stack");
+    if (ceremonyRaw !== null && !VALID_CEREMONY.has(ceremonyRaw)) fail(`ceremony is ${JSON.stringify(ceremonyRaw)}, expected "standard" or "light" (omit for standard)`);
+
+    // ---- ceremony coherence (#79) -------------------------------------------
+    // `light` relaxes memory-ceremony DEPTH, never the two guarantees that protect anyone
+    // OTHER than this repo's own history: a live repo cannot skip its own audit trail, and
+    // an unattended merge needs an evidence trail exactly when nobody watched it happen.
+    if (ceremony === "light") {
+      if (production !== null && production !== "") {
+        fail(`ceremony: light requires production: null — a live repo cannot opt out of its own audit trail (found production: ${JSON.stringify(production)}). Drop to ceremony: standard, or this pairing is the same class of finding as tier: A + deploy: push-main`);
+      }
+      if (autonomy === "auto-trunk") {
+        fail(`ceremony: light is incompatible with autonomy: auto-trunk — an unattended merge with no evidence trail is a closure nobody can audit. Keep autonomy: auto-trunk and use ceremony: standard, or drop autonomy to manual`);
+      }
+    }
 
     // ---- tier <-> trunk coherence ------------------------------------------
     // The canonical Tier A shape is the dev/main split — sessions land on dev, main is the release
@@ -867,7 +903,7 @@ function auditRepo(target, ctx) {
   // Note this is narrower than it may look: one of our Python+Node hybrids emits the
   // SAME two advisory lines, legitimately (its ci.yml really is an unstamped copy).
   // Identical text, opposite meanings — nothing here may generalise to that row.
-  if (!isSelf) checkStamps(src, ctx.handbook, ctx.templateNames, fail, warn);
+  if (!isSelf) checkStamps(src, ctx.handbook, ctx.templateNames, fail, warn, { ceremony });
 
   function finish() {
     info.findings = findings;

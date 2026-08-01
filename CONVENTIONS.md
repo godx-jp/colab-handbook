@@ -212,6 +212,19 @@ deployment detail *of one repo* — it never becomes N repos, N descriptors, or 
 local — discoverable from a repo card, say — is a new, explicit field to design at that point,
 not a retrofit of `trunk:`, which keeps answering Group A alone.
 
+**Memory ceremony is a fourth axis, and tier cannot carry it.** Tier counts gates to
+production; it says nothing about whether anyone will ever comb through a repo's audit
+trail. Two Tier B repos can be a heavy, long-lived codebase and a disposable beta
+playground, and today both pay identical record-keeping ceremony whether or not the
+record is ever read. [`ceremony: light`](project.schema.md#ceremony--optional) lets a
+repo opt into thinner Issue narration and skip Phase B evidence comments — never the
+rails that protect other sessions and the fleet (claim discipline, worktree isolation,
+reserved ports, squash + `Closes #N`, CI secret scan). It is audited coherent with two
+rules: a `light` repo must have `production: null` (a live repo cannot skip its own
+audit trail — the same class of finding as `tier: A` + `deploy: push-main`), and it may
+not combine with `autonomy: auto-trunk` (an unattended merge with no evidence trail is a
+closure nobody can audit).
+
 ---
 
 ## 3. `.github/project.yml` — the marker
@@ -240,6 +253,9 @@ nor a mobile-native project.
 Optional toolchain keys (`node:`, `php:`, …) may be added — see [§7](#7-ci-and-toolchain).
 A repo that keeps a long-lived line declares it in `integration:` — a development-side axis
 with no path to production ([§2](#2-tiers), [schema](project.schema.md#integration--optional)).
+A beta/throwaway repo may declare
+[`ceremony: light`](project.schema.md#ceremony--optional) to scale down memory ceremony —
+omit it, and a repo behaves exactly as before ([§2](#2-tiers)).
 
 Mirror the tier as a GitHub **topic** (`tier-a` / `tier-b` / `tier-c`) so `gh repo list --topic tier-a`
 gives a fleet-wide view. The file is the source of truth; the topic is for discovery.
@@ -631,6 +647,12 @@ rather than the one time a human clicks a button:
 - **`agent-filed` issues are excluded from what a scheduler starts, by default, every run.**
   Not filtered once and remembered — the exclusion is re-applied on each pass, because the
   backlog changes between ticks.
+- **`epic`-labelled issues are excluded from what a scheduler starts, for a different
+  reason.** Provenance asks *has a human approved this work*; an epic can pass that test
+  cleanly — a person filed it, nothing blocks it, it can even carry `deps-checked` — and
+  still not be a pick-up-and-code task, because it is a container for sub-issues, not a
+  unit of work itself (*Epics*, below). A driver that cannot tell the two apart starts the
+  umbrella instead of its children.
 - **The only admission is a human act on the issue itself: removing the label.** A scheduler
   has no other door in — it cannot decide an `agent-filed` issue has "become" approved by
   reading its content, its age, or how many times it has been proposed. The label is the whole
@@ -842,6 +864,13 @@ Two rules already stated apply here with unusual force, because prose hides thei
   `🔒 Claimed — worktree … · branch … · host … · <timestamp>` on claim, `✅ Released` on
   release. The label answers *whether* an issue is taken; the comment answers *by what*,
   from any machine, with an audit trail unlabeling could never keep.
+  - **The same pattern names code-wrap's evidence comment** (Phase B2b, `ceremony:
+    standard` only): one invisible marker line, `<!-- colab:evidence sha=<trunk-sha> -->`,
+    prepended to otherwise-free prose. A stable first line as wire format, everything after
+    it human — deliberately not a structured evidence schema, which would invite padding
+    instead of honesty. **Degrade, never gate**: a comment missing the marker (an older
+    wrap, a hand-written one) still counts as evidence: no consumer may treat its absence as
+    "no evidence exists".
 - **Simultaneous claims break ties deterministically.** GitHub has no atomic check-and-set,
   so two racers can both claim within the same second. After claiming, re-read the issue:
   the earliest live claim comment (by GitHub's own `createdAt`) wins; the loser posts
@@ -853,6 +882,34 @@ Two rules already stated apply here with unusual force, because prose hides thei
 - For long-running work, comment on the Issue with progress. The Issue is the feature's
   external memory — anyone resuming should get full context from `gh issue view N` without
   re-reading the codebase.
+
+### Epics — a container is not a start candidate
+
+*Readiness* and *Provenance* both answer whether an issue is safe to pick up: is it
+unblocked, and did a human approve it. Neither answers a third question a scheduled
+driver (*Scheduled drivers*, above) or a batch triage needs answered before either of
+those: **is this issue a unit of work at all?** An epic — the parent issue that groups a
+body of child work — can sail through both existing gates: open, unclaimed, human-filed,
+even `deps-checked`, and still be nothing a session should ever branch on, because there
+is no code to write for "ship the whole redesign", only for its children.
+
+**The `epic` label marks exactly that: a container for sub-issues, informative, never a
+start candidate, never claimed as a unit of work.** Secondary signals corroborate it — an
+`epic(` title prefix, native sub-issue parenthood (`subIssuesSummary.total > 0`) — but the
+label is the one an unattended tool can filter on without inferring anything from prose or
+counting children itself. Apply it when you file (or convert) an epic; a scheduler and a
+triage pass both exclude it from what they start, the same way they exclude `agent-filed`
+work, and for a related but distinct reason: provenance asks *did a human approve this*,
+this asks *is it shaped like a task at all*.
+
+**This is why `epic` lives in the convention label set ([§9](#9-adopting-this)) and
+`tracking` (below) does not.** The bar for that set is "an unattended driver's decision
+depends on it" — the same bar `in-progress`, `deps-checked` and `agent-filed` each meet.
+The scheduled-drivers model (*Scheduled drivers*, above) needs to exclude epics from what
+it starts; nothing unattended yet reads `tracking`, so it stays repo-local and opt-in.
+An epic still gets closed and referenced exactly as any other issue does once its
+children finish — this label changes nothing about *that*; it only keeps a driver from
+mistaking the map for the territory.
 
 ### Tracking issues — claimed but referenced, not closed
 
@@ -1076,7 +1133,8 @@ Stamps track *file* drift, but the convention **labels** ([§9](#9-adopting-this
 drift the same way and leave no file to stamp. A repo that adopted before a label entered
 the set never gains it on its own, and the check that label powers then silently cannot
 fire — the readiness column that never fills, the provenance that reads every issue as
-human-filed. So the label set is reconciled on the same loop:
+human-filed, a scheduled driver that cannot tell an epic apart from codeable work. So the
+label set is reconciled on the same loop:
 
 - **The audit reports the gap.** An adopted repo (one with a `project.yml`) missing any
   convention label is a finding — provided the audit can read the label set at all. Labels
@@ -1109,13 +1167,14 @@ here.
    production exists, not whether shipping is automated ([§2](#2-tiers)).
 2. **Write `.github/project.yml`** ([§3](#3-githubprojectyml--the-marker)).
 3. **Create the labels — the whole set, not a subset.** They will not exist yet. All
-   three are required, because each powers a check that silently *cannot fire* while its
+   four are required, because each powers a check that silently *cannot fire* while its
    label is absent — and a check that never fires reads exactly like one that always
    passes:
    ```sh
    gh label create in-progress  --color FBCA04 --description "Claimed by an active session"  2>/dev/null || true
    gh label create deps-checked --color 0E8A16 --description "Dependencies verified — no open blocker"  2>/dev/null || true
    gh label create agent-filed  --color C5DEF5 --description "Filed by an agent on its own initiative — not human-approved"  2>/dev/null || true
+   gh label create epic         --color 3E4B9E --description "Container for sub-issues — informative, never a start candidate, never claimed as a unit of work"  2>/dev/null || true
    ```
    The `|| true` makes this **idempotent** — partial adoption is the normal case, so
    re-running must be safe. What each absence costs:
@@ -1128,6 +1187,10 @@ here.
    - **`agent-filed`** must exist **before** any agent files an issue — absence means *a
      human filed this*, so a repo lacking it reports every agent-filed issue as
      human-approved ([§5](#5-claiming-work--how-to-say-im-on-this)).
+   - **`epic`** must exist before a scheduled driver (§5, *Scheduled drivers*) can tell a
+     tracking/umbrella record apart from codeable work — absent, an epic that carries
+     `deps-checked` and no claim passes every readiness gate and reads as a normal
+     start candidate to an unattended tool ([§5](#5-claiming-work--how-to-say-im-on-this)).
 
    This full set is provisioned again on every sync, not only at adoption: a repo that
    adopted at an older handbook version — before a label entered the set — never
@@ -1260,6 +1323,7 @@ was invisible because nothing looked wrong — CI was green the whole time.
 # starting work
 gh issue list --label in-progress                 # what's taken
 gh issue list --label agent-filed                 # filed by an agent — no human approved it yet
+gh issue list --label epic                        # a container for sub-issues — never a start candidate
 gh issue list --label group:<key>                 # must share one branch — start them together
 gh issue edit N --add-assignee @me --add-label in-progress
 git checkout -b feat/<slug>-N origin/<trunk>      # trunk = main (B) or dev (A)

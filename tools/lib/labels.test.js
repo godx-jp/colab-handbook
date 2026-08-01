@@ -20,8 +20,8 @@ const {
   READINESS_LABEL, readinessLabelArgs, readinessMissingLabelHint,
 } = require('./labels.js');
 
-test('the convention set is exactly the three labels §9 provisions, in canonical order', () => {
-  assert.deepStrictEqual(conventionLabelNames(), ['in-progress', 'deps-checked', 'agent-filed']);
+test('the convention set is exactly the four labels §9 provisions, in canonical order', () => {
+  assert.deepStrictEqual(conventionLabelNames(), ['in-progress', 'deps-checked', 'agent-filed', 'epic']);
   // Each carries what a provisioner needs — a name, a color, a description — so the audit
   // and `gh label create` cannot disagree about how the label is meant to look.
   for (const l of CONVENTION_LABELS) {
@@ -31,23 +31,27 @@ test('the convention set is exactly the three labels §9 provisions, in canonica
 });
 
 test('a repo with every label is not flagged', () => {
-  assert.deepStrictEqual(missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'bug']), []);
+  assert.deepStrictEqual(missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'bug']), []);
 });
 
 test('the readiness label absent is reported — the exact gap that silently un-fills the column', () => {
-  assert.deepStrictEqual(missingConventionLabels(['in-progress', 'bug']), ['deps-checked', 'agent-filed']);
+  assert.deepStrictEqual(missingConventionLabels(['in-progress', 'bug']), ['deps-checked', 'agent-filed', 'epic']);
 });
 
-test('a repo with the claim label only is missing the other two', () => {
-  assert.deepStrictEqual(missingConventionLabels(['in-progress']), ['deps-checked', 'agent-filed']);
+test('a repo with the claim label only is missing the other three', () => {
+  assert.deepStrictEqual(missingConventionLabels(['in-progress']), ['deps-checked', 'agent-filed', 'epic']);
 });
 
 test('missing preserves canonical order regardless of the input order', () => {
-  assert.deepStrictEqual(missingConventionLabels(['agent-filed']), ['in-progress', 'deps-checked']);
+  assert.deepStrictEqual(missingConventionLabels(['epic', 'agent-filed']), ['in-progress', 'deps-checked']);
+});
+
+test('a repo missing only epic (adopted before #78) is flagged for exactly that gap', () => {
+  assert.deepStrictEqual(missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed']), ['epic']);
 });
 
 test('empty / null / undefined input reports the whole set (a bare repo, or unread labels)', () => {
-  const all = ['in-progress', 'deps-checked', 'agent-filed'];
+  const all = ['in-progress', 'deps-checked', 'agent-filed', 'epic'];
   assert.deepStrictEqual(missingConventionLabels([]), all);
   assert.deepStrictEqual(missingConventionLabels(null), all);
   assert.deepStrictEqual(missingConventionLabels(undefined), all);
@@ -69,7 +73,7 @@ test('readinessLabelArgs maps set⇒add and clear⇒remove against the one marke
 
 test('label OBJECTS count as present, not as always-missing', () => {
   // gh can return {name,...}; the diff must read the name, or it flags labels that exist.
-  const present = [{ name: 'in-progress' }, { name: 'deps-checked' }, { name: 'agent-filed' }];
+  const present = [{ name: 'in-progress' }, { name: 'deps-checked' }, { name: 'agent-filed' }, { name: 'epic' }];
   assert.deepStrictEqual(missingConventionLabels(present), []);
 });
 

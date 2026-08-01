@@ -316,6 +316,51 @@ that deploys remain human acts on every repo, always — the field cannot expres
 otherwise. The grant lives in the repo file (not the caller's flags) so autonomy is
 a property of the repo's risk profile, reviewed in a commit like any other change.
 
+### `ceremony` — optional
+
+```yaml
+ceremony: standard   # default; omission = standard — no existing repo changes behavior
+ceremony: light      # beta/testing repos: memory ceremony scales down
+```
+
+How much record-keeping DEPTH a session owes this repo — a separate axis from `tier`,
+which counts gates to production ([CONVENTIONS.md §2](CONVENTIONS.md#2-tiers)). Tier
+answers "how many gates stand between a merge and users"; `ceremony` answers "will
+anyone ever comb through this repo's audit trail" — two Tier B repos can be a heavy,
+long-lived codebase and a disposable beta playground, and only this field lets the
+second one stop paying full record-keeping cost for a record nobody will read.
+Descriptive, not evaluative — like `deploy:`. It never says the code matters less; it
+says the repo has opted out of audit-trail depth.
+
+**What `light` relaxes:**
+
+1. **Evidence & narration** — Phase B evidence comments are skipped; the squash's
+   `Closes #N` suffices. Issue narration distills real gotchas only, no progress
+   commentary.
+2. **Readiness ceremony** — triage orders and groups but skips the `deps-checked`
+   labeling pass. Coherent because `light` repos cannot be driven unattended (rule 2
+   below), so nothing consumes the column; an empty readiness column that nothing
+   reads is pure cost.
+3. **Audit severity** — memory-ceremony gaps (empty readiness column, missing
+   evidence, stamp drift on non-CI templates) downgrade to advisories.
+
+**What `light` may never relax:** claim before start · branch-off-trunk & worktree
+discipline · reserved ports · main checkout at rest on trunk · squash + `Closes #N` ·
+Conventional Commits · CI secret scan + build. A beta repo shares the same machine,
+session fleet, port space, and claim state as the most serious repo.
+
+**Two coherence rules, audited:**
+
+1. **`light` requires `production: null`.** A live repo cannot be light — someone's
+   users are behind those merges. `light` + a production URL is a finding, same class
+   as `tier: A` + `push-main`.
+2. **`light` is incompatible with `autonomy: auto-trunk`.** An unattended merge with
+   no evidence trail is a closure nobody watched and nobody can audit. A beta repo
+   that wants unattended ships accepts `standard` — that is the trade.
+
+Known drift risk: a repo marked `light` "for now" that grows real users. Rule 1 is the
+backstop — the moment `production:` gains a URL the audit flags the pair.
+
 ### `promotion` — optional
 
 ```yaml
@@ -457,6 +502,9 @@ stack: laravel-inertia
 | every `integration` entry exists, and is not `trunk` / `main` / the word `trunk` | a dev-side line acquiring a path to production |
 | declared `releaseBranch` exists, and is not `trunk` / `main` / the word `trunk` | `colab doctor` misreading a live deploy target as a spent branch and advising its deletion |
 | toolchain pin vs manifest agreement | building on one version, deploying on another |
+| `ceremony` ∈ {`standard`, `light`} when set | a misspelled value silently read as `standard` |
+| `ceremony: light` → `production: null` | a live repo opting out of its own audit trail |
+| `ceremony: light` → not `autonomy: auto-trunk` | an unattended merge with no evidence trail nobody can audit |
 
 `push-main` on a Tier A repo **is a finding** — a mismatch between the
 mechanism and the tier's contract, not a judgement on the mechanism, and the
