@@ -56,14 +56,25 @@ that one ever disagree, `CONVENTIONS.md` wins — and report the discrepancy.
 
 ## Merging to trunk
 
-1. **Check CI is alive and green first**: `gh run list --branch <trunk> -L 1`.
-   A "failure" that never started (billing, runner outage) still means stop —
-   we once merged for 12 hours into repos whose CI was silently dead.
+1. **Check CI is alive and green first — by commit, not by recency.** A "failure"
+   that never started (billing, runner outage) still means stop; we once merged
+   for 12 hours into repos whose CI was silently dead. But `gh run list --branch
+   <trunk> -L 1` answers the wrong question: under `cancel-in-progress`, a
+   cancelled straggler can outrank a passing run on the *same* commit and
+   deadlock every ship. Ask whether a successful run exists for the branch's
+   current head sha — `colab ship` does ([§4](CONVENTIONS.md#4-branches-and-commits)).
 2. Squash-merge, one commit per unit of work.
 3. **The merge message must say `Closes #N`** — one per issue in the group.
    A bare `(#N)` does not auto-close, and we measured 26/30 issues sitting
    open with their code long since merged because of exactly that.
-4. Release your claim: `gh issue edit <N> --remove-label in-progress`.
+   **Each `Closes #N` must be corroborated by git** — the branch name's trailing
+   number group, or a `#N` in a commit body. The claim registry alone is not
+   enough: a co-tenant session's mid-flight claim reads identically to yours, and
+   we measured one that would have closed an issue whose work had just started.
+4. **A deliverable with no diff still has to close.** Zero commits is a real
+   outcome (a decision, an investigation, an artifact outside the repo) — run
+   `colab ship`, which switches to evidence-close instead of refusing.
+5. Release your claim: `gh issue edit <N> --remove-label in-progress`.
    Do this even if you didn't finish — a stale claim silently blocks others.
 
 ## Releases — Tiers A and C, and not yours to perform
