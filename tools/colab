@@ -24,6 +24,7 @@ const journal = require('./lib/journal');
 const labels = require('./lib/labels');
 const records = require('./lib/records');
 const teardown = require('./lib/teardown');
+const checklist = require('./lib/checklist');
 const {
   HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
   parseArgs, table, shortRepo,
@@ -3373,6 +3374,8 @@ Options:
 
                         { "ok": bool, "dry": true, "repo": "...", "branch": "...", "target": "...",
                           "worktree": "..." | null, "issues": [N, ...],
+                          "closeIssues": [N, ...], "refsIssues": [N, ...],
+                          "checklistFindings": [ { "issue": N, "unchecked": n, "total": n, "reason": "..." } ],
                           "checks": [ { "name": "...", "ok": bool, "class": "..." | null, "detail": "..." } ] }
 
                       \`checks\` has one entry per precondition — branch resolves, not an integration
@@ -3387,6 +3390,14 @@ Options:
                                         trunk checkout, a genuine merge conflict — retrying changes
                                         nothing until a person acts.
                       Never add a third value without updating every consumer of this field.
+
+                      \`closeIssues\`/\`refsIssues\` (#74) are \`issues\` split by what a real ship would
+                      write: Closes vs Refs, unioning --refs, the "tracking" label, and the close gate.
+                      \`checklistFindings\` lists only the issues the CLOSE GATE (not --refs, not the
+                      label) moved from close to ref — an unticked \`## Plan\` checklist with no
+                      declared \`Remainder: #M\`. Deliberately NOT folded into \`checks\`/\`ok\`: a
+                      checklist finding does not block this ship, it only redirects that one issue's
+                      trailer, so it must never read as a precondition failure to an unattended caller.
 `;
 
 /**
@@ -3479,6 +3490,55 @@ const SELF_CLEARING = 'self-clearing'; // CI still running, a transient gh/previ
 const HUMAN_GATED = 'human-gated';     // autonomy absent, a real failure, a decision only a person makes
 
 /**
+ * Splits a branch's claimed issues into CLOSE (`Closes #N`) and REF (`Refs #N`, kept open) sets,
+ * unioning THREE independent reasons an issue must stay open — #48's original two, plus #74's
+ * close gate:
+ *   - `--refs N[,M]`         explicit, per-ship
+ *   - the `tracking` label    declarative, durable across every session touching the domain
+ *   - an unticked `## Plan` checklist with no declared `Remainder: #M` (tools/lib/checklist.js) —
+ *     the issue's OWN recorded scope says it is not done. This is the one #74 exists for: the
+ *     incident was an issue closed by squash-merge with a third of its scope unimplemented, and
+ *     the scope was prose so nothing could have caught it mechanically. A checklist can be.
+ *
+ * `gh` unusable (no auth / no origin) degrades this to `--refs` only, same "degrade, never gate"
+ * posture the tracking-label check already had — nothing can be read, so nothing new is asserted,
+ * rather than refusing to ship over a read this function never attempted.
+ *
+ * Returns `gateFindings`: one entry per issue the CHECKLIST gate — not the flag, not the label —
+ * moved from close to ref. Callers report these distinctly: unlike an explicit `--refs` or a
+ * declared tracking issue, this one is a surprise the operator did not ask for, and the whole
+ * point of #74 is that it must be LOUD.
+ */
+function resolveCloseRefsSplit(repoAbs, gh, issues, refsFromFlag) {
+  const refsSet = new Set(issues.filter((n) => refsFromFlag.has(n)));
+  const gateFindings = [];
+  if (gh) {
+    for (const num of issues) {
+      if (refsSet.has(num)) continue;
+      const info = git.ghIssueView(repoAbs, num, ['labels']);
+      const names = info && Array.isArray(info.labels) ? info.labels.map((l) => l.name) : [];
+      if (names.includes(labels.TRACKING_LABEL)) refsSet.add(num);
+    }
+    // #74: the close gate. Only asked of issues that would otherwise CLOSE — one already kept
+    // open by --refs or the tracking label was never going to close anyway, so gating it a second
+    // way is pure noise.
+    for (const num of issues) {
+      if (refsSet.has(num)) continue;
+      const info = git.ghIssueView(repoAbs, num, ['body', 'comments']);
+      if (!info) continue; // read failed — degrade, never gate on a read we could not attempt
+      const gate = checklist.closeGate(info.body, info.comments);
+      if (!gate.ok) {
+        refsSet.add(num);
+        gateFindings.push({ issue: num, unchecked: gate.unchecked, total: gate.total, reason: gate.reason });
+      }
+    }
+  }
+  const closeIssues = issues.filter((n) => !refsSet.has(n));
+  const refsIssues = issues.filter((n) => refsSet.has(n));
+  return { closeIssues, refsIssues, refsSet, gateFindings };
+}
+
+/**
  * CI precondition for `ship --dry --json`, classified into the closed vocabulary above. Mirrors the
  * prose path's rule exactly (same fallback: an integration line with NO runs at all borrows trunk's
  * verdict, advisory) so the two never disagree about whether CI is green — only about how the
@@ -3567,10 +3627,17 @@ function cmdShipDryJson(opts) {
 
   const checks = [];
   let target = null;
+  // #74: the close-gate split (closeIssues/refsIssues/checklistFindings) is reported ALONGSIDE
+  // `checks`, never folded into it — a checklist-gated issue does not block this ship (it only
+  // redirects that one issue's Closes to a Refs), so it must not flip `ok` the way a real
+  // precondition failure does. `checks`' documented contract (HELP_SHIP) is "one entry per
+  // PRECONDITION, ok:false only on something that blocks" — additive new top-level fields keep
+  // that contract intact for every existing consumer of `ok`/`checks`.
+  let closeIssues = sess.issues, refsIssues = [], checklistFindings = [];
   const emit = (ok) => {
     print(JSON.stringify({
       ok, dry: true, repo: shortRepo(repoAbs), branch: sess.branch, worktree: sess.name || null,
-      target, issues: sess.issues, checks,
+      target, issues: sess.issues, closeIssues, refsIssues, checklistFindings, checks,
     }, null, 2));
     return ok ? 0 : 1;
   };
@@ -3611,6 +3678,13 @@ function cmdShipDryJson(opts) {
   // ---- (b) the rest of the preconditions, same rules as the prose path ----
   const gh = isGhUsable(repoAbs);
   checks.push(shipCiCheck(repoAbs, gh, target, trunk));
+
+  // #74: same close-gate split the prose path runs, reported via the additive fields above.
+  const refsFromFlagJson = new Set(
+    String(opts.refs || '').split(',').map((s) => s.trim().replace(/^#/, '')).filter(Boolean).map(Number),
+  );
+  const split = resolveCloseRefsSplit(repoAbs, gh, sess.issues, refsFromFlagJson);
+  closeIssues = split.closeIssues; refsIssues = split.refsIssues; checklistFindings = split.gateFindings;
 
   const migrations = newMigrations(repoAbs, target, sess.branch);
   const migOk = migrations.length === 0;
@@ -3708,29 +3782,24 @@ function cmdShip(argv) {
   const gh = isGhUsable(repoAbs);
   const checks = [];
 
-  // Which claimed issues are REFERENCED (Refs #N), not closed (#48). A long-lived memory/tracking
-  // issue is claimed to signal work in its domain but not completed by the branch — closing it would
-  // bury its accumulated knowledge and still-open checklist. Two sources, unioned:
-  //   • --refs N[,M]   explicit, per-ship
-  //   • TRACKING_LABEL on the issue   declarative, durable across every session touching the domain
-  // The claim is still released unconditionally (B3, unchanged) — only Closes→Refs changes (#48).
+  // Which claimed issues are REFERENCED (Refs #N), not closed — three sources unioned by
+  // resolveCloseRefsSplit (#48, #74): --refs, the tracking label, and #74's close gate (an
+  // unticked ## Plan checklist with no declared Remainder: #M). The claim is still released
+  // unconditionally either way (B3, unchanged) — only Closes→Refs changes.
   const refsFromFlag = new Set(
     String(opts.refs || '').split(',').map((s) => s.trim().replace(/^#/, '')).filter(Boolean).map(Number),
   );
   for (const n of refsFromFlag) {
     if (!sess.issues.includes(n)) warn(`--refs #${n} is not a claimed issue on this branch — ignored`);
   }
-  const refsSet = new Set(sess.issues.filter((n) => refsFromFlag.has(n)));
-  if (gh) {
-    for (const num of sess.issues) {
-      if (refsSet.has(num)) continue;
-      const info = git.ghIssueView(repoAbs, num, ['labels']);
-      const names = info && Array.isArray(info.labels) ? info.labels.map((l) => l.name) : [];
-      if (names.includes(labels.TRACKING_LABEL)) refsSet.add(num);
-    }
+  const { closeIssues, refsIssues, refsSet, gateFindings } = resolveCloseRefsSplit(repoAbs, gh, sess.issues, refsFromFlag);
+  // #74: a checklist-gated issue is a SURPRISE the operator did not ask for (unlike --refs or a
+  // tracking label, both deliberate) — call it out on its own, loud, not folded silently into the
+  // "issues:" line's "(ref — kept open)" annotation below.
+  for (const f of gateFindings) {
+    warn(`#${f.issue}: ${f.reason} — Closes withheld, Refs #${f.issue} written instead (does not block this ship).`);
+    warn(`  Tick what shipped with evidence, file \`Remainder: #M\` for the rest, then re-run to close it.`);
   }
-  const closeIssues = sess.issues.filter((n) => !refsSet.has(n));
-  const refsIssues = sess.issues.filter((n) => refsSet.has(n));
   // CI alive + green on the TARGET.
   //
   // On a declared line with NO runs at all, fall back to trunk's and say so. An ungated line is a

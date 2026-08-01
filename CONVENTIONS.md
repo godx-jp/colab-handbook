@@ -397,6 +397,21 @@ these prefixes. A commit with no prefix is invisible in release notes.
   not a bare `(#N)` reference. GitHub auto-closes on the keyword and ignores the reference —
   we measured a repo where 26 of 30 issues sat open with their code long since merged,
   purely because merges said `(#22)` instead of `Closes #22`.
+- **`Closes #N` requires the issue's own scope to be fully accounted for — a mechanical
+  gate now, not an honour system (#74).** An issue's `## Plan` section is a real GitHub
+  checklist — one `- [ ]` line per deliverable, **load-bearing, not decorative.** A `##
+  Plan` written as prose, with no checkbox, cannot be verified mechanically; that shape is
+  itself a finding, reported but not blocking (it cannot retroactively bind an issue opened
+  before this convention). `colab ship` parses the checklist before composing the squash
+  body (`tools/lib/checklist.js`): any claimed issue with an unticked box and no declared
+  `Remainder: #M` gets `Refs #N` instead of `Closes #N` — it stays open, and the redirect
+  is reported, never silent. Tick what shipped (with evidence, one verdict per box — B2b of
+  `code-wrap`), file `Remainder: #M` for the boxes that did not ship, and the next ship
+  closes it clean. Doing the merge by hand (no `colab ship`) runs the identical check by
+  reading the same two fields (`gh issue view N --json body,comments`) before writing the
+  commit — `code-wrap` B1b spells out the command. Motivating incident: an issue was closed
+  by squash-merge with a third of its three-section scope unimplemented; the sections were
+  prose, so nothing could have caught it before this rule existed.
 - **Before merging to trunk, check that trunk's last CI run is green — and that it ran at
   all.** `gh run list --branch <trunk> -L 1` costs one command. Branch protection cannot do
   this for us; the habit must. We once merged for 12 straight hours into repos whose CI was
