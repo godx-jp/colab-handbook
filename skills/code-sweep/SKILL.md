@@ -112,18 +112,29 @@ common git dir yields the main checkout from anywhere in the repo.
 
 ### 1.2 `unrecorded` rows are candidates too — never drop them for lack of a bucket
 
-**Before #67, this enumeration was `colab worktrees`'s bare state.json read — so a directory
-on disk with no record (hand-created, or a husk left by an interrupted `worktree rm`, #62)
-was invisible here, and the §3 completeness check couldn't notice: it compares buckets
-derived from the same list that omitted the row.** `colab worktrees` now reconciles against
-`git worktree list` itself, so `unrecorded` entries surface with the rest — treat every one
-of them as a candidate to sort in §3, exactly like a recorded worktree, never as noise to
-skip because it has no ISSUES column.
+**Before #67, this enumeration was `colab worktrees`'s bare state.json read — so a husk
+left by an interrupted `worktree rm` (#62), which `git worktree list` still reports, was
+invisible here, and the §3 completeness check couldn't notice: it compares buckets derived
+from the same list that omitted the row.** `colab worktrees` now reconciles against
+`git worktree list` itself, so those `unrecorded` entries surface with the rest — treat
+every one of them as a candidate to sort in §3, exactly like a recorded worktree, never as
+noise to skip because it has no ISSUES column.
 
 A row here has no claim, no ports, and — the case that motivated #67 — sometimes no
 claimable issue *in this repo at all* (a branch whose issue numbers belong to a different
 repo's tracker). That is a real, distinct shape, not a defect in the filter: see §3's
 `unrecorded` bucket for what to do with it.
+
+**What this does NOT cover: a hand-created directory `git worktree list` never linked at
+all.** `unrecorded` is a reconciliation between two lists that both start from
+`git worktree list` — colab's state.json against git's own — so a directory with no `.git`
+entry is outside both sides of the comparison and cannot surface here, no matter how
+worktree-shaped it looks (a `CLAUDE.md`, a `.github/project.yml`, a full copy of tracked
+files). #97 found exactly this shape — `.claude/worktrees/<stale-name>/`, 1 MB, no `.git` —
+by reading `git status --untracked-files=all` for an unrelated reason, not by any step this
+skill prescribes. A detector for that shape is tracked separately (see #97's follow-up);
+until it lands, this enumeration's coverage is real but narrower than "every worktree on
+disk."
 
 ### 1.1 Scoped mode — sweep a subset, and say that you did
 
@@ -402,12 +413,14 @@ still blocked: trunk CI dead (billing), since 2026-07-21T11:40Z
 
 ## Verify complete
 
-- Every worktree in this repo is in exactly one bucket — none silently skipped, **including
-  `unrecorded` rows** (§1.2): `colab worktrees`'s own git-vs-record reconciliation is what makes
-  this checkable at all (#67 — before it, an unrecorded worktree was missing from both the
-  enumeration and the buckets, so this line could never actually fail). In a scoped run, every
-  worktree is either in a bucket or named as out of scope; "not selected" is a stated outcome,
-  never an omission.
+- Every worktree **`git worktree list` knows about** is in exactly one bucket — none
+  silently skipped, **including `unrecorded` rows** (§1.2): `colab worktrees`'s own
+  git-vs-record reconciliation is what makes this checkable at all (#67 — before it, an
+  unrecorded worktree was missing from both the enumeration and the buckets, so this line
+  could never actually fail). In a scoped run, every worktree is either in a bucket or
+  named as out of scope; "not selected" is a stated outcome, never an omission. **This does
+  not cover a directory `git` never linked at all** (#97) — that shape needs its own
+  detector, tracked separately.
 - A scoped run reported `N of M`, restricted §5 to the selection, and did not run
   `doctor --prune`.
 - A selector that matched nothing said so — not "swept 0".

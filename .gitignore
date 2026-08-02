@@ -32,3 +32,12 @@ id_rsa*
 # Repo-local plan files a session writes at .claude/plans/issue-<N>.md — disposable,
 # dies at code-ship teardown, never committed.
 .claude/plans/
+
+# ─── Worktrees / local Claude settings (#97) ───
+# A directory here is a full untracked copy of the repo — colab's worktreeSubdir,
+# historical (.claude/worktrees/) and default (.worktrees/, tools/colab worktreeSubdir()).
+# Un-ignored, `git add -A` would commit a stale duplicate of the whole repo into itself.
+.claude/worktrees/
+.worktrees/
+# Claude Code's local-override file — machine-specific absolute paths, not for VCS.
+.claude/settings.local.json
