@@ -24,6 +24,7 @@ const journal = require('./lib/journal');
 const labels = require('./lib/labels');
 const records = require('./lib/records');
 const teardown = require('./lib/teardown');
+const orphanLib = require('./lib/orphan-worktree');
 const solo = require('./lib/solo');
 const checklist = require('./lib/checklist');
 const groupLabels = require('./lib/group-labels');
@@ -1844,10 +1845,7 @@ function cmdWorktree(argv) {
  * an arbitrary filesystem for stray `.git` files is a different, much more expensive command.
  */
 function unrecordedWorktrees(st) {
-  const repos = new Set();
-  for (const wt of Object.values(st.worktrees)) if (wt.repo) repos.add(wt.repo);
-  const cur = git.mainRepoRoot(process.cwd());
-  if (cur) repos.add(cur);
+  const repos = knownReposFor(st);
 
   const recordedPaths = new Set(
     Object.values(st.worktrees).map((w) => w.path && path.resolve(w.path)).filter(Boolean),
@@ -1867,14 +1865,68 @@ function unrecordedWorktrees(st) {
   return out;
 }
 
+/**
+ * The repo set both `unrecordedWorktrees()` and `orphanWorktreeDirs()` scope their scan to: every
+ * repo colab already has *some* record for, plus the current repo if run from inside one. Factored
+ * out so the two "which repos do we look at" lists cannot drift apart from each other.
+ */
+function knownReposFor(st) {
+  const repos = new Set();
+  for (const wt of Object.values(st.worktrees)) if (wt.repo) repos.add(wt.repo);
+  const cur = git.mainRepoRoot(process.cwd());
+  if (cur) repos.add(cur);
+  return repos;
+}
+
+/**
+ * Directories that LOOK like a worktree (carry `CLAUDE.md` AND `.github/project.yml` — a full
+ * tracked-file copy of an adopting repo) but that git never linked at all: no `.git` file or
+ * directory inside them, so they never appear in `git worktree list` and are therefore invisible
+ * to `unrecordedWorktrees()` above, whose reconciliation is git-ground-truth-first by design and
+ * structurally cannot see a directory git never knew about in the first place (#99, following
+ * #97's discovery of the shape).
+ *
+ * Scoped to the SAME known-repo set `unrecordedWorktrees()` uses (see `knownReposFor`), and within
+ * each repo, only to `orphanLib.worktreeSubdirCandidates(config)` paths — never a filesystem-wide
+ * scan. `classifyOrphanCandidate` (tools/lib/orphan-worktree.js) is the pure verdict; this function
+ * only resolves the fs booleans it needs and walks the bounded path list.
+ */
+function orphanWorktreeDirs(st, config) {
+  const repos = knownReposFor(st);
+  const out = [];
+  for (const repo of repos) {
+    if (!repo || !fs.existsSync(repo) || !git.repoRoot(repo)) continue;
+    for (const sub of orphanLib.worktreeSubdirCandidates(config)) {
+      const base = path.join(repo, sub);
+      if (!fs.existsSync(base)) continue;
+      let entries;
+      try { entries = fs.readdirSync(base); } catch { continue; }
+      for (const name of entries) {
+        const cand = path.join(base, name);
+        let isDir;
+        try { isDir = fs.statSync(cand).isDirectory(); } catch { continue; }
+        if (!isDir) continue;
+        const hasGitEntry = fs.existsSync(path.join(cand, '.git'));
+        const hasClaudeMd = fs.existsSync(path.join(cand, 'CLAUDE.md'));
+        const hasProjectYml = fs.existsSync(path.join(cand, '.github/project.yml'));
+        const verdict = orphanLib.classifyOrphanCandidate({ hasClaudeMd, hasProjectYml, hasGitEntry });
+        if (verdict === 'orphan') out.push({ repo, path: path.resolve(cand) });
+      }
+    }
+  }
+  return out;
+}
+
 function cmdWorktrees(argv) {
   const opts = parseArgs(argv, { flags: { '--json': 'json', '-h': 'help', '--help': 'help' } });
   if (opts.help) return print(HELP_WORKTREE);
   const st = state.loadState();
+  const config = state.loadConfig();
   const unrecorded = unrecordedWorktrees(st);
-  if (opts.json) { print(JSON.stringify({ worktrees: st.worktrees, unrecorded }, null, 2)); return 0; }
+  const orphaned = orphanWorktreeDirs(st, config);
+  if (opts.json) { print(JSON.stringify({ worktrees: st.worktrees, unrecorded, orphaned }, null, 2)); return 0; }
   const wts = Object.values(st.worktrees);
-  if (wts.length === 0 && unrecorded.length === 0) { print('No worktrees.'); return 0; }
+  if (wts.length === 0 && unrecorded.length === 0 && orphaned.length === 0) { print('No worktrees.'); return 0; }
   if (wts.length) {
     const rows = wts.map((wt) => {
       const claims = Object.values(st.claims).filter((c) => c.worktree === wt.name).map((c) => c.issue).join(' ') || '-';
@@ -1911,6 +1963,15 @@ function cmdWorktrees(argv) {
     print('  auto-actioned. Investigate ownership by hand, then `git worktree remove` (+ `git branch -D`');
     print('  if landed) once you know it is spent. See CONVENTIONS.md / code-sweep SKILL.md §3 for the');
     print('  bucket this belongs in.');
+  }
+  if (orphaned.length) {
+    print('');
+    print(`⚠ ${orphaned.length} director${orphaned.length === 1 ? 'y' : 'ies'} look${orphaned.length === 1 ? 's' : ''} like a worktree (CLAUDE.md + .github/project.yml) but git never linked — no .git inside (#99):`);
+    for (const o of orphaned) print(`  ${shortRepo(o.repo)}  ${o.path}`);
+    print('  Invisible to the "unrecorded" section above — git worktree list never knew about these');
+    print('  either, so there is nothing on git\'s side to reconcile against. Verify it isn\'t a worktree');
+    print('  still mid-creation, then either finish linking it (`git worktree add` against it) or');
+    print('  remove it by hand — this check only reports, it never prunes.');
   }
   return 0;
 }
