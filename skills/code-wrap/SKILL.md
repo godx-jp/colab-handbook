@@ -96,11 +96,20 @@ gh issue create --title "<type>: <thing>" --label agent-filed --body-file <tmpfi
 ```
 
 End the body with the origin, naming the issue you were wrapping when you found it —
-that is the breadcrumb back to the context:
+that is the breadcrumb back to the context — and, on the next line, the ask class
+(`CONVENTIONS.md` §5, *Ask*) so a decision surface never has to re-derive it from
+prose:
 
 ```
 Filed-by: agent (during code-wrap of #$N, session <name>)
+Ask: backlog
 ```
+
+Use `permission` for a request to touch machine/prod state, `ruling` for a question
+that resolves to a human judgment and never to a diff, `deferred(<trigger>)` when
+you have already decided no action is needed until something else happens, and
+`backlog` — the default a missing line reads as anyway — for an ordinary work
+proposal.
 
 The distinction is intent, not keyboard. **If the human asked for the follow-up
 during this session, it is theirs** — `Filed-by: boss (via session <name>)`, no

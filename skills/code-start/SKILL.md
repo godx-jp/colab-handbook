@@ -174,7 +174,10 @@ gh issue view $N --comments                      # prior-session log
   typed** (`CONVENTIONS.md` §5, *Provenance*). On this path you are almost always
   transcribing work a person just asked for, so it is `Filed-by: boss` and **no
   label**. If instead you are filing something *you* noticed and nobody approved,
-  say `agent` and add the label:
+  say `agent` and add the label — and end the body with an `Ask:` line too
+  (`CONVENTIONS.md` §5, *Ask*): `permission | backlog | ruling | deferred(<trigger>)`,
+  so a reader never has to guess your ask class back out of the prose. Absent
+  line reads as `backlog`, so add it explicitly whenever it is anything else:
   ```sh
   gh label create agent-filed --color C5DEF5 --description "Filed by an agent on its own initiative — not human-approved" 2>/dev/null || true
   gh issue create --title "…" --body-file <tmpfile> --label agent-filed

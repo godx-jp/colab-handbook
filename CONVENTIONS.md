@@ -828,6 +828,53 @@ default be *excluded, and started only when a person clicks* — which makes the
 approval. A tool cannot construct that gate from an issue's contents; only whoever filed
 it knows the answer, and only at filing time.
 
+#### Ask — the filer declares the ask class (#89)
+
+`agent-filed` says *a human did not decide this work should exist*; it does not say what
+kind of decision the issue is waiting on. Measured on a live 34-item approve queue
+(2026-08-01): the queue decomposed into six ask-classes with different verbs — a
+permission to touch prod state, a design or process ruling, a bug someone needs to accept,
+a work proposal, a self-deferred item waiting on a trigger, an epic — but a reader detected
+the lane heuristically, from labels and title phrasing ("needs an explicit OK", "needs an
+operator decision", "blocked until <trigger>"). The filer *knows* the class the moment it
+writes the issue; nothing downstream should have to guess it back out of prose.
+
+**So an `agent-filed` issue ends its body with one more machine-readable line, next to
+`Filed-by:`:**
+
+```
+Ask: permission | backlog | ruling | deferred(<trigger>)
+```
+
+- **`permission`** — asking to touch machine or production state (a cert, a deploy, a
+  config a human must authorize) before the agent proceeds.
+- **`backlog`** — a work proposal: code someone should accept and schedule, not a decision
+  in itself. This is also the class an absent line means (below) — most `agent-filed`
+  issues are exactly this, and the line only earns its keep on the other three.
+- **`ruling`** — a question that resolves to a human judgment, not a diff. *Never startable
+  as code* — the same class *Design ruling* and *Scheduled drivers* already treat as a
+  gate, generalized past the design-specific case that motivated `needs-ruling`.
+- **`deferred(<trigger>)`** — the filer has already decided no action is needed *now*; the
+  issue carries its own wake condition (`deferred(dep #91 lands)`) and demands no decision
+  today.
+- **Absent line means `backlog`.** Every `agent-filed` issue written before this convention
+  existed reads as the common case with no backfill required — the same compatibility
+  `Filed-by:`'s own default gives *Provenance*.
+- **Consumers.** A decision surface (an approve queue, a triage board) groups by this line
+  instead of re-deriving the lane from title text; *Scheduled drivers* (below) excludes
+  `ruling` and `permission` the same way it already excludes a live `needs-ruling` — a
+  human judgment or a permission grant is not a thing a driver infers its way past by
+  reading the body closely enough.
+- **Written at filing time, by whoever files.** Like `Filed-by:`, this is not something a
+  reader reconstructs after the fact — an issue that turns out to need a ruling only once a
+  session is already elbow-deep in it gets the line added then, not left absent because the
+  filer didn't know yet.
+
+This line only ever appears on `agent-filed` issues. A human filing an issue for a human
+audience does not need a machine-readable ask class — the whole apparatus above exists to
+let a tool tell an agent's request-for-permission apart from an agent's plain proposal
+without reading either one's prose.
+
 ### Design ruling — a human must approve the design first
 
 *Readiness* and *Provenance* each answer a different question about whether an issue may
@@ -1014,6 +1061,11 @@ rather than the one time a human clicks a button:
   has no other door in — it cannot decide an `agent-filed` issue has "become" approved by
   reading its content, its age, or how many times it has been proposed. The label is the whole
   answer; a scheduler that infers around it has reinvented the closed loop with extra steps.
+- **An `agent-filed` issue whose `Ask:` line reads `ruling` or `permission` is excluded from
+  what a scheduler starts, for the same reason `needs-ruling` is** (*Ask*, above): the
+  deliverable is a human judgment or a permission grant, not a diff, and no amount of reading
+  the body substitutes for the human act the line names. `backlog` and `deferred(<trigger>)`
+  remain ordinary `agent-filed` exclusions — governed by the bullet above, not by this one.
 
 **A scheduler starts work only by spawning ordinary sessions, and touches the tracker no other
 way.** Concretely: it may run `code-triage` to decide what is ready, then spawn a session that
