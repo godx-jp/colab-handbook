@@ -17,20 +17,22 @@ the **main checkout**, outside any worktree (`CONVENTIONS.md` §5, *Planning*).
 
 The coordinator that decided this issue is hard (`code-triage`, or your own judgement
 mid-session) is not the actor best placed to write the plan — it read the backlog, not the
-current tree. And the implementer executing the plan is not the actor best placed to write
-it either, if the fleet runs a cheaper model for execution lanes: the plan is exactly the
-thinking that should arrive pre-paid, not re-derived at the cheap tier. So this skill's job
-is narrow — gather the seed, spawn a stronger-model planning pass, write down what it
-returns — never to draft the plan itself at the calling session's own tier.
+current tree. And the implementer executing the plan may not be the actor best placed to
+write it either, on a fleet that tiers its models for cost: the plan is exactly the
+thinking that should arrive pre-paid, not re-derived at whatever tier is executing. So
+this skill's job is narrow — gather the seed, spawn a planning pass on the fleet's own
+stronger-tier agent (this repo's tooling stays model-agnostic; which agent/model that is
+is each fleet's own policy, not this skill's to name), write down what it returns —
+never to draft the plan itself at the calling session's own tier by default.
 
 ```
-Agent(subagent_type: "Plan", model: "opus", prompt: <seed, below>)
+Agent(subagent_type: <the fleet's planning agent>, prompt: <seed, below>)
 ```
 
-**No `Agent` tool available in this session?** Draft the plan yourself, at whatever tier
-you are running, and say so plainly in the file's frontmatter (`model: self, no
-subagent available`) — a plan that admits it skipped the escalation is honest; one that
-pretends is not.
+**No `Agent` tool available in this session, or no stronger-tier agent configured?**
+Draft the plan yourself, at whatever tier you are running, and say so plainly in the
+file's frontmatter (`model: self, no subagent available`) — a plan that admits it
+skipped the escalation is honest; one that pretends is not.
 
 ## 1. Build the seed
 
@@ -88,7 +90,7 @@ Append (or replace the rung-1 stub, keeping it as context) with frontmatter:
 issue: N
 rung: 2
 cause: flagged | self-escalated
-model: opus | self, no subagent available
+model: <planning agent/model actually used> | self, no subagent available
 drafted: <ISO timestamp>
 ---
 
