@@ -1,6 +1,8 @@
 ---
 name: code-start
-description: "Open a coding session the cheap way: learn the repo's tier/trunk from .github/project.yml, load the feature's context from its GitHub Issue instead of re-reading the codebase, claim the issue so parallel sessions don't collide, then branch off trunk in a worktree — the main checkout stays on trunk at rest, because dev servers, symlinks and LaunchAgents read that working tree and none of them know you branched it. Trigger phrases: 'start coding', 'start a session', 'open a coding session', 'begin work on issue', 'pick up issue', 'claim an issue', 'new worktree', 'set up a session'. Pairs with code-wrap at the end of the session."
+description: "Open a coding session the cheap way: learn the repo's tier/trunk from .github/project.yml, load the feature's context from its GitHub Issue instead of re-reading the codebase, claim the issue so parallel sessions don't collide, then branch off trunk in a worktree — the main checkout stays on trunk at rest, because dev servers, symlinks and LaunchAgents read that working tree and none of them know you branched it. Trigger phrases: 'start coding', 'start a session', 'open a coding session', 'begin work on issue', 'pick up issue', 'claim an issue', 'new worktree', 'set up a session'. Reads a `needs-plan` flag left by code-triage and
+runs code-plan when set, else writes a 3-5 line plan-lite stub. Pairs with code-wrap
+(then code-ship) at the end of the session."
 ---
 
 # code-start — open a session: read marker → load Issue → claim → branch
@@ -8,7 +10,7 @@ description: "Open a coding session the cheap way: learn the repo's tier/trunk f
 The goal is to spend as little context as possible. The Issue is the feature's
 external memory: one `gh issue view` reloads the plan and hard-won knowledge, so
 you never re-read the whole codebase. Claim before you start so two sessions
-never grab the same work. Close the session with **code-wrap**.
+never grab the same work. Close the session with **code-wrap**, then **code-ship**.
 
 Notation: `$N` = the feature's Issue number (keep it for the whole session).
 `<trunk>` = the branch sessions merge into (from `project.yml`, below).
@@ -230,6 +232,58 @@ that was maintained.
 If this session learns something that outlives the feature, plan to put it in the
 durable tier at wrap — not just in the session comment that closes with the issue.
 
+### Write the plan file — rung 0/1/2, before you claim (`CONVENTIONS.md` §5, *Planning*, #94)
+
+The Issue you just loaded is the coordinator's view; this file is yours to keep for the
+rest of the session. Convention: `.claude/plans/issue-$N.md`, in the **main checkout —
+outside any worktree you are about to create in step 4** (it has to exist before that
+worktree does, and survive after `code-ship` tears it down). Git-excluded, never
+committed.
+
+**Check for the flag first — you already have the data.** The `gh issue view $N` you ran
+above is a **direct fetch**, which is read-your-writes consistent; never re-check the flag
+through `gh issue list --search`, whose index can lag the triage run that just set it by
+minutes.
+
+```sh
+gh issue view $N --json labels -q '.labels[].name' | grep -qx needs-plan && echo FLAGGED
+```
+
+- **Flagged** → run [`code-plan`](../code-plan/SKILL.md) now, seeded with this Issue plus
+  the one-line reason `code-triage` left in a comment. It drafts the full rung-2 plan into
+  the same file. Do this before step 3's claim — the plan does not depend on holding the
+  issue, and a session that claims first and discovers mid-plan that the ask is genuinely
+  unclear has already told the world it is working on something it cannot yet describe.
+- **Not flagged** → write the rung-1 stub yourself, 3-5 lines, right now:
+  ```md
+  Intent: <one sentence>
+  Files: <expected to move>
+  Oracle: <what proves this done>
+  Stop: <condition that ends the session>
+  ```
+  **Cannot state the oracle line?** That is the ambiguity trigger firing, not a prompt to
+  guess. Stop, comment the question onto the Issue, and wait — do not drop to rung 0
+  and do not invent an oracle so the stub looks complete.
+- **Trivial/mechanical, oracle self-evident** → rung 0, nothing to write. Do not manufacture
+  a stub for the sake of having one.
+
+**Mid-session escalation.** A rung-1 stub that turns out to be sitting on a novel design,
+an ambiguous ask that only became visible once you were in the code, or a chain of
+dependent steps long enough that context is getting noisy — run `code-plan` then, append
+to the same file, and continue from the checkpoint. This is the identical mechanism the
+flagged path uses; the flag only decides which one runs *first*.
+
+**Resuming this session, or picking it back up after a context compaction?** Read the file
+before doing anything else — it is the anchor, cheaper than re-deriving intent from the
+Issue and the diff both. Append checkpoints here as you go; do not let a long session's
+intermediate conclusions live only in a context window that can be summarized out from
+under you.
+
+**Deviating from what you or `code-plan` wrote?** Note it in the file, briefly, with why —
+a plan is a sketch the code is allowed to overrule, not a contract, but the next reader
+(you, resumed, or `code-ship` grading the diff) needs the *why* written down, not just the
+divergence.
+
 ## 3. Check claims, then claim before you start
 
 **Source of truth is GitHub** (visible from any machine, to any person):
@@ -422,5 +476,7 @@ stop and move the work to a worktree.
   existing branch or worktree for this issue, say so and say what you did about it.
 - What you loaded from the Issue and your plan (checklist groups, file split if
   fanning out to sub-agents).
+- **The plan rung** — 0, 1, or 2 — and, if 2, whether it came from a `needs-plan` flag
+  or a mid-session escalation.
 - Remind: close the session with **code-wrap** to ship and distill knowledge back
-  onto the Issue.
+  onto the Issue, then **code-ship** to merge.

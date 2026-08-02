@@ -49,7 +49,7 @@ function fixture(projectYml) {
 // is the one item of the three the ceremony schema section names ("stamp drift on non-CI
 // templates") that maps onto a real, already-`fail`-producing audit mechanism — the other
 // two (an empty readiness column, a missing evidence comment) are process steps `code-triage`
-// / `code-wrap` own, not something `audit/audit.mjs` scans mechanically.
+// / `code-ship` own, not something `audit/audit.mjs` scans mechanically.
 
 function fakeHandbook() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-ceremony-hb-'));

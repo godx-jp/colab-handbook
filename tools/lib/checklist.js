@@ -8,7 +8,7 @@
  *
  * THE INCIDENT THIS FIXES. An issue was closed by squash-merge with one third of its three-section
  * scope unimplemented. The sections were PROSE, so nothing could parse them — B1b's Done/Partial/
- * Untouched classification (CONVENTIONS.md §4, code-wrap SKILL.md B1b) was honour-system, and the
+ * Untouched classification (CONVENTIONS.md §4, code-ship SKILL.md B1b) was honour-system, and the
  * honour system missed a section. A `## Plan` checklist is the mechanical version of the same
  * classification: a box is either `[x]` or it is not, and nothing about reading it requires
  * judgment the way "is this prose paragraph done" does.
@@ -103,7 +103,7 @@ function findRemainder(body, comments) {
 }
 
 /**
- * The close-gate verdict for one issue: may `colab ship` (or a human doing code-wrap B2) write
+ * The close-gate verdict for one issue: may `colab ship` (or a human doing code-ship B2) write
  * `Closes #N` for it?
  *
  * `ok: true` covers: nothing to verify (see `planVerdict`), a fully-ticked checklist, OR an

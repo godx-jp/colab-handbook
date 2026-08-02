@@ -22,10 +22,10 @@ const {
   GROUP_LABEL_PREFIX, isGroupLabel, groupLabelNames,
 } = require('./labels.js');
 
-test('the convention set is exactly the five labels §9 provisions, in canonical order', () => {
+test('the convention set is exactly the six labels §9 provisions, in canonical order', () => {
   assert.deepStrictEqual(
     conventionLabelNames(),
-    ['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling'],
+    ['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan'],
   );
   // Each carries what a provisioner needs — a name, a color, a description — so the audit
   // and `gh label create` cannot disagree about how the label is meant to look.
@@ -37,7 +37,7 @@ test('the convention set is exactly the five labels §9 provisions, in canonical
 
 test('a repo with every label is not flagged', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'bug']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'bug']),
     [],
   );
 });
@@ -45,37 +45,44 @@ test('a repo with every label is not flagged', () => {
 test('the readiness label absent is reported — the exact gap that silently un-fills the column', () => {
   assert.deepStrictEqual(
     missingConventionLabels(['in-progress', 'bug']),
-    ['deps-checked', 'agent-filed', 'epic', 'needs-ruling'],
+    ['deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan'],
   );
 });
 
-test('a repo with the claim label only is missing the other four', () => {
+test('a repo with the claim label only is missing the other five', () => {
   assert.deepStrictEqual(
     missingConventionLabels(['in-progress']),
-    ['deps-checked', 'agent-filed', 'epic', 'needs-ruling'],
+    ['deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan'],
   );
 });
 
 test('missing preserves canonical order regardless of the input order', () => {
-  assert.deepStrictEqual(missingConventionLabels(['epic', 'agent-filed']), ['in-progress', 'deps-checked', 'needs-ruling']);
+  assert.deepStrictEqual(missingConventionLabels(['epic', 'agent-filed']), ['in-progress', 'deps-checked', 'needs-ruling', 'needs-plan']);
 });
 
 test('a repo missing only epic (adopted before #78) is flagged for exactly that gap', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'needs-ruling']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'needs-ruling', 'needs-plan']),
     ['epic'],
   );
 });
 
 test('a repo missing only needs-ruling (adopted before #75) is flagged for exactly that gap', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-plan']),
     ['needs-ruling'],
   );
 });
 
+test('a repo missing only needs-plan (adopted before #94) is flagged for exactly that gap', () => {
+  assert.deepStrictEqual(
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling']),
+    ['needs-plan'],
+  );
+});
+
 test('empty / null / undefined input reports the whole set (a bare repo, or unread labels)', () => {
-  const all = ['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling'];
+  const all = ['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan'];
   assert.deepStrictEqual(missingConventionLabels([]), all);
   assert.deepStrictEqual(missingConventionLabels(null), all);
   assert.deepStrictEqual(missingConventionLabels(undefined), all);
@@ -99,7 +106,7 @@ test('label OBJECTS count as present, not as always-missing', () => {
   // gh can return {name,...}; the diff must read the name, or it flags labels that exist.
   const present = [
     { name: 'in-progress' }, { name: 'deps-checked' }, { name: 'agent-filed' },
-    { name: 'epic' }, { name: 'needs-ruling' },
+    { name: 'epic' }, { name: 'needs-ruling' }, { name: 'needs-plan' },
   ];
   assert.deepStrictEqual(missingConventionLabels(present), []);
 });
@@ -173,7 +180,7 @@ test('groupLabelNames tolerates empty / null / undefined the same way missingCon
 // unattended adoption/sync/audit provisions (opt-in, like `tracking`), and that its write helper
 // never shares a name or a code path with `readinessLabelArgs`.
 
-test('graph-empty is not one of the five provisioned convention labels', () => {
+test('graph-empty is not one of the six provisioned convention labels', () => {
   assert.equal(MECHANICAL_READINESS_LABEL, 'graph-empty');
   assert.ok(!conventionLabelNames().includes(MECHANICAL_READINESS_LABEL),
     'a mechanical-only check must stay opt-in — forcing it defeats the point of a cheaper lane');
@@ -181,7 +188,7 @@ test('graph-empty is not one of the five provisioned convention labels', () => {
 
 test('a repo missing graph-empty is never reported by missingConventionLabels — it is not in the set', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan']),
     [],
   );
 });

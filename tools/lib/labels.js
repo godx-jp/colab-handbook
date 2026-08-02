@@ -32,6 +32,15 @@
  * has ruled on reads as a normal start candidate to a human session or a scheduled driver
  * alike (CONVENTIONS.md §5, *Design ruling*). It joins CONVENTION_LABELS for the same
  * reason `epic` did: an unattended decision (a scheduler's start-or-skip) depends on it.
+ *
+ * `needs-plan` joined the set in #94: `code-triage` flags an issue it judges genuinely
+ * hard — ambiguous scope, a novel design with no repo precedent, a coupling wider than
+ * file overlap — and `code-start` reads the flag to decide whether to run `code-plan`
+ * before coding, rather than the default 3-5-line stub. Unlike `needs-ruling` it is NOT a
+ * readiness gate — a flagged issue is still startable now, it just should not go straight
+ * to code (CONVENTIONS.md §5, *Planning*). It is provisioned like the rest of this set,
+ * not created on demand the way `group:<key>` is, because its name is fixed and every
+ * adopting repo needs it before the first triage pass can flag anything.
  */
 
 const CONVENTION_LABELS = [
@@ -40,6 +49,7 @@ const CONVENTION_LABELS = [
   { name: 'agent-filed', color: 'C5DEF5', description: 'Filed by an agent on its own initiative — not human-approved' },
   { name: 'epic', color: '3E4B9E', description: 'Container for sub-issues — informative, never a start candidate, never claimed as a unit of work' },
   { name: 'needs-ruling', color: 'B60205', description: 'Needs a human design ruling before this can start' },
+  { name: 'needs-plan', color: '0052CC', description: 'Triage judged this hard — code-start should run code-plan before coding' },
 ];
 
 function conventionLabelNames() {

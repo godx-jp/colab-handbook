@@ -1,6 +1,6 @@
 ---
 name: code-sweep
-description: "Clear out everything finished in ONE repo: find every worktree whose work has landed, every issue whose code shipped but is still open, and every claim outliving its session — then put each through code-wrap, one at a time. Run it at end of day, or ping it whenever a session goes idle — a no-change ping short-circuits in three calls. Sorts candidates into wrap / teardown-only / claim-only / unrecorded / blocked / unlinked, because most do not need a full wrap. Can be scoped to a set of issues or one session/worktree instead of the whole repo. Trigger phrases: 'sweep the repo', 'wrap everything finished', 'clean up the worktrees', 'close out the session work', 'tidy up finished work', 'wrap all the done branches', 'sweep the issues #95 #96', 'sweep the session <name>', 'ship these'; and — when this session's last act was a sweep — the re-ping forms 'again', 'anything new?', 'check again', 'anything to wrap yet?', or a bare 'go'. Uses code-wrap per candidate; never batches merges."
+description: "Clear out everything finished in ONE repo: find every worktree whose work has landed, every issue whose code shipped but is still open, and every claim outliving its session — then put each through code-wrap and code-ship in sequence, one at a time. Run it at end of day, or ping it whenever a session goes idle — a no-change ping short-circuits in three calls. Sorts candidates into wrap / teardown-only / claim-only / unrecorded / blocked / unlinked, because most do not need a full wrap+ship. Can be scoped to a set of issues or one session/worktree instead of the whole repo. Trigger phrases: 'sweep the repo', 'wrap everything finished', 'clean up the worktrees', 'close out the session work', 'tidy up finished work', 'wrap all the done branches', 'sweep the issues #95 #96', 'sweep the session <name>', 'ship these'; and — when this session's last act was a sweep — the re-ping forms 'again', 'anything new?', 'check again', 'anything to wrap yet?', or a bare 'go'. Composes code-wrap then code-ship per candidate; never batches merges."
 ---
 
 # code-sweep — clear out everything finished, one at a time
@@ -11,13 +11,13 @@ After a few parallel sessions, two things drift apart:
 - **issues** — shipped but still open, or closed but still holding a claim
 
 This sweeps one repo and reconciles both. It does not replace
-[`code-wrap`](../code-wrap/SKILL.md) — it finds the candidates and runs it per
-candidate.
+[`code-wrap`](../code-wrap/SKILL.md) and [`code-ship`](../code-ship/SKILL.md) — it
+finds the candidates and runs them, in sequence, per candidate.
 
-## Principle — sequential, and most candidates do not need a full wrap
+## Principle — sequential, and most candidates do not need a full wrap+ship
 
 **One at a time.** Every merge moves trunk, so the next candidate must sync against
-the *new* trunk (code-wrap B0). Batching merges "to save time" produces exactly the
+the *new* trunk (code-ship B0). Batching merges "to save time" produces exactly the
 generated-file conflicts B0 exists to prevent.
 
 **Sort before acting.** A worktree whose branch already landed needs teardown, not a
@@ -35,8 +35,8 @@ Nothing below gets cheaper by being skipped — least of all the per-merge CI re
 
 Same problem and same fingerprint as [`code-triage` §0](../code-triage/SKILL.md) — read it
 there; only the differences are repeated here. A full sweep is a fixed floor of 3 network
-calls plus a CI re-check and a 499-line `code-wrap` per candidate, so a ping with nothing
-new is worth refusing to start.
+calls plus a CI re-check and a full `code-wrap` + `code-ship` per candidate, so a ping
+with nothing new is worth refusing to start.
 
 ```sh
 CACHE="$(git rev-parse --path-format=absolute --git-common-dir)/colab-sweep.json"
@@ -128,9 +128,9 @@ repo's tracker). That is a real, distinct shape, not a defect in the filter: see
 ### 1.1 Scoped mode — sweep a subset, and say that you did
 
 `code-triage` has single-issue mode; this had nothing between "the whole repo" and calling
-`code-wrap` by hand — and calling `code-wrap` directly skips the bucketing that decides
-wrap vs teardown-only vs claim-only, which is the judgement this skill exists to add. A
-shipping session handed three issue numbers deserves neither of those options.
+`code-wrap`/`code-ship` by hand — and calling either directly skips the bucketing that
+decides wrap vs teardown-only vs claim-only, which is the judgement this skill exists to
+add. A shipping session handed three issue numbers deserves neither of those options.
 
     sweep the issues #95 #96          → candidates whose claims or branch name carry 95 or 96
     sweep the session <name>          → the worktree of that name, its claims, its issues
@@ -184,7 +184,7 @@ git fetch origin                    # the rule reads local refs; a stale base mi
 colab landed --all                  # every worktree of this repo: landed · cargo · unknown
 ```
 
-That is the whole decision, and it is the same rule code-wrap Phase B uses
+That is the whole decision, and it is the same rule `code-ship` uses
 (`CONVENTIONS.md` §4, "Has it landed?"). It is asked against each branch's **base** —
 trunk, or the declared `integration:` line it was cut from — because a line-based
 branch measured against trunk reads as enormous unshipped cargo.
@@ -221,10 +221,10 @@ claimed — and the label remains the veto before any teardown.
 
 | Bucket | What it looks like | Action |
 |---|---|---|
-| **wrap** | `cargo` (or `unknown`), **and** at least one claimed issue | full [`code-wrap`](../code-wrap/SKILL.md) |
+| **wrap** | `cargo` (or `unknown`), **and** at least one claimed issue | full [`code-wrap`](../code-wrap/SKILL.md) then [`code-ship`](../code-ship/SKILL.md) |
 | **teardown-only** | `landed` — content already on its base, worktree lingering | remove worktree, release claims; close via `colab ship` when it has zero commits (evidence-close, #90), else close by hand with evidence |
 | **claim-only** | no worktree; `in-progress` on work already shipped | release the claim, close the issue with evidence |
-| **unrecorded** | on disk, `colab worktrees`'s `unrecorded` list — no claim, no ports | **report only** — see below, never `code-wrap` |
+| **unrecorded** | on disk, `colab worktrees`'s `unrecorded` list — no claim, no ports | **report only** — see below, never `code-wrap`/`code-ship` |
 | **blocked** | uncommitted work — tracked changes or untracked files — or genuinely unfinished | **report — never force** |
 | **unlinked** | `cargo` (or `unknown`), **zero** claimed issues | **report — do not wrap** (#92) |
 
@@ -251,10 +251,11 @@ completeness check agreed there was nothing to check. It is deliberately **not**
 `blocked`: `blocked` means "known work, human judgement needed"; this means "colab has no record
 to act on at all" — a different reason to stop, worth naming as such.
 
-**Never run `code-wrap` on one.** Every phase of `code-wrap` assumes a claimed issue and a
-recorded worktree — B1's harvest reads the claim registry, B3 releases claims, B4 tears down a
-worktree `colab` knows about. None of that exists here, so a full wrap does not degrade
-gracefully; it errors, or worse, silently does nothing where you expected it to act.
+**Never run `code-wrap` or `code-ship` on one.** Every phase of either assumes a claimed
+issue and a recorded worktree — `code-ship`'s B1b harvest reads the claim registry, its B3
+releases claims, its B4 tears down a worktree `colab` knows about. None of that exists
+here, so a full wrap+ship does not degrade gracefully; it errors, or worse, silently does
+nothing where you expected it to act.
 
 Read the verdict `colab worktrees` already computed (§1.2) and act by hand:
 
@@ -266,7 +267,7 @@ Read the verdict `colab worktrees` already computed (§1.2) and act by hand:
   **not** guess ownership from the branch name alone. Check whether the branch's issue numbers
   belong to *this* repo's tracker (`gh issue view <N>` — 404 or a title that makes no sense means
   they don't) or, per #67's own case, to a **different** repo's tracker entirely — that shape has
-  no issue here to harvest, close, or post evidence on, so `code-wrap`'s `Closes #N` step has
+  no issue here to harvest, close, or post evidence on, so `code-ship`'s `Closes #N` step has
   nothing to close even if you ran it. Report it and leave it; claiming it into this repo would be
   inventing an issue number that was never this repo's to begin with.
 - **`detached HEAD`** or **`IS <trunk> — should not be a linked worktree`** → structurally odd
@@ -316,8 +317,9 @@ For each **wrap** candidate, in order:
 1. **Re-check trunk CI.** `gh run list --branch <trunk> -L 1`. Not once at the start
    — trunk CI can die mid-sweep (billing lockout, runner outage), and a failure that
    never started still means stop. A sweep can take an hour.
-2. Run **code-wrap** for that candidate: B0 sync against the *current* trunk, harvest,
-   merge, evidence, release, teardown.
+2. Run **code-wrap** for that candidate — distill/docs/gate/commit/push, if not
+   already done for the cargo sitting on it — then **code-ship**: B0 sync against
+   the *current* trunk, harvest, grade, merge, evidence, release, teardown.
 3. **Then** move to the next. Trunk has moved; the next B0 must see that.
 
 If any wrap stops (CI dead, conflict needing judgment, gate failing for unrelated
@@ -359,7 +361,7 @@ Worktrees are only half of it. Also:
   `code-triage`'s opening principle. The epic is the source triage is *instructed* to trust, so a wrong line
   there does not merely annoy; it throws away a session.
 
-  Same four limits as `code-wrap` B2c: never close the epic on a full table, never
+  Same four limits as `code-ship` B2c: never close the epic on a full table, never
   rewrite its prose, never build a table that does not exist, never infer parentage
   from a title.
 

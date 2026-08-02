@@ -54,7 +54,7 @@ test('parseChecklistItems reads checked and unchecked boxes, mixed case mark', (
 });
 
 test('parseChecklistItems ignores a bullet that is not a checklist box', () => {
-  // CONVENTIONS §5/code-wrap B2c: "a bullet is not a checklist" — same rule applies here.
+  // CONVENTIONS §5/code-ship B2c: "a bullet is not a checklist" — same rule applies here.
   assert.deepStrictEqual(parseChecklistItems('- just a bullet\n- [ ] a real one\n'), [{ checked: false, text: 'a real one' }]);
 });
 

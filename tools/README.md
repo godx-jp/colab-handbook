@@ -665,7 +665,7 @@ Run `colab <cmd> --help` for full detail.
 | `worktree rm <name> [--force] [--repo P]` | remove a worktree; release its group; free its ports. Refuses on uncommitted work — tracked changes **or** untracked, non-ignored files (the latter is the only category with no copy in the index, a commit, or the remote; ignored build output and copied `.env` files never block) — **or** processes the worktree owns (cwd inside it); `--force` overrides both, terminating the owned processes. Ports still bound afterwards are reported as such, never as freed. Directory removal (and the pre-remove hook) is bounded at 5min (`COLAB_TEARDOWN_TIMEOUT_MS`); a failed or timed-out removal leaves the claim(s) and state record in place for a retry instead of releasing them anyway, unless `--force`. A directory missing `.git` (an earlier removal interrupted partway) is recognized as a **husk** and finished by hand rather than re-fought with `git worktree remove`, which can never succeed against it |
 | `worktree tag <name> --session S [--session-name S]` | **repair** session identity on an existing worktree **and its claims** (see *Session identity*) |
 | `worktrees [--json]` | list worktrees (status + on-disk liveness) |
-| `ship [--worktree N \| --branch B] [--message M] [--keep-worktree] [--delete-branch] [--dry]` | code-wrap **Phase B**: squash-merge a session branch → trunk. The branch is **kept** unless `--delete-branch`. Gated by repo autonomy (see *Phase B autonomy ladder*) |
+| `ship [--worktree N \| --branch B] [--message M] [--keep-worktree] [--delete-branch] [--dry]` | `code-ship`: squash-merge a session branch → trunk. The branch is **kept** unless `--delete-branch`. Gated by repo autonomy (see *Phase B autonomy ladder*) |
 | `promote [--repo P] [--message M] [--dry]` | **promotion** trunk → main (`--no-ff`). Gated by `deploy` + `promotion`; never tags/deploys directly (see *Promotion*) |
 | `doctor [--prune] [--ttl H] [--json]` | heal dead worktrees / orphan + stale claims / orphan ports; report records whose branch or path cannot be resolved (see *Records that cannot be acted on*); flip + sweep **merged** worktrees (see *Worktree lifecycle*); **list** shipped branches awaiting deletion (never deletes them) |
 | `release-notes [<range>] [--repo P] [--out F] [--headline "..."]` | grouped Markdown release summary from git history (see below) |
@@ -821,7 +821,7 @@ succeeds and the script exits 0 when the release steps themselves succeeded.
 
 ## Phase B autonomy ladder (`colab ship` + `pre-push-guard`)
 
-`colab ship` is the **one sanctioned door** for code-wrap **Phase B** — squash-merging a finished
+`colab ship` is the **one sanctioned door** for `code-ship` — squash-merging a finished
 session branch into the repo's trunk. It exists so an agent can close the loop *only where a human
 has granted it*, and so a rogue agent can never raw-push trunk.
 
@@ -946,7 +946,7 @@ delete a branch that is still checked out.
 
 This premise has been wrong twice, in opposite directions — first a comment claiming a deletion that
 never happened, then a deletion the operator did not want. It is now a decision with a flag and a
-docstring behind it rather than an assumption. [`code-wrap`](../skills/code-wrap/SKILL.md) B3 and
+docstring behind it rather than an assumption. [`code-ship`](../skills/code-ship/SKILL.md) B3 and
 [`code-sweep`](../skills/code-sweep/SKILL.md) §3 tell humans to delete these by hand; under this
 default that guidance is **load-bearing**, not redundant.
 

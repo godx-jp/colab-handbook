@@ -1,6 +1,6 @@
 'use strict';
 /**
- * "Has this branch landed?" — the one shared answer, so code-sweep and code-wrap Phase B stop
+ * "Has this branch landed?" — the one shared answer, so code-sweep and code-ship stop
  * deciding it by eye.
  *
  * THE TRAP, which is why this is a rule and not a habit. The obvious test is "how many commits is

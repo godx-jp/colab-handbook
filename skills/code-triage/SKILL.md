@@ -1,6 +1,6 @@
 ---
 name: code-triage
-description: "Decide what to work on next in ONE repo. Takes every open Issue, discards the ones already shipped and the ones someone else holds, groups what must move together (issues touching the same files MUST share a branch), orders what remains by blast radius, and says which groups can be started RIGHT NOW — including whether the repo's trunk CI is alive enough to merge into. Outputs claim + branch commands that feed straight into code-start. Cheap to re-run: a no-change ping short-circuits in three calls. Trigger phrases: 'what should I work on', 'triage the issues', 'what can we start', 'plan the next session', 'group the open issues', 'what is ready to pick up', 'sort the backlog'; and — when this session's last act was a triage — the re-ping forms 'again', 'anything new?', 'check again', 'anything to pick up yet?', or a bare 'go'. Runs before code-start; pairs with code-start and code-wrap."
+description: "Decide what to work on next in ONE repo. Takes every open Issue, discards the ones already shipped and the ones someone else holds, groups what must move together (issues touching the same files MUST share a branch), orders what remains by blast radius, and says which groups can be started RIGHT NOW — including whether the repo's trunk CI is alive enough to merge into. Outputs claim + branch commands that feed straight into code-start. Flags a group judged genuinely hard with a needs-plan label + one-line reason, for code-plan to draft against later — never a plan of its own. Cheap to re-run: a no-change ping short-circuits in three calls. Trigger phrases: 'what should I work on', 'triage the issues', 'what can we start', 'plan the next session', 'group the open issues', 'what is ready to pick up', 'sort the backlog'; and — when this session's last act was a triage — the re-ping forms 'again', 'anything new?', 'check again', 'anything to pick up yet?', or a bare 'go'. Runs before code-start; pairs with code-start and code-wrap."
 ---
 
 # code-triage — what should we work on next?
@@ -670,6 +670,42 @@ Prefer `colab readiness` over a raw `gh` edit for the reason §4 gives: colab
 owns the write, so it is journaled and the `readiness.marked` event fires from
 the same site — the single signal the event-driven consumer actually receives.
 
+### Then flag hard groups with `needs-plan` — a label, not a plan (#94, `CONVENTIONS.md` §5 *Planning*)
+
+Some READY (or soft-ready) groups are cheap to describe but hard to build: an ambiguous
+ask, a design with no precedent in this repo, an issue set coupled by more than file
+overlap. That judgement — *why this one is hard, seen across the whole backlog* — is the
+one thing that dies with this triage session if it goes unwritten; a fresh implementing
+session, working from a much narrower view, either re-derives it or misses it. This skill
+does not draft the plan itself — that authoring, at triage time, produced stale artifacts
+for groups that get reported startable and then sit unstarted for weeks. It leaves one
+sentence behind that tells the session which starts the group to bother drafting one at
+all; [`code-plan`](../code-plan/SKILL.md), run inside that session, does the drafting.
+
+For each ready or soft-ready group you judge hard, flag its **lead issue** (the first
+number in the branch name):
+
+```sh
+gh label create needs-plan --color 0052CC \
+  --description "Triage judged this hard — code-start should run code-plan before coding" 2>/dev/null || true
+gh issue edit <lead-issue> --add-label needs-plan
+gh issue comment <lead-issue> --body "needs-plan: <one-line reason — the thing a
+session working only this issue would not see from where you are sitting>"
+```
+
+- **One sentence, not a plan.** Do not draft the plan here even when the shape seems
+  obvious — `code-plan` drafts it later, against the repo as it is at coding time, seeded
+  with exactly this reason line.
+- **Idempotent, same as §3's group evidence (§0.2).** The label add is naturally
+  idempotent; grep existing comments for `needs-plan:` before posting a second reason —
+  re-post only if the reason actually changed, and say what changed.
+- **Not a readiness gate.** Unlike `needs-ruling` (§5), this label never blocks a group
+  from being reported ready. It only tells the session that starts it to plan before
+  coding — the group is still startable now.
+- **Most groups get nothing.** The label is for the minority genuinely judged hard. A
+  `needs-plan` applied by default, on the theory that a plan can never hurt, is the same
+  signal as `needs-plan` on nothing at all — it stops meaning anything a session can act on.
+
 Hand the top group to **code-start**, which will re-verify the claim before taking it.
 
 ## Verify complete
@@ -696,5 +732,8 @@ Hand the top group to **code-start**, which will re-verify the claim before taki
 - No `blocked_by` edge was deleted merely because its blocker's code landed.
 - Every "already shipped" call carries evidence (sha + `file:line`) — not a hunch.
 - Branch names carry all issue numbers in one trailing run.
+- Every group judged hard got `needs-plan` on its lead issue plus a one-line reason
+  comment — and it landed on the minority actually judged hard, not on every group as a
+  default.
 - Anything surprising — a stale claim, a dead trunk CI, an epic whose table
   contradicts its title — is **reported**, not silently worked around.

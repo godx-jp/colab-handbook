@@ -27,3 +27,8 @@ id_rsa*
 
 # ─── Editor ───
 .idea/
+
+# ─── Session scratch (CONVENTIONS.md §5, Planning — #94) ───
+# Repo-local plan files a session writes at .claude/plans/issue-<N>.md — disposable,
+# dies at code-ship teardown, never committed.
+.claude/plans/

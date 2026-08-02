@@ -466,10 +466,10 @@ these prefixes. A commit with no prefix is invisible in release notes.
   body (`tools/lib/checklist.js`): any claimed issue with an unticked box and no declared
   `Remainder: #M` gets `Refs #N` instead of `Closes #N` — it stays open, and the redirect
   is reported, never silent. Tick what shipped (with evidence, one verdict per box — B2b of
-  `code-wrap`), file `Remainder: #M` for the boxes that did not ship, and the next ship
+  `code-ship`), file `Remainder: #M` for the boxes that did not ship, and the next ship
   closes it clean. Doing the merge by hand (no `colab ship`) runs the identical check by
   reading the same two fields (`gh issue view N --json body,comments`) before writing the
-  commit — `code-wrap` B1b spells out the command. Motivating incident: an issue was closed
+  commit — `code-ship` B1b spells out the command. Motivating incident: an issue was closed
   by squash-merge with a third of its three-section scope unimplemented; the sections were
   prose, so nothing could have caught it before this rule existed.
 - **Every issue the merge closes must be corroborated by git, not by the claim registry
@@ -853,7 +853,7 @@ joins the convention set provisioned in [§9](#9-adopting-this).
 anticipate — does not stop and file a ruling request.** It continues on the designer's
 spec (parking mid-feature to request a ruling is its own cost, and the spec already on
 hand is the best available answer) and instead records `design-not-preapproved` in its
-wrap evidence ([code-wrap §B2b](skills/code-wrap/SKILL.md)), so the closure itself is
+ship evidence ([code-ship §B2b](skills/code-ship/SKILL.md)), so the closure itself is
 what a human reviews — after the fact, rather than blocking the session on it. This is a
 deliberately different remedy from the gate above: the gate stops a known-significant
 surface before code starts; the marker flags a surface that turned out to matter only
@@ -862,6 +862,70 @@ once someone was already building it.
 Applies in every mode. A human-opened session and a scheduled driver honor the identical
 gate, for the identical reason *Scheduled drivers* gives for `agent-filed` and `epic`: a
 label a person has not cleared is not a decision a tool gets to infer around.
+
+### Planning — a plan file that outlives one command, and who drafts it (#94)
+
+Coordinator (triage/grading) and implementer (coding) sessions often run at different
+model tiers — a strong model plans and grades cheaply, a cheaper model executes the
+lanes — and until #94 nothing carried the coordinator's read of the work across that
+seam: the implementing session re-derived intent and approach from scratch, from a much
+narrower view than the one that decided the work was startable in the first place.
+
+**The plan is a repo-local scratch file, not an Issue comment.** Coordinator and
+implementer sessions share one machine and one filesystem, so a file is the cheapest bus,
+and it never touches the tracker at all. Convention: `.claude/plans/issue-<N>.md` in the
+**main checkout — outside any worktree.** That placement is deliberate, not incidental:
+it exists before the worktree is created (a session can write to it from step 0) and
+survives the worktree's teardown (a grading session reads it after `code-ship` has
+already removed the tree it was written for). Git-excluded, **never committed** — every
+adopting repo's own `.gitignore` should carry `.claude/plans/`, the way this repo's
+does. The file is disposable by design; anything worth keeping past the session moves to
+the Issue at wrap ([code-wrap A1](skills/code-wrap/SKILL.md)), same as any other
+knowledge this convention set treats as durable.
+
+**Three rungs, the middle one the default:**
+
+| Rung | When | Content |
+|---|---|---|
+| 0 — none | trivial/mechanical work, the acceptance oracle is self-evident | nothing |
+| **1 — plan-lite (DEFAULT)** | every other session | 3-5 lines, written at session start after reading the Issue: intent in one sentence · files expected to move · the acceptance oracle (what proves it done) · a stop condition |
+| 2 — full plan | `needs-plan` is set (below), or a trigger fires mid-session: the ask turned out ambiguous, the design has no precedent in this repo, a long dependency chain, several issues coupled by more than file overlap | drafted by [`code-plan`](skills/code-plan/SKILL.md) into the same file |
+
+**Failing to state rung 1's oracle in one line is itself the signal to stop and ask on
+the Issue** — a session that cannot say what proves the work done should not guess and
+should not silently drop to rung 0.
+
+**Who flags, who drafts, and when — not the same actor.** `code-triage` may flag a group
+it judges hard with the `needs-plan` label plus a one-line reason comment on the group's
+lead issue — the flag is a **cross-backlog judgement**, the one thing that dies with the
+triage session if it goes unwritten, not a plan of its own. It never drafts the plan
+itself: authoring at triage time produced stale artifacts for groups that are reported
+startable but not started soon, which is why the earlier design of this feature dropped
+per-beat plan authoring entirely. **The plan is drafted at code-session start, inside the
+implementing session**, by a stronger-model planning subagent seeded with the Issue plus
+the triage reason line — against the repo as it actually is at coding time, not as it was
+at triage. A rung-1 stub may still upgrade to rung 2 mid-session on a self-escalation
+trigger; the flag decides the *default*, it never caps the ladder.
+
+**Read the flag by direct issue fetch, never the Search API.** `gh issue view <N>` is
+read-your-writes consistent — a flag `code-triage` set seconds ago is visible to the very
+next session. `gh issue list --search 'label:needs-plan'` reads the eventually-consistent
+search index, which can lag by minutes — long enough to miss exactly the flags a triage
+run just set. `code-start` already fetches the issue by number for its own context load
+([§2](skills/code-start/SKILL.md)), so this rides that call for free; `code-plan`
+inherits the same rule rather than re-deciding it.
+
+**A stub still upgrades mid-session, and a plan can still be wrong.** Rung 1 written at
+session start is not a contract any more than rung 2 is — the implementer may deviate
+when the code demonstrates the plan is wrong, but says so where the plan lives (this
+file), so a resuming or grading session reads the actual reasoning rather than a stale
+sketch.
+
+**Provisioning.** `needs-plan` joins the label set [§9](#9-adopting-this) provisions on
+adoption and back-fills on sync, the identical idempotent pattern as every other fixed
+convention label — never created on demand the way a per-group `group:<key>` label is,
+because its name is fixed and every repo needs it before the first triage pass can flag
+anything.
 
 ### Scheduled drivers — provenance and autonomy meet a caller that is not a person
 
@@ -900,7 +964,8 @@ rather than the one time a human clicks a button:
 
 **A scheduler starts work only by spawning ordinary sessions, and touches the tracker no other
 way.** Concretely: it may run `code-triage` to decide what is ready, then spawn a session that
-itself runs `code-start` → does the work → `code-wrap`. What it may **not** do is claim,
+itself runs `code-start` → does the work → `code-wrap` → (where the repo has granted it)
+`code-ship`. What it may **not** do is claim,
 label, comment, or merge *directly* — every tracker write happens inside a session running the
 standard skills, using the same claim-before-start and release-on-wrap discipline as a human-
 opened one. A scheduler that shortcuts this — claiming in its own driver code to save a spawn —
@@ -1199,7 +1264,7 @@ exists to prevent, not the eventual outcome.
   `🔒 Claimed — worktree … · branch … · host … · <timestamp>` on claim, `✅ Released` on
   release. The label answers *whether* an issue is taken; the comment answers *by what*,
   from any machine, with an audit trail unlabeling could never keep.
-  - **The same pattern names code-wrap's evidence comment** (Phase B2b, `ceremony:
+  - **The same pattern names code-ship's evidence comment** (B2b, `ceremony:
     standard` only): one invisible marker line, `<!-- colab:evidence sha=<trunk-sha> -->`,
     prepended to otherwise-free prose. A stable first line as wire format, everything after
     it human — deliberately not a structured evidence schema, which would invite padding
@@ -1512,7 +1577,7 @@ here.
    production exists, not whether shipping is automated ([§2](#2-tiers)).
 2. **Write `.github/project.yml`** ([§3](#3-githubprojectyml--the-marker)).
 3. **Create the labels — the whole set, not a subset.** They will not exist yet. All
-   five are required, because each powers a check that silently *cannot fire* while its
+   six are required, because each powers a check that silently *cannot fire* while its
    label is absent — and a check that never fires reads exactly like one that always
    passes:
    ```sh
@@ -1521,6 +1586,7 @@ here.
    gh label create agent-filed  --color C5DEF5 --description "Filed by an agent on its own initiative — not human-approved"  2>/dev/null || true
    gh label create epic         --color 3E4B9E --description "Container for sub-issues — informative, never a start candidate, never claimed as a unit of work"  2>/dev/null || true
    gh label create needs-ruling --color B60205 --description "Needs a human design ruling before this can start"  2>/dev/null || true
+   gh label create needs-plan   --color 0052CC --description "Triage judged this hard — code-start should run code-plan before coding"  2>/dev/null || true
    ```
    The `|| true` makes this **idempotent** — partial adoption is the normal case, so
    re-running must be safe. What each absence costs:
@@ -1541,6 +1607,10 @@ here.
      ruling ([§5](#5-claiming-work--how-to-say-im-on-this), *Design ruling*) — absent, that
      gate cannot be applied at all, and a surface nobody has approved reads as a normal
      start candidate to a human session or a scheduled driver alike.
+   - **`needs-plan`** must exist before `code-triage` can flag a hard group
+     ([§5](#5-claiming-work--how-to-say-im-on-this), *Planning*) — absent, the flag can
+     never be written, so `code-start` always sees "no flag" and every session falls back
+     to the cheap rung-1 stub, even on a group triage judged genuinely hard.
 
    This full set is provisioned again on every sync, not only at adoption: a repo that
    adopted at an older handbook version — before a label entered the set — never
