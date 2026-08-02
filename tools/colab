@@ -28,6 +28,7 @@ const solo = require('./lib/solo');
 const checklist = require('./lib/checklist');
 const groupLabels = require('./lib/group-labels');
 const shipguard = require('./lib/shipguard');
+const migrationGrant = require('./lib/migration-grant');
 const {
   HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
   parseArgs, table, shortRepo,
@@ -817,6 +818,211 @@ function cmdReadinessMechanical(repoAbs, num, opts) {
   // Deliberately no pushEvent: the receiver has agreed `readiness.marked` to mean deps-checked
   // specifically (#45, #46); this marker is not that claim and gets no event until a kind for it
   // is separately agreed (CONVENTIONS.md §5, Mechanical readiness).
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// migration-grant (#98) — a per-issue, human-only, branch-bound, expiring exemption to `ship`'s
+// no-new-migrations precondition. See tools/lib/migration-grant.js for the verdict logic and
+// CONVENTIONS.md §5 (Migration exemption) for the full design. This section is the gh I/O only.
+// ---------------------------------------------------------------------------
+
+const HELP_MIGRATION_GRANT = `colab migration-grant <issue> --branch <branch> [--repo <path>]
+colab migration-grant <issue> --revoke [--repo <path>]
+colab migration-grant --list [--json] [--repo <path>]
+
+Own the migration-grant marker (#98) — a human-only, per-issue, BRANCH-BOUND, EXPIRING exemption
+to \`colab ship\`'s no-new-migrations precondition, for the one legitimate class of work that gate
+otherwise makes permanently un-shippable unattended: an issue whose entire deliverable IS a schema
+change. Nothing else can produce a grant — no --force on ship, no project.yml field, no inference
+from an issue's content, age or park count. A human act on the issue is the whole answer.
+
+  colab migration-grant <N> --branch <branch>    grant #N an exemption, bound to <branch>
+  colab migration-grant <N> --revoke             revoke #N's grant (idempotent — safe if none exists)
+  colab migration-grant --list [--json]          list every issue with a live grant right now
+
+HUMAN-ONLY, ENFORCED: both grant and revoke REFUSE (exit 1) unless COLAB_HUMAN=1 is set in the
+environment — the identical bar \`colab promote\` already holds a production promotion to. No
+field, flag or project.yml value can lower it. This check runs BEFORE any network call.
+
+The marker is TWO parts, both required for a grant to read as live:
+  - the \`${labels.MIGRATION_GRANT_LABEL}\` label — applying it requires GitHub write/triage
+    permission, so a drive-by commenter on a public repo cannot manufacture a grant.
+  - a \`${migrationGrant.GRANT_MARK}\` comment on the issue — carries the BRANCH the grant is bound
+    to (a label name cannot: GitHub caps it at 50 chars), who granted it, and when.
+\`colab ship\` honors a grant only when BOTH are present, the issue is still OPEN, the comment's
+branch matches the branch being shipped, and the comment's author is a repo owner/member/
+collaborator. It EXPIRES the moment the issue closes — there is no separate expiry date.
+
+On a GROUP branch (several claimed issues), EVERY issue must carry a valid grant for THIS branch —
+a migration cannot be mechanically attributed to one member, so one granted issue must never
+smuggle an unreviewed migration in for its siblings.
+
+Revoking removes the label FIRST (the gate is restored the same minute) and posts a
+\`${migrationGrant.REVOKE_MARK}\` receipt after. Revocation is not scoped to one branch or one
+grantor — any revoke comment cancels every live grant on that issue, because a safety gate should
+fail toward "closed" if either half only partially lands.
+
+There is deliberately no local-only fallback: without a usable \`gh\`, every subcommand here REFUSES
+rather than write (or read) something invisible to the machine \`ship\` might later run on.
+
+Options:
+  --branch <branch>  required for --branch grants; a grant is never inferred from HEAD
+  --revoke           revoke instead of grant
+  --list             list every issue with a live grant, instead of granting/revoking
+  --json             (with --list) machine-readable output
+  --repo <path>       repo root (default: git root of cwd)
+`;
+
+function cmdMigrationGrant(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--repo': 'repo', '--branch': 'branch' },
+    flags: { '--revoke': 'revoke', '--list': 'list', '--json': 'json', '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help) return print(HELP_MIGRATION_GRANT);
+  if (opts.list) return cmdMigrationGrantList(opts);
+  if (opts._.length === 0) return print(HELP_MIGRATION_GRANT);
+  const num = normIssueNum(opts._[0]);
+
+  // HUMAN-ONLY, first — before resolveRepo, before any gh call, before the issue is even read.
+  // Matches cmdPromote's COLAB_HUMAN=1 bar exactly: the only verified "human-only, enforced not
+  // documented" mechanism in this codebase. Running this check first means the property is
+  // assertable by a test against a fixture with no `gh` at all (tools/lib/ship-migration-grant.test.js).
+  if (process.env.COLAB_HUMAN !== '1') {
+    process.stderr.write(`✗ Refusing: ${opts.revoke ? 'revoking' : 'creating'} a migration grant requires a human.\n`);
+    process.stderr.write('  Re-run with COLAB_HUMAN=1. (No field, flag or project.yml value can lower this bar.)\n');
+    return 1;
+  }
+
+  const repoAbs = opts.repo ? resolveRepo(opts) : (git.repoRoot(process.cwd()) || null);
+  if (!repoAbs) throw new UserError('not inside a git repo — pass --repo <path>');
+
+  // No local fallback, on purpose — same reasoning as `colab readiness`: the grant lives on
+  // GitHub, visible from any machine to the gate that reads it (ship may run on a DIFFERENT
+  // machine than the one that granted). Writing or reading it local-only would be invisible to
+  // the one reader it exists for.
+  if (!isGhUsable(repoAbs)) {
+    throw new UserError('gh not usable here (no gh auth or no origin remote) — a migration grant lives on the tracker, visible from any machine to the gate that reads it, and there is deliberately no local-only fallback');
+  }
+
+  return opts.revoke ? cmdMigrationGrantRevoke(repoAbs, num) : cmdMigrationGrantCreate(repoAbs, num, opts);
+}
+
+function cmdMigrationGrantCreate(repoAbs, num, opts) {
+  if (!opts.branch) {
+    throw new UserError('--branch <branch> is required — a grant is bound to one branch, never inferred from the current checkout');
+  }
+  if (!git.branchExists(repoAbs, opts.branch)) {
+    throw new UserError(`branch "${opts.branch}" does not resolve to a ref (locally or on origin) — refusing to bind a grant to a name nothing exists at`);
+  }
+
+  const info = git.ghIssueView(repoAbs, num, ['state', 'labels']);
+  if (!info) throw new UserError(`could not read #${num} from the tracker — refusing to write a grant blind`);
+  if (info.state !== 'OPEN') {
+    throw new UserError(`#${num} is ${info.state} — a grant expires the instant its issue closes, so granting a closed one would do nothing (CONVENTIONS.md §5, Migration exemption)`);
+  }
+
+  const present = git.ghListLabels(repoAbs);
+  if (present && !present.includes(labels.MIGRATION_GRANT_LABEL)) {
+    throw new UserError(labels.migrationGrantMissingLabelHint(present)
+      || `this repo has no \`${labels.MIGRATION_GRANT_LABEL}\` label`);
+  }
+
+  const editR = git.ghIssueEdit(repoAbs, num, labels.migrationGrantLabelArgs({}));
+  if (!editR.ok) throw new UserError(`gh edit #${num} failed (${editR.stderr.split('\n')[0] || editR.code})`);
+
+  // The comment is the AUTHORITY (it carries the branch binding) — not best-effort, unlike a
+  // claim comment. A label with no live comment reads "granted" to a human and correctly REFUSES
+  // in ship, which is the worst of both: looks done, does nothing. Roll the label back rather than
+  // leave that state.
+  const iso = nowISO();
+  const commentR = git.ghIssueComment(repoAbs, num, migrationGrant.grantCommentBody(opts.branch, HOST, iso));
+  if (!commentR.ok) {
+    git.ghIssueEdit(repoAbs, num, labels.migrationGrantLabelArgs({ clear: true }));
+    throw new UserError(`label applied but the grant comment failed to post (${commentR.stderr.split('\n')[0] || commentR.code}) — rolled the label back so this does not read as granted. Re-run.`);
+  }
+
+  print(`Granted #${num} in ${shortRepo(repoAbs)} a migration exemption for branch "${opts.branch}".`);
+  print(`  This covers ONLY this branch, and expires the moment #${num} closes.`);
+  print(`  Revoke any time: colab migration-grant ${num} --revoke`);
+  // Deliberately no pushEvent — see HELP_SHIP's JSON note: no receiver-agreed kind exists for
+  // this yet, and both markers are already visible on the tracker from any machine.
+  return 0;
+}
+
+function cmdMigrationGrantRevoke(repoAbs, num) {
+  const info = git.ghIssueView(repoAbs, num, ['state', 'labels', 'comments']);
+  if (!info) throw new UserError(`could not read #${num} from the tracker`);
+  const labelNames = (info.labels || []).map((l) => (l && typeof l === 'object' ? l.name : l));
+  const hasLabel = labelNames.includes(labels.MIGRATION_GRANT_LABEL);
+  const live = migrationGrant.liveGrants(info.comments);
+
+  if (!hasLabel && live.length === 0) {
+    print(`No live migration grant on #${num} in ${shortRepo(repoAbs)} — nothing to revoke.`);
+    return 0;
+  }
+
+  // Remove the label FIRST — the mirror image of grant's order. Grant does the weak half first
+  // (label) and rolls back on comment failure; revoke does the GATE-RESTORING half first, because
+  // the safe state to fail toward here is "already revoked," not "still granted."
+  if (hasLabel) {
+    const r = git.ghIssueEdit(repoAbs, num, labels.migrationGrantLabelArgs({ clear: true }));
+    if (!r.ok) {
+      throw new UserError(`could not remove ${labels.MIGRATION_GRANT_LABEL} on #${num} (${r.stderr.split('\n')[0] || r.code}) — the gate is NOT yet restored; retry`);
+    }
+  }
+
+  const branch = live.length ? live[live.length - 1].branch : '(no live grant found)';
+  const commentR = git.ghIssueComment(repoAbs, num, migrationGrant.revokeCommentBody(branch, HOST, nowISO()));
+  if (!commentR.ok) {
+    warn(`label removed (the ship gate IS restored) but the revoke receipt failed to post (${commentR.stderr.split('\n')[0] || commentR.code}) — post it by hand for the audit trail:`);
+    warn(`  gh issue comment ${num} --body "${migrationGrant.REVOKE_MARK} — branch \\\`${branch}\\\` · host \\\`${HOST}\\\` · ${nowISO()}"`);
+  }
+
+  print(`Revoked #${num}'s migration grant in ${shortRepo(repoAbs)} — the ship gate is restored.`);
+  return 0;
+}
+
+function cmdMigrationGrantList(opts) {
+  const repoAbs = opts.repo ? resolveRepo(opts) : (git.repoRoot(process.cwd()) || null);
+  if (!repoAbs) throw new UserError('not inside a git repo — pass --repo <path>');
+  if (!isGhUsable(repoAbs)) {
+    throw new UserError('gh not usable here (no gh auth or no origin remote) — cannot list migration grants');
+  }
+
+  // null (a failed read) MUST refuse rather than report an empty table — "no outstanding grants"
+  // printed after a failed read is the single most dangerous wrong answer this surface can give.
+  const hits = git.ghIssueListByLabel(repoAbs, labels.MIGRATION_GRANT_LABEL, 'open', ['number', 'title']);
+  if (hits === null) {
+    throw new UserError(`could not read ${labels.MIGRATION_GRANT_LABEL}-labeled issues from the tracker`);
+  }
+
+  const grants = [];
+  const stale = [];
+  for (const h of hits) {
+    const info = git.ghIssueView(repoAbs, h.number, ['state', 'labels', 'comments']);
+    const live = info ? migrationGrant.liveGrants(info.comments) : [];
+    if (live.length === 0) { stale.push(h.number); continue; }
+    const g = live[live.length - 1];
+    grants.push({ issue: h.number, title: h.title, branch: g.branch, by: g.login, authorAssociation: g.authorAssociation, at: g.at });
+  }
+
+  if (opts.json) {
+    return print(JSON.stringify({ repo: shortRepo(repoAbs), label: labels.MIGRATION_GRANT_LABEL, grants, stale }, null, 2));
+  }
+
+  if (grants.length === 0 && stale.length === 0) {
+    print(`no outstanding migration grants in ${shortRepo(repoAbs)}`);
+    return 0;
+  }
+  print(table(
+    grants.map((g) => [String(g.issue), g.branch, g.by || '(unknown)', g.at, g.title]),
+    ['ISSUE', 'BRANCH', 'GRANTED BY', 'WHEN', 'TITLE'],
+  ));
+  if (stale.length) {
+    print('');
+    for (const n of stale) warn(`#${n} carries the ${labels.MIGRATION_GRANT_LABEL} label but has NO live grant comment — stale state, looks owned and joins to nothing. Revoke or re-grant.`);
+  }
   return 0;
 }
 
@@ -3484,6 +3690,54 @@ function newMigrations(mainRoot, trunk, branch) {
 }
 
 /**
+ * Migration-grant verdict for a ship's whole claimed issue set (#98) — read from the tracker,
+ * validated by tools/lib/migration-grant.js's evaluateShipSet. ONLY called when `newMigrations()`
+ * already found at least one migration file: on the ordinary no-migration ship this costs zero
+ * extra `gh` reads and the ✓ row stays byte-identical to before this feature existed.
+ *
+ * Validates over `issues` — the branch's FULL claimed set, not `closeIssues` — deliberately: a
+ * group branch carries several issues and a migration cannot be mechanically attributed to one of
+ * them (#98 requirement 5), and `closeIssues` is *narrowed* by `--refs`, which would otherwise let
+ * a caller-supplied flag shrink a safety gate — the one thing `ship` refuses everywhere else.
+ */
+function shipMigrationGrants(repoAbs, gh, issues, branch) {
+  if (!gh) {
+    return { ok: false, granted: [],
+      missing: [{ issue: null, reason: 'gh not usable (no auth / no origin) — a migration grant lives on the tracker and cannot be confirmed' }] };
+  }
+  const records = {};
+  for (const n of issues) records[n] = git.ghIssueView(repoAbs, n, ['state', 'labels', 'comments']);
+  return migrationGrant.evaluateShipSet(issues, records, branch, labels.MIGRATION_GRANT_LABEL);
+}
+
+/**
+ * The `no new migrations` row's detail string, and the migrationGrant JSON payload for --dry
+ * --json — one function so the two paths (prose table + JSON) can never read differently. `grants`
+ * is null when there are no migrations (the ordinary case; grants is never computed then).
+ */
+function migDetail(migrations, grants, target, branch) {
+  if (migrations.length === 0) return { text: `none vs ${target}`, payload: null };
+  const files = migrations.join(', ');
+  const payload = {
+    branch, files: [...migrations],
+    granted: grants.granted.map((g) => ({ issue: g.issue, by: g.by, at: g.at })),
+    missing: grants.missing.map((m) => ({ issue: m.issue, reason: m.reason })),
+  };
+  if (grants.ok) {
+    const by = grants.granted.map((g) => '#' + g.issue).join(' ');
+    return { text: `${migrations.length} present, exempted by a human grant on ${by} for branch "${branch}" — ${files}`, payload };
+  }
+  // Each missing entry already carries its own specific, actionable reason (evaluateShipSet) —
+  // report those verbatim rather than just an issue tag, so an operator or a scheduled driver's
+  // park-and-say-once log does not have to go re-read comments to learn WHY. `issue: null` covers
+  // two distinct causes (a failed gh read of the whole set, or zero claimed issues to grant at
+  // all) and both already say so in their own `reason` string — never paper over either with a
+  // placeholder like "(unreadable)" that would misname the zero-issues case.
+  const reasons = grants.missing.map((m) => m.reason).join('; ');
+  return { text: `${migrations.length} present, human must run Phase B: ${files} — ${reasons}`, payload };
+}
+
+/**
  * Read commits the branch itself contributed (newest-first) as {subject, body} records.
  *
  * Split out from message composition on purpose: this half touches git, the other half is pure and
@@ -3570,8 +3824,9 @@ promotes is an integration event of the same weight as a promotion, and stays hu
 
 Sequence (each step gated; any failure aborts before the push — the target is never half-shipped):
   a. autonomy gate      repo must grant auto-trunk (no --force override)
-  b. preconditions      target CI alive+green · no new migrations on branch · trunk checkout clean
-                        · every closing claim corroborated by git (see below)
+  b. preconditions      target CI alive+green · no new migrations on branch (UNLESS every issue the
+                        branch carries holds a valid \`colab migration-grant\`, #98 — see below) ·
+                        trunk checkout clean · every closing claim corroborated by git (see below)
                         (an integration line with NO runs at all borrows trunk's verdict, advisory —
                         an ungated line is a normal early state; a RED line still blocks)
   c. B0 sync            merge the target INTO the branch; non-generated conflict → abort (human merge);
@@ -3598,6 +3853,16 @@ refuses when neither does. Fix it by deciding what is true — \`colab release <
 not this branch's work, \`--refs <N>\` if it is related but not completed here — never by weakening
 the check: a wrong \`Closes #N\` closes the issue the instant trunk is pushed and stays in an
 immutable commit message afterwards.
+
+MIGRATION GRANTS (#98) are the ONE narrow, human-created exception to the no-new-migrations
+precondition — for an issue whose entire deliverable IS a schema change, which the gate would
+otherwise make permanently un-shippable unattended. Create one with
+\`colab migration-grant <N> --branch <br>\` (requires COLAB_HUMAN=1 — the same bar \`colab promote\`
+holds a production promotion to; nothing else, no flag, no project.yml field, can grant one). A
+grant is bound to ONE issue and ONE branch, and expires the instant that issue closes. On a group
+branch EVERY claimed issue needs a valid grant for THIS branch — one granted issue never smuggles
+an unreviewed migration in for its siblings. Revoke with \`--revoke\` (same COLAB_HUMAN=1 bar);
+list what is outstanding with \`--list\`. See \`colab migration-grant --help\` for the full design.
 
 The default squash subject is the branch's HIGHEST-WEIGHT commit (breaking > feat > fix > perf >
 refactor > docs > test > chore, ties to the oldest) — NOT its newest commit, which on a well-run
@@ -3675,9 +3940,13 @@ Options:
                         self-clearing   CI still running, a transient gh/preview read failure — an
                                         unattended caller may retry later with NO human action.
                         human-gated     autonomy absent, an unresolvable branch record, a declared
-                                        integration line, a real CI failure, new migrations, a dirty
-                                        trunk checkout, a genuine merge conflict — retrying changes
-                                        nothing until a person acts.
+                                        integration line, a real CI failure, new migrations without a
+                                        valid grant on every claimed issue (#98), a dirty trunk
+                                        checkout, a genuine merge conflict — retrying changes nothing
+                                        until a person acts.
+                      A branch whose migrations are ALL granted reports \`no new migrations\` as an
+                      ORDINARY PASS (ok:true, class:null) — a grant does not add a third vocabulary
+                      value, it makes the check pass, the same as having no migrations at all.
                       Never add a third value without updating every consumer of this field.
 
                       \`closeIssues\`/\`refsIssues\` (#74) are \`issues\` split by what a real ship would
@@ -3687,6 +3956,13 @@ Options:
                       declared \`Remainder: #M\`. Deliberately NOT folded into \`checks\`/\`ok\`: a
                       checklist finding does not block this ship, it only redirects that one issue's
                       trailer, so it must never read as a precondition failure to an unattended caller.
+
+                      \`migrationGrant\` (#98) is \`null\` when the branch adds no migration file (the
+                      ordinary case). Otherwise: \`{ branch, files: [...], granted: [{issue,by,at}],
+                      missing: [{issue,reason}] }\` — validated over EVERY issue the branch carries
+                      (\`issues\`, not \`closeIssues\`: \`--refs\` must never shrink a safety gate), so a
+                      group branch with one ungranted member reports \`ok:false\` here with that
+                      member named in \`missing\`, even though the OTHERS are fully granted.
 `;
 
 /**
@@ -3928,10 +4204,14 @@ function cmdShipDryJson(opts) {
   // "squash" or "evidence-close". Without it, a zero-commit branch read `ok: true` and then hit
   // B1's wall, because `checks[]` had no "branch has commits" precondition at all.
   let mode = 'squash';
+  // #98: null when the branch carries no migration files (the ordinary case) — set alongside the
+  // 'no new migrations' check, below, the moment migrations are found.
+  let migrationGrantPayload = null;
   const emit = (ok) => {
     print(JSON.stringify({
       ok, dry: true, repo: shortRepo(repoAbs), branch: sess.branch, worktree: sess.name || null,
       target, mode, issues: sess.issues, closeIssues, refsIssues, checklistFindings, checks,
+      migrationGrant: migrationGrantPayload,
     }, null, 2));
     return ok ? 0 : 1;
   };
@@ -3981,9 +4261,12 @@ function cmdShipDryJson(opts) {
   closeIssues = split.closeIssues; refsIssues = split.refsIssues; checklistFindings = split.gateFindings;
 
   const migrations = newMigrations(repoAbs, target, sess.branch);
-  const migOk = migrations.length === 0;
+  const migGrants = migrations.length ? shipMigrationGrants(repoAbs, gh, sess.issues, sess.branch) : null;
+  const migOk = migrations.length === 0 || migGrants.ok;
+  const migDetailed = migDetail(migrations, migGrants, target, sess.branch);
+  migrationGrantPayload = migDetailed.payload;
   checks.push({ name: 'no new migrations', ok: migOk, class: migOk ? null : HUMAN_GATED,
-    detail: migOk ? `none vs ${target}` : `${migrations.length} present — human must run Phase B: ${migrations.join(', ')}` });
+    detail: migDetailed.text });
 
   const headBranch = git.git(['rev-parse', '--abbrev-ref', 'HEAD'], repoAbs).stdout;
   const onTrunk = headBranch === trunk;
@@ -4266,10 +4549,13 @@ function cmdShip(argv) {
     else if (run.status === 'completed' && run.conclusion === 'success') { ciOk = true; checks.push(['✓', ciLabel, `run for ${via}@${shortSha(run.sha)}: success`]); }
     else checks.push(['✗', ciLabel, `${via}@${shortSha(run.sha)}: status=${run.status} conclusion=${run.conclusion || 'none'} (fail-to-start counts as not green; a cancelled sibling of a passing run on this sha would read success, not this)`]);
   }
-  // No new migrations on the branch, measured against what it will merge into
+  // No new migrations on the branch, measured against what it will merge into — UNLESS every
+  // issue the branch carries holds a live, branch-bound migration grant (#98). Grants are read
+  // from the tracker only when a migration actually exists, so the ordinary ship pays nothing.
   const migrations = newMigrations(repoAbs, target, sess.branch);
-  const migOk = migrations.length === 0;
-  checks.push([migOk ? '✓' : '✗', 'no new migrations', migOk ? `none vs ${target}` : `${migrations.length} present — human must run Phase B: ${migrations.join(', ')}`]);
+  const migGrants = migrations.length ? shipMigrationGrants(repoAbs, gh, sess.issues, sess.branch) : null;
+  const migOk = migrations.length === 0 || migGrants.ok;
+  checks.push([migOk ? '✓' : '✗', 'no new migrations', migDetail(migrations, migGrants, target, sess.branch).text]);
 
   // ---- B1b's cross-check, run by the tool rather than by the reader (#87) ----
   // The claim registry is read AT SHIP TIME, so a claim a co-tenant session wrote onto this branch
@@ -5027,6 +5313,7 @@ Commands:
   solo [--force] [--repo P] | solo --done [--repo P]                 entry-gated trunk-direct
                                         flow, \`ceremony: light\` only — no issue/claim/worktree (#83)
   readiness <issue> [--clear] [--mechanical] [--repo P]              own the deps-checked / graph-empty markers (§5)
+  migration-grant <issue> --branch B | --revoke | --list [--json]    human-only ship migration exemption (#98)
   claims [--json] [--sync]                                            list / reconcile with GitHub
 
   port alloc [--count N] [--range A-B] [--worktree N|--claim I|--label S]
@@ -5081,6 +5368,7 @@ function main(argv) {
     case 'release': return cmdRelease(rest);
     case 'solo': return cmdSolo(rest);
     case 'readiness': return cmdReadiness(rest);
+    case 'migration-grant': return cmdMigrationGrant(rest);
     case 'claims': return cmdClaims(rest);
     case 'port': return cmdPort(rest);
     case 'ports': return cmdPorts(rest);

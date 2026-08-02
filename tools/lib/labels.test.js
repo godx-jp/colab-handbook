@@ -19,13 +19,14 @@ const {
   CONVENTION_LABELS, conventionLabelNames, missingConventionLabels,
   READINESS_LABEL, readinessLabelArgs, readinessMissingLabelHint,
   MECHANICAL_READINESS_LABEL, mechanicalReadinessLabelArgs,
+  MIGRATION_GRANT_LABEL, migrationGrantLabelArgs, migrationGrantMissingLabelHint,
   GROUP_LABEL_PREFIX, isGroupLabel, groupLabelNames,
 } = require('./labels.js');
 
-test('the convention set is exactly the six labels §9 provisions, in canonical order', () => {
+test('the convention set is exactly the seven labels §9 provisions, in canonical order', () => {
   assert.deepStrictEqual(
     conventionLabelNames(),
-    ['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan'],
+    ['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted'],
   );
   // Each carries what a provisioner needs — a name, a color, a description — so the audit
   // and `gh label create` cannot disagree about how the label is meant to look.
@@ -37,7 +38,7 @@ test('the convention set is exactly the six labels §9 provisions, in canonical 
 
 test('a repo with every label is not flagged', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'bug']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'bug']),
     [],
   );
 });
@@ -45,44 +46,51 @@ test('a repo with every label is not flagged', () => {
 test('the readiness label absent is reported — the exact gap that silently un-fills the column', () => {
   assert.deepStrictEqual(
     missingConventionLabels(['in-progress', 'bug']),
-    ['deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan'],
+    ['deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted'],
   );
 });
 
-test('a repo with the claim label only is missing the other five', () => {
+test('a repo with the claim label only is missing the other six', () => {
   assert.deepStrictEqual(
     missingConventionLabels(['in-progress']),
-    ['deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan'],
+    ['deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted'],
   );
 });
 
 test('missing preserves canonical order regardless of the input order', () => {
-  assert.deepStrictEqual(missingConventionLabels(['epic', 'agent-filed']), ['in-progress', 'deps-checked', 'needs-ruling', 'needs-plan']);
+  assert.deepStrictEqual(missingConventionLabels(['epic', 'agent-filed']), ['in-progress', 'deps-checked', 'needs-ruling', 'needs-plan', 'migration-granted']);
 });
 
 test('a repo missing only epic (adopted before #78) is flagged for exactly that gap', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'needs-ruling', 'needs-plan']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'needs-ruling', 'needs-plan', 'migration-granted']),
     ['epic'],
   );
 });
 
 test('a repo missing only needs-ruling (adopted before #75) is flagged for exactly that gap', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-plan']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-plan', 'migration-granted']),
     ['needs-ruling'],
   );
 });
 
 test('a repo missing only needs-plan (adopted before #94) is flagged for exactly that gap', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'migration-granted']),
     ['needs-plan'],
   );
 });
 
+test('a repo missing only migration-granted (adopted before #98) is flagged for exactly that gap', () => {
+  assert.deepStrictEqual(
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan']),
+    ['migration-granted'],
+  );
+});
+
 test('empty / null / undefined input reports the whole set (a bare repo, or unread labels)', () => {
-  const all = ['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan'];
+  const all = ['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted'];
   assert.deepStrictEqual(missingConventionLabels([]), all);
   assert.deepStrictEqual(missingConventionLabels(null), all);
   assert.deepStrictEqual(missingConventionLabels(undefined), all);
@@ -106,7 +114,7 @@ test('label OBJECTS count as present, not as always-missing', () => {
   // gh can return {name,...}; the diff must read the name, or it flags labels that exist.
   const present = [
     { name: 'in-progress' }, { name: 'deps-checked' }, { name: 'agent-filed' },
-    { name: 'epic' }, { name: 'needs-ruling' }, { name: 'needs-plan' },
+    { name: 'epic' }, { name: 'needs-ruling' }, { name: 'needs-plan' }, { name: 'migration-granted' },
   ];
   assert.deepStrictEqual(missingConventionLabels(present), []);
 });
@@ -188,7 +196,7 @@ test('graph-empty is not one of the six provisioned convention labels', () => {
 
 test('a repo missing graph-empty is never reported by missingConventionLabels — it is not in the set', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted']),
     [],
   );
 });
@@ -199,4 +207,42 @@ test('mechanicalReadinessLabelArgs maps set⇒add and clear⇒remove against its
   assert.deepStrictEqual(mechanicalReadinessLabelArgs({ clear: true }), ['--remove-label', 'graph-empty']);
   // And never the other marker's name — the two writers must not be interchangeable.
   assert.notDeepStrictEqual(mechanicalReadinessLabelArgs(), readinessLabelArgs());
+});
+
+// --- migration-grant marker (#98) ---------------------------------------------------------
+// `migration-granted` IS one of the seven provisioned convention labels (unlike `tracking` /
+// `graph-empty` above) — see the doc comment in labels.js for why its absence fails malignantly
+// rather than benignly. These tests pin that it is provisioned, and that its write helper never
+// shares a name or a code path with the other markers'.
+
+test('migration-granted IS one of the seven provisioned convention labels', () => {
+  assert.equal(MIGRATION_GRANT_LABEL, 'migration-granted');
+  assert.ok(conventionLabelNames().includes(MIGRATION_GRANT_LABEL),
+    'unlike tracking/graph-empty, an unexempted repo silently cannot ever grant — provision it');
+});
+
+test('migrationGrantLabelArgs maps set⇒add and clear⇒remove against its OWN marker name', () => {
+  assert.deepStrictEqual(migrationGrantLabelArgs(), ['--add-label', 'migration-granted']);
+  assert.deepStrictEqual(migrationGrantLabelArgs({}), ['--add-label', 'migration-granted']);
+  assert.deepStrictEqual(migrationGrantLabelArgs({ clear: false }), ['--add-label', 'migration-granted']);
+  assert.deepStrictEqual(migrationGrantLabelArgs({ clear: true }), ['--remove-label', 'migration-granted']);
+  // Never the other markers' names — the writers must not be interchangeable.
+  assert.notDeepStrictEqual(migrationGrantLabelArgs(), readinessLabelArgs());
+  assert.notDeepStrictEqual(migrationGrantLabelArgs(), mechanicalReadinessLabelArgs());
+});
+
+test('migrationGrantMissingLabelHint fires exactly when the repo lacks migration-granted', () => {
+  const hint = migrationGrantMissingLabelHint(['in-progress', 'bug']);
+  assert.match(hint, /migration-granted/);
+  assert.match(hint, /handbook-sync/);
+  assert.equal(migrationGrantMissingLabelHint(['in-progress', 'deps-checked', 'migration-granted']), null);
+  // Objects, not just strings.
+  assert.equal(migrationGrantMissingLabelHint([{ name: 'migration-granted' }]), null);
+});
+
+test('migrationGrantMissingLabelHint returns null when the label set could not be READ', () => {
+  // Same contract as readinessMissingLabelHint: null present ≠ empty set.
+  assert.equal(migrationGrantMissingLabelHint(null), null);
+  assert.equal(migrationGrantMissingLabelHint(undefined), null);
+  assert.match(migrationGrantMissingLabelHint([]), /migration-granted/);
 });

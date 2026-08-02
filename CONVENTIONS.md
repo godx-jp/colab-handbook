@@ -863,6 +863,59 @@ Applies in every mode. A human-opened session and a scheduled driver honor the i
 gate, for the identical reason *Scheduled drivers* gives for `agent-filed` and `epic`: a
 label a person has not cleared is not a decision a tool gets to infer around.
 
+### Migration exemption — a narrow, human-created door through no-new-migrations (#98)
+
+`colab ship` refuses a branch that touches `database/migrations/` or `prisma/migrations/` —
+absolutely, by default, with no flag, env var, or `project.yml` field to lower the bar. That
+default is right: a schema change merged into trunk is pulled by every other worktree next, and
+where dev data is shared a bad one costs everyone at once.
+
+It also makes one legitimate class of work permanently un-shippable without a person: an issue
+whose entire deliverable IS a schema change. Under a scheduled driver that issue gets coded and
+wrapped unattended, then parks forever, every tick — the gate is doing its job, there is simply
+no sanctioned way to say "this specific schema change was reviewed, and it is authorized."
+
+**A migration grant is that narrow yes — per-issue, branch-bound, human-only, expiring.**
+Deliberately *not* a repo-level or tier-level switch, for the same reason `needs-ruling` is
+per-issue rather than per-repo: a repo-level key gets set once and then silently covers schema
+changes nobody actually reviewed.
+
+- **Human-only to create — the same shape as *Design ruling*, above.** `colab migration-grant`
+  refuses (exit 1) unless `COLAB_HUMAN=1` is set — the identical bar a production promotion
+  already answers to (`colab promote`) — and the check runs *before* any network call. No agent
+  may create a grant, nor infer one from an issue's content, age, or how many times it has
+  parked. A human act on the issue is the whole answer, and it is enforced, not merely
+  documented: the write path has no other door in, and a test pins that no skill in this repo
+  ever sets `COLAB_HUMAN`.
+- **Bound to one issue AND the branch it was granted for.** The marker is two parts, both
+  required: a `migration-granted` label (applying a label on GitHub requires write/triage
+  permission, closing the "drive-by comment on a public repo" hole a comment alone would leave
+  open) and a comment naming the exact branch (a label cannot carry that — GitHub caps label
+  names at 50 characters). A grant issued for one branch never authorizes a migration arriving
+  on a different branch later.
+- **Expires the instant its issue closes.** `ship` reads the issue's live open/closed state, not
+  a separate expiry date — there is no such thing as a migration grant that outlives the work it
+  was reviewed for.
+- **Visible from any machine.** Both the label and the comment live on the tracker, the same
+  precedent the `deps-checked` readiness marker set: `ship` may run somewhere other than where
+  the grant was given, so there is deliberately no local-only fallback for creating, revoking, or
+  reading one.
+- **Covers the whole ship set, not one member of it.** A group branch carries several issues, and
+  a migration cannot be mechanically attributed to one of them — `ship` validates the grant over
+  *every* issue the branch carries, never narrowed by `--refs` (narrowing the validated set would
+  let a caller-supplied flag shrink a safety gate, which `ship` refuses everywhere else). One
+  granted issue must never smuggle an unreviewed migration in for its siblings.
+- **Revocable, and auditable afterwards.** `--revoke` removes the label first — the gate is
+  restored the same minute — then posts a receipt comment, so it stays answerable later who
+  authorized which schema change, when, and for which branch.
+- **Reviewable while outstanding.** `colab migration-grant --list` names every issue with a live
+  grant right now.
+
+**Nothing here weakens any other precondition, and a grant never reads as blanket authority.** CI
+green, claim corroboration, the trunk-checkout check, and the hand-merge conflict check all still
+run in full on a granted branch. See [`tools/README.md`](tools/README.md#migration-grants-98--the-one-narrow-human-created-exemption)
+for the exact commands and the full precondition-table wiring.
+
 ### Planning — a plan file that outlives one command, and who drafts it (#94)
 
 Coordinator (triage/grading) and implementer (coding) sessions often run at different
@@ -975,10 +1028,12 @@ exists to prevent, except now on a timer instead of from a single unnamed sessio
 **It may complete a trunk merge only where the repo has granted it, and only through the one
 door that checks.** [`autonomy: auto-trunk`](#6-releases) is what makes `colab ship` usable at
 all; a scheduler is not a wider grant of that permission, it is one more caller subject to the
-identical gate — CI alive and green, no new migrations, no hand-merge conflict, and no
-`--force` override, because `ship` has none. A repo that has not set `autonomy: auto-trunk`
-gates a scheduler exactly as it gates every other agent: `ship` refuses, and a human runs
-Phase B. Nothing about running on a cadence earns a wider door.
+identical gate — CI alive and green, no new migrations (unless every claimed issue holds a valid
+[migration grant](#migration-exemption--a-narrow-human-created-door-through-no-new-migrations-98)
+for this branch, #98), no hand-merge conflict, and no `--force` override, because `ship` has
+none. A repo that has not set `autonomy: auto-trunk` gates a scheduler exactly as it gates every
+other agent: `ship` refuses, and a human runs Phase B. Nothing about running on a cadence earns a
+wider door.
 
 **The rungs above ship stay untouched, unconditionally.** A scheduler never promotes
 (`colab promote`, trunk → main) and never tags — those remain human on every repo, on every
@@ -995,13 +1050,17 @@ silently on the first:
 - **Self-clearing** — CI temporarily red, a billing outage, a merge conflict a hook can
   regenerate. Nothing here needs a person; the correct behavior is to retry on the next tick
   and say nothing until it either clears or has failed enough ticks to stop being "temporary."
-- **Human-gated** — no `autonomy: auto-trunk` grant, a new migration on the branch, an
-  `agent-filed` issue with its label still on, a claim held by someone else. These do not
-  change on their own no matter how many ticks pass. The correct behavior is to **state it
-  once** — a comment on the Issue, or a single line in the driver's own log — and then park:
-  stop re-announcing the same unmet gate every cycle, because a driver that repeats itself
-  every tick is indistinguishable from one that is stuck, and trains its own operator to
-  ignore it.
+- **Human-gated** — no `autonomy: auto-trunk` grant, a new migration on the branch with no valid
+  migration grant covering every claimed issue (#98), an `agent-filed` issue with its label still
+  on, a claim held by someone else. These do not change on their own no matter how many ticks
+  pass. The correct behavior is to **state it once** — a comment on the Issue, or a single line
+  in the driver's own log — and then park: stop re-announcing the same unmet gate every cycle,
+  because a driver that repeats itself every tick is indistinguishable from one that is stuck,
+  and trains its own operator to ignore it. A migration grant is the one member of this list a
+  driver can watch for clearing WITHOUT a person acting again mid-cycle on ITS OWN say-so — but
+  the grant itself is still only ever created by a human (`colab migration-grant`, `COLAB_HUMAN=1`);
+  the driver's role is to notice the grant already exists on a later tick, not to request or
+  infer one.
 
 **Why this belongs in the handbook and not in one tool's docs:** the rules above are not
 features of any particular autopilot — they are what makes *any* scheduled caller sanctioned
@@ -1577,16 +1636,17 @@ here.
    production exists, not whether shipping is automated ([§2](#2-tiers)).
 2. **Write `.github/project.yml`** ([§3](#3-githubprojectyml--the-marker)).
 3. **Create the labels — the whole set, not a subset.** They will not exist yet. All
-   six are required, because each powers a check that silently *cannot fire* while its
+   seven are required, because each powers a check that silently *cannot fire* while its
    label is absent — and a check that never fires reads exactly like one that always
    passes:
    ```sh
-   gh label create in-progress  --color FBCA04 --description "Claimed by an active session"  2>/dev/null || true
-   gh label create deps-checked --color 0E8A16 --description "Dependencies verified — no open blocker"  2>/dev/null || true
-   gh label create agent-filed  --color C5DEF5 --description "Filed by an agent on its own initiative — not human-approved"  2>/dev/null || true
-   gh label create epic         --color 3E4B9E --description "Container for sub-issues — informative, never a start candidate, never claimed as a unit of work"  2>/dev/null || true
-   gh label create needs-ruling --color B60205 --description "Needs a human design ruling before this can start"  2>/dev/null || true
-   gh label create needs-plan   --color 0052CC --description "Triage judged this hard — code-start should run code-plan before coding"  2>/dev/null || true
+   gh label create in-progress       --color FBCA04 --description "Claimed by an active session"  2>/dev/null || true
+   gh label create deps-checked      --color 0E8A16 --description "Dependencies verified — no open blocker"  2>/dev/null || true
+   gh label create agent-filed       --color C5DEF5 --description "Filed by an agent on its own initiative — not human-approved"  2>/dev/null || true
+   gh label create epic              --color 3E4B9E --description "Container for sub-issues — informative, never a start candidate, never claimed as a unit of work"  2>/dev/null || true
+   gh label create needs-ruling      --color B60205 --description "Needs a human design ruling before this can start"  2>/dev/null || true
+   gh label create needs-plan        --color 0052CC --description "Triage judged this hard — code-start should run code-plan before coding"  2>/dev/null || true
+   gh label create migration-granted --color D93F0B --description "A human granted this issue's branch an exemption from ship's no-new-migrations gate"  2>/dev/null || true
    ```
    The `|| true` makes this **idempotent** — partial adoption is the normal case, so
    re-running must be safe. What each absence costs:
@@ -1611,6 +1671,13 @@ here.
      ([§5](#5-claiming-work--how-to-say-im-on-this), *Planning*) — absent, the flag can
      never be written, so `code-start` always sees "no flag" and every session falls back
      to the cheap rung-1 stub, even on a group triage judged genuinely hard.
+   - **`migration-granted`** must exist before a human can grant a migration exemption
+     ([§5](#5-claiming-work--how-to-say-im-on-this), *Migration exemption*) — absent, `colab
+     migration-grant` refuses outright rather than write a label that does not exist, so an
+     issue whose entire deliverable is a schema change has no route past `ship`'s
+     no-new-migrations gate at all. Unlike `tracking` or `graph-empty`, this one is NOT
+     opt-in: its absence fails malignantly (a wall discovered only at the moment a repo
+     hits it), not benignly, so it is provisioned and back-filled like the rest of this set.
 
    This full set is provisioned again on every sync, not only at adoption: a repo that
    adopted at an older handbook version — before a label entered the set — never

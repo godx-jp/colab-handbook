@@ -858,7 +858,7 @@ Each step is checked; any failure aborts **before the push**, so trunk is never 
 | a″. claim sanity | the branch resolves to at least one claimed issue | zero → **loud warning** (the squash will carry no `Closes #N`); zero **and** some claim in the repo names an unresolvable branch → refuse, because "no claims" is then a broken lookup |
 | b. preconditions | reported as a ✓/✗ table | any ✗ → abort |
 | | · trunk CI alive **and** green (`gh run list --branch <trunk> -L 1`) | not `completed`+`success` (billing fail-to-start counts as ✗) |
-| | · **no new migration files** on the branch (`database/migrations/`, `prisma/migrations/`) | any present → human must run Phase B (no override) |
+| | · **no new migration files** on the branch (`database/migrations/`, `prisma/migrations/`) | any present, UNLESS every claimed issue holds a valid `colab migration-grant` for this branch (#98, below) → human must run Phase B |
 | | · trunk checkout is on trunk and clean | wrong branch / dirty tracked tree |
 | c. B0 sync | merge trunk **into** the branch | conflict in a **non-generated** file → abort (hand-merge); generated-only conflict → the repo's `.colab/hooks/pre-ship` regenerates, else abort |
 | d. B1 squash | re-verify CI green, then squash-merge branch → trunk | CI no longer green / squash fails |
@@ -897,6 +897,66 @@ separately. Treat this as the recovery procedure, not a special case: re-running
 `ship` after a genuine partial failure is correct and re-running it after a
 successful ship whose reporting tail died is a second merge of the same content —
 the check above is what tells the two apart.
+
+#### Migration grants (#98) — the one narrow, human-created exemption
+
+The no-new-migrations precondition is right by default — a schema change merged into trunk is
+pulled by every other worktree next, and where dev data is shared a bad one costs everyone at
+once. But it makes one legitimate class of work permanently un-shippable without a person: an
+issue whose entire deliverable IS a schema change. Under a scheduled driver such an issue gets
+coded and wrapped unattended, then parks forever, every tick.
+
+A migration grant is the narrow yes: **per-issue, branch-bound, human-only, expiring.**
+Deliberately *not* a repo-level or tier-level switch — a repo-level key gets set once and then
+silently covers schema changes nobody actually reviewed.
+
+```sh
+# grant #98's branch an exemption — requires COLAB_HUMAN=1, exactly like colab promote
+COLAB_HUMAN=1 colab migration-grant 98 --branch feat/schema-98
+
+# revoke it — same bar, restores the gate the same minute
+COLAB_HUMAN=1 colab migration-grant 98 --revoke
+
+# see every grant outstanding right now (read-only, no COLAB_HUMAN needed)
+colab migration-grant --list
+```
+
+Required properties, and how each is met:
+
+- **Human-only to create.** `colab migration-grant` refuses (exit 1) unless `COLAB_HUMAN=1` is set
+  — the identical bar `colab promote` holds a production promotion to, and the check runs
+  *before* any network call. No flag, no `project.yml` field, and no inference from an issue's
+  content, age, or park count can produce a grant. Revoke carries the same bar.
+- **Bound to one issue AND one branch.** The grant is a `migration-granted` label (index +
+  GitHub's own write-permission check — a drive-by public commenter cannot manufacture one) plus
+  a comment on the issue carrying the exact branch name (a label alone cannot: GitHub caps label
+  names at 50 characters). `ship` honors a grant only when the comment's branch matches the branch
+  being shipped.
+- **Expires.** The instant the issue closes — `ship` reads the issue's live `state`, not a
+  separate expiry date. A grant can never become standing permission that outlives the work it
+  was reviewed for.
+- **Visible from any machine.** Both the label and the comment live on the tracker, exactly like
+  the `deps-checked` readiness marker — `ship` may run on a different machine than the one that
+  granted, so nothing here is written or read local-only. Without a usable `gh`, every
+  `migration-grant` subcommand refuses rather than write (or read) something invisible to the
+  machine that will later run `ship`.
+- **Covers the whole ship set, not one member of it (requirement 5).** `ship` validates the grant
+  over **every issue the branch carries** (`--issues`, never narrowed by `--refs`) — a migration
+  cannot be mechanically attributed to one member of a group branch, so if any claimed issue
+  lacks a valid grant for this branch, `ship` still refuses. One granted issue never smuggles an
+  unreviewed migration in for its siblings.
+- **Revocable, and auditable afterwards.** `--revoke` removes the label first (the gate is
+  restored the same minute) then posts a revoke receipt — answerable later who authorized which
+  schema change, when, and for which branch, straight from the issue's own comment history.
+- **Reviewable while outstanding.** `colab migration-grant --list` shows every issue with a live
+  grant right now, the branch it is bound to, who granted it, and when.
+
+**Nothing else changes.** CI green, claim corroboration, the trunk-checkout check, and the
+hand-merge conflict check all still run in full on a granted branch — a grant only ever widens
+the *one* precondition it targets, never reads as blanket authority. On a fully-granted branch the
+`no new migrations` row in the precondition table reads ✓, exactly as if there were no migration
+at all; a partially-granted branch still reads ✗ `human-gated`, naming which issue is missing a
+grant. See `colab migration-grant --help` for the full command reference.
 
 #### The squash commit message
 
@@ -1024,9 +1084,10 @@ either with a bare `git push` — the guard blocks trunk and main.
   deterministically by the tie-break, and the loser auto-yields. See *Claim lifecycle* above.
 - **Phase B is gated + push-protected.** `colab ship` merges to trunk only where the repo's
   `project.yml` grants `autonomy: auto-trunk` (no flag override), and aborts before any push if CI
-  isn't green, the branch adds migrations, or a non-generated merge conflict appears. The
-  `pre-push-guard` hook blocks raw pushes to trunk without `COLAB_SHIP=1`/`COLAB_HUMAN=1`. See
-  *Phase B autonomy ladder* above.
+  isn't green, the branch adds migrations with no valid `colab migration-grant` covering every
+  claimed issue (#98 — human-only, branch-bound, expires on close), or a non-generated merge
+  conflict appears. The `pre-push-guard` hook blocks raw pushes to trunk without
+  `COLAB_SHIP=1`/`COLAB_HUMAN=1`. See *Phase B autonomy ladder* above.
 - **Promotion is split from release.** `colab promote` (trunk → main) requires `COLAB_HUMAN=1` on a
   `deploy: push-main` repo (promotion *is* the production deploy) and allows an unattended main-loop
   run only on `deploy: tag` + `promotion: main-loop` (verification-only); unknown `deploy`/`promotion`

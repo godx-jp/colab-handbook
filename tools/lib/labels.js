@@ -41,6 +41,24 @@
  * to code (CONVENTIONS.md §5, *Planning*). It is provisioned like the rest of this set,
  * not created on demand the way `group:<key>` is, because its name is fixed and every
  * adopting repo needs it before the first triage pass can flag anything.
+ *
+ * `migration-granted` joined the set in #98: a human-only, per-issue, branch-bound, expiring
+ * exemption to `colab ship`'s no-new-migrations precondition, for the one legitimate class of
+ * work that gate would otherwise make permanently un-shippable unattended — an issue whose
+ * entire deliverable IS a schema change (CONVENTIONS.md §5, *Migration exemption*). `colab ship`
+ * reads it, on EVERY issue a branch carries, when — and only when — that branch touches a
+ * migration path; absence is the ordinary, unexempted case and costs nothing. Its nearest
+ * neighbour is `needs-ruling`, and the two point opposite directions: `needs-ruling` *blocks* a
+ * start pending a human review of the design; `migration-granted` *unblocks* a ship because a
+ * human already reviewed the schema change. It joins `CONVENTION_LABELS` rather than staying
+ * repo-opt-in like `tracking`/`graph-empty` because its absence fails MALIGNANTLY, not benignly:
+ * a repo that adopted before this label existed cannot create a grant at all, so the schema-
+ * change issue parks forever under a scheduled driver — discovered only at the moment it hits
+ * the wall, with no prior signal — which is exactly the "silently never back-filled it, and the
+ * check that label powers can then never fire" failure this file's own opening paragraph names.
+ * The label alone authorizes nothing (the branch binding lives in a comment marker,
+ * tools/lib/migration-grant.js, and no automated path ever writes either half) — an unused label
+ * is inert, an absent one is a wall.
  */
 
 const CONVENTION_LABELS = [
@@ -50,6 +68,7 @@ const CONVENTION_LABELS = [
   { name: 'epic', color: '3E4B9E', description: 'Container for sub-issues — informative, never a start candidate, never claimed as a unit of work' },
   { name: 'needs-ruling', color: 'B60205', description: 'Needs a human design ruling before this can start' },
   { name: 'needs-plan', color: '0052CC', description: 'Triage judged this hard — code-start should run code-plan before coding' },
+  { name: 'migration-granted', color: 'D93F0B', description: "A human granted this issue's branch an exemption from ship's no-new-migrations gate" },
 ];
 
 function conventionLabelNames() {
@@ -111,6 +130,22 @@ function mechanicalReadinessLabelArgs({ clear } = {}) {
     : ['--add-label', MECHANICAL_READINESS_LABEL];
 }
 
+// The migration-grant marker, named once (#98). CONVENTIONS.md §5 (Migration exemption) is the
+// prose source; `colab migration-grant`, `colab ship`'s grant read, and the provisioner all read
+// the name from HERE — the identical reason READINESS_LABEL is a shared constant, not a literal
+// repeated at each call site.
+const MIGRATION_GRANT_LABEL = 'migration-granted';
+
+// The `gh issue edit` label arguments for owning the migration-grant marker. Pure, same shape and
+// same reason as readinessLabelArgs: the write is a thin shell around
+// ghIssueEdit(repo, num, migrationGrantLabelArgs(...)), and the arg vector is the part worth
+// pinning with a test that makes no network call.
+function migrationGrantLabelArgs({ clear } = {}) {
+  return clear
+    ? ['--remove-label', MIGRATION_GRANT_LABEL]
+    : ['--add-label', MIGRATION_GRANT_LABEL];
+}
+
 // Given the label names a repo actually has, return the convention labels it is missing,
 // in the canonical order. Tolerant of null/undefined (a repo whose labels could not be
 // read is handled by the caller, not here) and of label objects vs bare strings.
@@ -137,6 +172,19 @@ function readinessMissingLabelHint(present) {
   return `this repo has no \`${READINESS_LABEL}\` label, so readiness cannot be marked — it adopted `
     + `the conventions before that label entered the set and never back-filled it. Run handbook-sync `
     + `(§7) to create the convention label set, then re-run the command.`;
+}
+
+// Same diagnosis as readinessMissingLabelHint, for the migration-grant marker (#98): a repo that
+// adopted before `migration-granted` entered the set has no such label, so a grant ADD hits a
+// label that does not exist. Same two-null contract: `present` null means the read itself failed
+// (fall back to the raw gh error), the label being present means the ADD failed for some other
+// reason — this function is not the one to explain that.
+function migrationGrantMissingLabelHint(present) {
+  if (!present) return null;
+  if (!missingConventionLabels(present).includes(MIGRATION_GRANT_LABEL)) return null;
+  return `this repo has no \`${MIGRATION_GRANT_LABEL}\` label, so a migration grant cannot be marked — it `
+    + `adopted the conventions before that label entered the set and never back-filled it. Run `
+    + `handbook-sync (§7) to create the convention label set, then re-run the command.`;
 }
 
 // The GROUP label prefix (CONVENTIONS.md §5, Grouping). `group:<key>` records that a set of
@@ -173,5 +221,6 @@ module.exports = {
   READINESS_LABEL, readinessLabelArgs, readinessMissingLabelHint,
   TRACKING_LABEL,
   MECHANICAL_READINESS_LABEL, mechanicalReadinessLabelArgs,
+  MIGRATION_GRANT_LABEL, migrationGrantLabelArgs, migrationGrantMissingLabelHint,
   GROUP_LABEL_PREFIX, isGroupLabel, groupLabelNames,
 };
