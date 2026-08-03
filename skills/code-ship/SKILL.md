@@ -568,10 +568,20 @@ leave one standing silently:
 
 ### Delete the plan file and journal its usage, in the same breath (#94)
 
-For **each** issue in the harvested set (B1b) that had a plan file — check the main
-checkout, not the worktree, which this step may already be removing. `$MAIN_REPO` is
-`§0`'s resolved absolute path; re-derive it here if this step runs in a fresh shell
-that no longer has it (#113):
+**`colab ship` does this for you** — per issue in the harvested set (B1b), it appends
+one line to `~/.colab/plan-journal.jsonl` (rung/cause read from the plan file's own
+front matter, verdict always `pass` — a `reject` never reaches this far) and only then
+deletes the plan file, chained so a failed journal write leaves it in place. This used
+to be a step only this shell snippet performed (#115: verified zero matches for
+`plan-journal`/`plans/issue-` in `tools/colab` before that fix), so a ship driven
+through the tool alone left the plan file on disk with no journal line — that gap is
+closed; nothing here to do on that path.
+
+**Only if you merged by hand** (no `colab ship` — a repo without `autonomy:
+auto-trunk`), do the equivalent yourself. For **each** issue in the harvested set that
+had a plan file — check the main checkout, not the worktree, which this step may
+already be removing. `$MAIN_REPO` is `§0`'s resolved absolute path; re-derive it here
+if this step runs in a fresh shell that no longer has it (#113):
 
 ```sh
 MAIN_REPO="${MAIN_REPO:-$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")}"
