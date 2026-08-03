@@ -1086,6 +1086,291 @@ function cmdMigrationGrantList(opts) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// ci-grant (#105) — a per-issue, human-only, branch-bound, RED-TRUNK-SHA-bound, expiring exemption
+// to `ship`'s trunk-CI-green precondition. See tools/lib/ci-grant.js for the verdict logic and
+// CONVENTIONS.md §5 (Red-trunk exemption) for the full design. This section is the gh I/O only —
+// modelled directly on the migration-grant block above, with two extra guards that grant does not
+// need (evidence measured on the branch's own head, and refusing to stack a second grant onto a
+// still-red trunk).
+// ---------------------------------------------------------------------------
+
+const HELP_CI_GRANT = `colab ci-grant <issue> --branch <branch> [--evidence-run <sha-or-url>] [--repo <path>]
+colab ci-grant <issue> --revoke [--repo <path>]
+colab ci-grant --list [--json] [--repo <path>]
+
+Own the ci-grant marker (#105) — a human-only, per-issue, BRANCH-BOUND and RED-TRUNK-SHA-BOUND,
+EXPIRING exemption to \`colab ship\`'s trunk-CI-green precondition, for the one legitimate case that
+gate otherwise makes permanently un-shippable unattended: a GENUINELY red trunk, where the candidate
+branch's entire content IS the fix and cannot reach trunk without shipping, while shipping requires
+the green the fix would produce. Nothing else can produce this exemption — no --force on ship, no
+project.yml field. A human act on the issue is the whole answer.
+
+  colab ci-grant <N> --branch <branch>   grant #N an exemption, bound to <branch> and to trunk's
+                                          CURRENT red sha (measured at grant time, not asserted)
+  colab ci-grant <N> --revoke            revoke #N's grant (idempotent — safe if none exists)
+  colab ci-grant --list [--json]         list every issue with a live grant right now
+
+THIS IS MORE DANGEROUS THAN A MIGRATION GRANT (colab migration-grant --help), and the two extra
+guards below exist because of that — a bad migration grant merges one reviewed schema change, a bad
+CI grant merges into a repo whose own test suite is known-failing:
+
+  1. EVIDENCE IS MEASURED, NEVER ASSERTED. Creating a grant requires a completed, successful CI run
+     for the BRANCH's own current head (the same "ask by sha" check \`ship\` itself uses) — a human's
+     say-so alone is never enough. \`--evidence-run\` is a RECORDING-ONLY pointer for the audit trail;
+     it can never substitute for the measured run. If the branch has no run yet, open a PR for it
+     (\`gh pr create\`) and let CI finish, then re-run this command.
+  2. NEVER STACKS. Creating a grant refuses outright if trunk is not currently red (nothing to
+     exempt), and refuses again if a PRIOR ci-grant already merged something and trunk has been red
+     continuously since — a second exemption on a still-broken repo is exactly the failure this gate
+     exists to prevent. Fix trunk by hand or revert the bad merge instead of granting again.
+
+HUMAN-ONLY, ENFORCED: both grant and revoke REFUSE (exit 1) unless COLAB_HUMAN=1 is set in the
+environment — the identical bar \`colab promote\`/\`colab migration-grant\` already hold. No field,
+flag or project.yml value can lower it. This check runs BEFORE any network call.
+
+The marker is TWO parts, both required for a grant to read as live:
+  - the \`${labels.CI_GRANT_LABEL}\` label — applying it requires GitHub write/triage permission, so
+    a drive-by commenter on a public repo cannot manufacture a grant.
+  - a \`${ciGrant.GRANT_MARK}\` comment on the issue — carries the BRANCH, the RED TRUNK SHA it was
+    reviewed against, the EVIDENCE RUN sha, who granted it, and when.
+\`colab ship\` honors a grant only when BOTH are present, the issue is still OPEN, the comment's
+branch matches the branch being shipped, trunk's CURRENT head sha still equals the red sha the
+grant names, the branch's CURRENT head still equals the evidenced sha, and the comment's author is
+a repo owner/member/collaborator. It EXPIRES the moment the issue closes, OR the moment trunk's
+head moves (granted-and-consumed by this exact ship, or moved for any other reason) — there is no
+separate expiry date, and unlike a migration grant it does not simply wait for the issue to close.
+
+This exemption is SCOPED NARROWLY: it covers ONLY the trunk-CI-green precondition. It never exempts
+the no-new-migrations gate, claim corroboration, the trunk-checkout-ready check, the hand-merge
+conflict preview, or \`colab promote\` — none of those ever consult it.
+
+On a GROUP branch (several claimed issues), EVERY issue must carry a valid grant for THIS branch and
+THIS red sha — a red trunk cannot be mechanically attributed to one member, so one granted issue
+must never smuggle an unreviewed merge in for its siblings.
+
+Revoking removes the label FIRST (the gate is restored the same minute) and posts a
+\`${ciGrant.REVOKE_MARK}\` receipt after. Revocation is not scoped to one branch or one grantor.
+
+There is deliberately no local-only fallback: without a usable \`gh\`, every subcommand here REFUSES
+rather than write (or read) something invisible to the machine \`ship\` might later run on.
+
+Options:
+  --branch <branch>       required for a grant; never inferred from HEAD
+  --evidence-run <ref>     recording-only note for the audit trail — never substitutes for the
+                           measured branch-head run this command itself checks
+  --revoke                 revoke instead of grant
+  --list                   list every issue with a live grant, instead of granting/revoking
+  --json                   (with --list) machine-readable output
+  --repo <path>            repo root (default: git root of cwd)
+`;
+
+function cmdCiGrant(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--repo': 'repo', '--branch': 'branch', '--evidence-run': 'evidenceRun' },
+    flags: { '--revoke': 'revoke', '--list': 'list', '--json': 'json', '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help) return print(HELP_CI_GRANT);
+  if (opts.list) return cmdCiGrantList(opts);
+  if (opts._.length === 0) return print(HELP_CI_GRANT);
+  const num = normIssueNum(opts._[0]);
+
+  // HUMAN-ONLY, first — identical posture and identical reason to cmdMigrationGrant's check above:
+  // assertable by a test against a fixture with no `gh` at all (tools/lib/ship-ci-grant.test.js).
+  if (process.env.COLAB_HUMAN !== '1') {
+    process.stderr.write(`✗ Refusing: ${opts.revoke ? 'revoking' : 'creating'} a CI grant requires a human.\n`);
+    process.stderr.write('  Re-run with COLAB_HUMAN=1. (No field, flag or project.yml value can lower this bar.)\n');
+    return 1;
+  }
+
+  const repoAbs = opts.repo ? resolveRepo(opts) : (git.repoRoot(process.cwd()) || null);
+  if (!repoAbs) throw new UserError('not inside a git repo — pass --repo <path>');
+
+  // Argument validation and local ref resolution BEFORE isGhUsable — same reasoning as
+  // cmdMigrationGrant: answerable from the working tree alone, so a `gh`-less runner still reaches
+  // these refusals rather than always bottoming out on the ambient "gh not usable" message.
+  if (!opts.revoke && !opts.branch) {
+    throw new UserError('--branch <branch> is required — a grant is bound to one branch, never inferred from the current checkout');
+  }
+  if (!opts.revoke && !git.branchExists(repoAbs, opts.branch)) {
+    throw new UserError(`branch "${opts.branch}" does not resolve to a ref (locally or on origin) — refusing to bind a grant to a name nothing exists at`);
+  }
+
+  if (!isGhUsable(repoAbs)) {
+    throw new UserError('gh not usable here (no gh auth or no origin remote) — a CI grant lives on the tracker, visible from any machine to the gate that reads it, and there is deliberately no local-only fallback');
+  }
+
+  return opts.revoke ? cmdCiGrantRevoke(repoAbs, num) : cmdCiGrantCreate(repoAbs, num, opts);
+}
+
+function cmdCiGrantCreate(repoAbs, num, opts) {
+  if (!opts.branch) {
+    throw new UserError('--branch <branch> is required — a grant is bound to one branch, never inferred from the current checkout');
+  }
+  if (!git.branchExists(repoAbs, opts.branch)) {
+    throw new UserError(`branch "${opts.branch}" does not resolve to a ref (locally or on origin) — refusing to bind a grant to a name nothing exists at`);
+  }
+
+  const info = git.ghIssueView(repoAbs, num, ['state', 'labels']);
+  if (!info) throw new UserError(`could not read #${num} from the tracker — refusing to write a grant blind`);
+  if (info.state !== 'OPEN') {
+    throw new UserError(`#${num} is ${info.state} — a grant expires the instant its issue closes, so granting a closed one would do nothing (CONVENTIONS.md §5, Red-trunk exemption)`);
+  }
+
+  const present = git.ghListLabels(repoAbs);
+  if (present && !present.includes(labels.CI_GRANT_LABEL)) {
+    throw new UserError(labels.ciGrantMissingLabelHint(present) || `this repo has no \`${labels.CI_GRANT_LABEL}\` label`);
+  }
+
+  const doc = projectDoc(repoAbs);
+  const trunk = resolveTrunk(repoAbs, doc);
+  if (!trunk) throw new UserError('Could not determine trunk branch (set project.yml trunk:)');
+
+  // ---- GUARD 2 (anti-stacking) FIRST — cheaper to fail here than after measuring evidence ----
+  git.git(['fetch', 'origin', trunk], repoAbs);
+  const trunkRun = git.ghRunForSha(repoAbs, trunk);
+  if (!trunkRun) throw new UserError(`could not read ${trunk}'s CI status (gh run list failed) — refusing to grant blind`);
+  const trunkIsRed = !(trunkRun.status === 'completed' && trunkRun.conclusion === 'success');
+  const redSha = trunkRun.sha;
+
+  // Heuristic, bounded-window scan for a prior grant-authorized merge (the `CI-Grant:` trailer,
+  // tools/lib/squash.js). This cannot see arbitrarily far back, and it is not meant to: see
+  // tools/lib/ci-grant.js's stackingVerdict doc comment for what this signal means and its limits.
+  const priorLog = git.git(['log', trunk, '--grep=^CI-Grant:', '-n', '5',
+    '--format=%H%x09%aI'], repoAbs);
+  let priorGrantMerge = null;
+  if (priorLog.ok && priorLog.stdout.trim()) {
+    const [sha, at] = priorLog.stdout.trim().split('\n')[0].split('\t');
+    priorGrantMerge = { sha, at };
+  }
+  let redContinuousSincePriorGrant = false;
+  if (priorGrantMerge) {
+    // Was there ANY successful trunk run created after the prior grant-merge's commit date? If so,
+    // trunk went green at some point since — this is a NEW, later red, not the same one stacking.
+    const runsR = git.run('gh', ['run', 'list', '--branch', trunk, '-L', '100',
+      '--json', 'conclusion,status,createdAt'], { cwd: repoAbs });
+    let wentGreenSince = false;
+    if (runsR.ok) {
+      try {
+        const runs = JSON.parse(runsR.stdout);
+        wentGreenSince = runs.some((r) => r.status === 'completed' && r.conclusion === 'success' && r.createdAt > priorGrantMerge.at);
+      } catch (_) { /* unparseable — treat conservatively as "cannot prove it went green" */ }
+    }
+    redContinuousSincePriorGrant = !wentGreenSince;
+  }
+  const stacking = ciGrant.stackingVerdict({ trunkIsRed, priorGrantMerge, redContinuousSincePriorGrant });
+  if (!stacking.ok) throw new UserError(stacking.reason);
+
+  // ---- GUARD 1 (evidence) — measured, never asserted ----
+  const evRun = git.ghRunForSha(repoAbs, opts.branch);
+  if (!evRun) throw new UserError(`could not read "${opts.branch}"'s CI status (gh run list failed) — refusing to grant blind`);
+  if (!(evRun.status === 'completed' && evRun.conclusion === 'success')) {
+    throw new UserError(
+      `"${opts.branch}" has no completed, successful CI run for its current head (${shortSha(evRun.sha)}) — ` +
+      `a CI grant requires MEASURED evidence, never a human's say-so alone. Open a PR for it ` +
+      `(\`gh pr create\`) and let CI finish, then re-run this command.`);
+  }
+  const evidenceSha = evRun.sha;
+
+  const editR = git.ghIssueEdit(repoAbs, num, labels.ciGrantLabelArgs({}));
+  if (!editR.ok) throw new UserError(`gh edit #${num} failed (${editR.stderr.split('\n')[0] || editR.code})`);
+
+  const iso = nowISO();
+  const commentR = git.ghIssueComment(repoAbs, num,
+    ciGrant.grantCommentBody(opts.branch, trunk, redSha, evidenceSha, HOST, iso));
+  if (!commentR.ok) {
+    git.ghIssueEdit(repoAbs, num, labels.ciGrantLabelArgs({ clear: true }));
+    throw new UserError(`label applied but the grant comment failed to post (${commentR.stderr.split('\n')[0] || commentR.code}) — rolled the label back so this does not read as granted. Re-run.`);
+  }
+
+  print(`Granted #${num} in ${shortRepo(repoAbs)} a CI exemption for branch "${opts.branch}".`);
+  print(`  Bound to red trunk sha ${shortSha(redSha)} and evidence run ${shortSha(evidenceSha)}.`);
+  if (opts.evidenceRun) print(`  (--evidence-run "${opts.evidenceRun}" noted for the audit trail — recording only, not what was checked.)`);
+  print(`  This covers ONLY the trunk-CI-green check, ONLY while ${trunk} stays at this sha, and expires the moment #${num} closes.`);
+  print(`  Revoke any time: colab ci-grant ${num} --revoke`);
+  return 0;
+}
+
+function cmdCiGrantRevoke(repoAbs, num) {
+  const info = git.ghIssueView(repoAbs, num, ['state', 'labels', 'comments']);
+  if (!info) throw new UserError(`could not read #${num} from the tracker`);
+  const labelNames = (info.labels || []).map((l) => (l && typeof l === 'object' ? l.name : l));
+  const hasLabel = labelNames.includes(labels.CI_GRANT_LABEL);
+  const live = ciGrant.liveGrants(info.comments);
+
+  if (!hasLabel && live.length === 0) {
+    print(`No live CI grant on #${num} in ${shortRepo(repoAbs)} — nothing to revoke.`);
+    return 0;
+  }
+
+  if (hasLabel) {
+    const r = git.ghIssueEdit(repoAbs, num, labels.ciGrantLabelArgs({ clear: true }));
+    if (!r.ok) {
+      throw new UserError(`could not remove ${labels.CI_GRANT_LABEL} on #${num} (${r.stderr.split('\n')[0] || r.code}) — the gate is NOT yet restored; retry`);
+    }
+  }
+
+  const branch = live.length ? live[live.length - 1].branch : '(no live grant found)';
+  const commentR = git.ghIssueComment(repoAbs, num, ciGrant.revokeCommentBody(branch, HOST, nowISO()));
+  if (!commentR.ok) {
+    warn(`label removed (the ship gate IS restored) but the revoke receipt failed to post (${commentR.stderr.split('\n')[0] || commentR.code}) — post it by hand for the audit trail:`);
+    warn(`  gh issue comment ${num} --body "${ciGrant.REVOKE_MARK} — branch \\\`${branch}\\\` · host \\\`${HOST}\\\` · ${nowISO()}"`);
+  }
+
+  print(`Revoked #${num}'s CI grant in ${shortRepo(repoAbs)} — the ship gate is restored.`);
+  return 0;
+}
+
+function cmdCiGrantList(opts) {
+  const repoAbs = opts.repo ? resolveRepo(opts) : (git.repoRoot(process.cwd()) || null);
+  if (!repoAbs) throw new UserError('not inside a git repo — pass --repo <path>');
+  if (!isGhUsable(repoAbs)) {
+    throw new UserError('gh not usable here (no gh auth or no origin remote) — cannot list CI grants');
+  }
+
+  const hits = git.ghIssueListByLabel(repoAbs, labels.CI_GRANT_LABEL, 'open', ['number', 'title']);
+  if (hits === null) {
+    throw new UserError(`could not read ${labels.CI_GRANT_LABEL}-labeled issues from the tracker`);
+  }
+
+  const doc = projectDoc(repoAbs);
+  const trunk = resolveTrunk(repoAbs, doc);
+  const trunkRun = trunk ? git.ghRunForSha(repoAbs, trunk) : null;
+  const currentTrunkSha = trunkRun ? trunkRun.sha : null;
+
+  const grants = [];
+  const stale = [];
+  for (const h of hits) {
+    const info = git.ghIssueView(repoAbs, h.number, ['state', 'labels', 'comments']);
+    const live = info ? ciGrant.liveGrants(info.comments) : [];
+    if (live.length === 0) { stale.push(h.number); continue; }
+    const g = live[live.length - 1];
+    // Spent: the normal post-ship state — trunk's head has moved past the sha this grant named.
+    // Not an error, just informative — distinguishes "still live, awaiting a ship" from "already
+    // used (or overtaken by an unrelated trunk change) and inert" without anyone revoking it.
+    const spent = currentTrunkSha !== null && g.redSha !== currentTrunkSha;
+    grants.push({ issue: h.number, title: h.title, branch: g.branch, redSha: g.redSha, evidenceSha: g.evidenceSha, by: g.login, authorAssociation: g.authorAssociation, at: g.at, spent });
+  }
+
+  if (opts.json) {
+    return print(JSON.stringify({ repo: shortRepo(repoAbs), label: labels.CI_GRANT_LABEL, grants, stale }, null, 2));
+  }
+
+  if (grants.length === 0 && stale.length === 0) {
+    print(`no outstanding CI grants in ${shortRepo(repoAbs)}`);
+    return 0;
+  }
+  print(table(
+    grants.map((g) => [String(g.issue), g.branch, shortSha(g.redSha), g.spent ? 'spent' : 'live', g.by || '(unknown)', g.title]),
+    ['ISSUE', 'BRANCH', 'RED SHA', 'STATE', 'GRANTED BY', 'TITLE'],
+  ));
+  if (stale.length) {
+    print('');
+    for (const n of stale) warn(`#${n} carries the ${labels.CI_GRANT_LABEL} label but has NO live grant comment — stale state, looks owned and joins to nothing. Revoke or re-grant.`);
+  }
+  return 0;
+}
+
 const HELP_CLAIMS = `colab claims [--json] [--sync]
 
 List all local claims, grouped by worktree.
@@ -4052,11 +4337,14 @@ promotes is an integration event of the same weight as a promotion, and stays hu
 
 Sequence (each step gated; any failure aborts before the push — the target is never half-shipped):
   a. autonomy gate      repo must grant auto-trunk (no --force override)
-  b. preconditions      target CI alive+green · no new migrations on branch (UNLESS every issue the
-                        branch carries holds a valid \`colab migration-grant\`, #98 — see below) ·
-                        trunk checkout clean · every closing claim corroborated by git (see below)
+  b. preconditions      target CI alive+green (UNLESS every issue the branch carries holds a valid
+                        \`colab ci-grant\` over trunk's CURRENT red sha, #105 — see below) · no new
+                        migrations on branch (UNLESS every issue holds a valid \`colab migration-grant\`,
+                        #98 — see below) · trunk checkout clean · every closing claim corroborated by
+                        git (see below)
                         (an integration line with NO runs at all borrows trunk's verdict, advisory —
-                        an ungated line is a normal early state; a RED line still blocks)
+                        an ungated line is a normal early state; a RED line still blocks; ci-grant
+                        covers trunk only, never a line)
   c. B0 sync            merge the target INTO the branch; non-generated conflict → abort (human merge);
                         generated-only conflict → repo's .colab/hooks/pre-ship regenerates, else abort
   d. B1 squash          re-check CI green, then squash-merge branch → target (Closes every claimed issue,
@@ -4091,6 +4379,18 @@ grant is bound to ONE issue and ONE branch, and expires the instant that issue c
 branch EVERY claimed issue needs a valid grant for THIS branch — one granted issue never smuggles
 an unreviewed migration in for its siblings. Revoke with \`--revoke\` (same COLAB_HUMAN=1 bar);
 list what is outstanding with \`--list\`. See \`colab migration-grant --help\` for the full design.
+
+CI GRANTS (#105) are the ONE narrow, human-created exception to the trunk-CI-green precondition —
+for the case where trunk is GENUINELY red and the candidate branch IS the fix, so it cannot reach
+trunk without shipping while shipping requires the green it would produce. Create one with
+\`colab ci-grant <N> --branch <br>\` (same COLAB_HUMAN=1 bar). Unlike a migration grant this ALSO
+requires a completed, successful CI run measured on the branch's own current head (never asserted),
+and it refuses to create a second grant while trunk is still red after one already merged
+(anti-stacking — this exemption must never become the way work ships on a permanently broken repo).
+A grant is bound to ONE issue, ONE branch, AND the red trunk sha it was reviewed against — it expires
+the instant that issue closes OR trunk's head moves, whichever comes first. It exempts ONLY the
+trunk-CI-green check: never the migration gate, claim corroboration, the trunk-checkout check, or
+\`colab promote\`. See \`colab ci-grant --help\` for the full design.
 
 The default squash subject is the branch's HIGHEST-WEIGHT commit (breaking > feat > fix > perf >
 refactor > docs > test > chore, ties to the oldest) — NOT its newest commit, which on a well-run
@@ -5642,6 +5942,7 @@ Commands:
                                         flow, \`ceremony: light\` only — no issue/claim/worktree (#83)
   readiness <issue> [--clear] [--mechanical] [--repo P]              own the deps-checked / graph-empty markers (§5)
   migration-grant <issue> --branch B | --revoke | --list [--json]    human-only ship migration exemption (#98)
+  ci-grant <issue> --branch B | --revoke | --list [--json]           human-only ship trunk-CI-green exemption (#105)
   claims [--json] [--sync]                                            list / reconcile with GitHub
 
   port alloc [--count N] [--range A-B] [--worktree N|--claim I|--label S]
@@ -5698,6 +5999,7 @@ function main(argv) {
     case 'solo': return cmdSolo(rest);
     case 'readiness': return cmdReadiness(rest);
     case 'migration-grant': return cmdMigrationGrant(rest);
+    case 'ci-grant': return cmdCiGrant(rest);
     case 'claims': return cmdClaims(rest);
     case 'port': return cmdPort(rest);
     case 'ports': return cmdPorts(rest);
