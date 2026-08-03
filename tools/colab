@@ -30,6 +30,7 @@ const checklist = require('./lib/checklist');
 const groupLabels = require('./lib/group-labels');
 const shipguard = require('./lib/shipguard');
 const migrationGrant = require('./lib/migration-grant');
+const ciGrant = require('./lib/ci-grant');
 const {
   HOST, UserError, normIssueNum, issueTag, claimKey, today, nowISO, hoursSince,
   parseArgs, table, shortRepo,
@@ -4317,28 +4318,105 @@ function resolveCloseRefsSplit(repoAbs, gh, issues, refsFromFlag) {
 }
 
 /**
- * CI precondition for `ship --dry --json`, classified into the closed vocabulary above. Mirrors the
- * prose path's rule exactly (same fallback: an integration line with NO runs at all borrows trunk's
- * verdict, advisory) so the two never disagree about whether CI is green — only about how the
- * reason for "no" is labelled.
+ * CI precondition — the SINGLE verdict producer for BOTH `ship --dry --json` and the prose path
+ * (#105; previously written out twice, which is exactly the drift risk this collapse removes).
+ * Mirrors the historical prose rule exactly (same fallback: an integration line with NO runs at
+ * all borrows trunk's verdict, advisory) so the two can no longer independently disagree about
+ * whether CI is green — only about how the reason for "no" is presented (array row vs object).
+ *
+ * `grantThunk`, if provided, is a function `(redSha) => {ok, granted, missing}` (tools/lib/ci-grant
+ * .js's evaluateShipSet shape) that this function calls LAZILY — ONLY when the raw verdict already
+ * failed, `target === trunk`, and the failure class is HUMAN_GATED. Never for SELF_CLEARING (a
+ * still-running run, a failed `gh run list`, or `gh` being unusable must never be papered over by a
+ * grant — those are transient reads, not a reviewed red). Never for a non-trunk line (an
+ * integration line's red already borrows trunk's advisory verdict when it has no runs of its own;
+ * widening the exemption to lines too is a decision this feature deliberately does not make).
+ *
+ * Returns the additive `grantVerdict` field (null unless the grant was actually consulted) so a
+ * caller can build the --dry --json `ciGrant` payload from the SAME verdict the prose detail
+ * string was built from — see ciGrantPayload, below.
  */
-function shipCiCheck(repoAbs, gh, target, trunk) {
+function shipCiCheck(repoAbs, gh, target, trunk, grantThunk) {
   const name = `${target === trunk ? 'trunk' : 'line'} CI green`;
-  if (!gh) return { name, ok: false, class: SELF_CLEARING, detail: 'gh not usable (no auth / no origin) — cannot confirm CI' };
+  if (!gh) return { name, ok: false, class: SELF_CLEARING, detail: 'gh not usable (no auth / no origin) — cannot confirm CI', grantVerdict: null };
   let run = git.ghRunForSha(repoAbs, target);
   let via = target;
   if (run && run.status === 'none' && target !== trunk) {
     run = git.ghRunForSha(repoAbs, trunk);
     via = `${trunk} (line "${target}" has no runs — ungated, advisory)`;
   }
-  if (!run) return { name, ok: false, class: SELF_CLEARING, detail: 'gh run list failed' };
+  if (!run) return { name, ok: false, class: SELF_CLEARING, detail: 'gh run list failed', grantVerdict: null };
   const at = `${via}@${shortSha(run.sha)}`;
   if (run.status === 'completed') {
-    if (run.conclusion === 'success') return { name, ok: true, class: null, detail: `run for ${at}: success` };
-    return { name, ok: false, class: HUMAN_GATED, detail: `run for ${at}: status=completed conclusion=${run.conclusion || 'none'}` };
+    if (run.conclusion === 'success') return { name, ok: true, class: null, detail: `run for ${at}: success`, grantVerdict: null };
+    return applyCiGrant(
+      { name, ok: false, class: HUMAN_GATED, detail: `run for ${at}: status=completed conclusion=${run.conclusion || 'none'}` },
+      target, trunk, run.sha, grantThunk);
   }
-  if (run.status === 'none') return { name, ok: false, class: HUMAN_GATED, detail: `no run for ${at} — CI is not wired for this ref, or never started for this commit` };
-  return { name, ok: false, class: SELF_CLEARING, detail: `run for ${at}: status=${run.status} — still running, retry later` };
+  if (run.status === 'none') {
+    return applyCiGrant(
+      { name, ok: false, class: HUMAN_GATED, detail: `no run for ${at} — CI is not wired for this ref, or never started for this commit` },
+      target, trunk, run.sha, grantThunk);
+  }
+  return { name, ok: false, class: SELF_CLEARING, detail: `run for ${at}: status=${run.status} — still running, retry later`, grantVerdict: null };
+}
+
+/**
+ * Folds a ci-grant (#105) into an already-failed, already-HUMAN_GATED trunk-CI-green verdict —
+ * shipCiCheck's ONLY call site for a grant, so the exemption cannot accidentally widen to the
+ * migration gate, claim corroboration, or the trunk-checkout check (none of those ever call this).
+ * Scoped to `target === trunk`: see shipCiCheck's doc comment for why a non-trunk line is excluded.
+ */
+function applyCiGrant(raw, target, trunk, redSha, grantThunk) {
+  if (target !== trunk || !grantThunk) return { ...raw, grantVerdict: null };
+  const grantVerdict = grantThunk(redSha);
+  if (grantVerdict && grantVerdict.ok) {
+    const by = grantVerdict.granted.map((g) => '#' + g.issue).join(' ');
+    return {
+      name: raw.name, ok: true, class: null,
+      detail: `PRECONDITION OVERRIDDEN by a human ci-grant on ${by} — trunk was red at ${shortSha(redSha)} (raw: ${raw.detail})`,
+      grantVerdict,
+    };
+  }
+  return { ...raw, grantVerdict };
+}
+
+/**
+ * ci-grant verdict for a ship's whole claimed issue set (#105) — read from the tracker AND measured
+ * evidence, validated by tools/lib/ci-grant.js's evaluateShipSet. ONLY invoked, via a thunk, by
+ * applyCiGrant above — and that only happens once the raw trunk-CI-green verdict has already
+ * failed, so an ordinary green-trunk ship never reaches this function and pays nothing for it.
+ *
+ * Evidence is MEASURED here, never asserted: a completed, successful run for `branch`'s CURRENT
+ * remote head, via the identical `ghRunForSha` the raw CI check itself uses — the same function,
+ * the same "ask by sha" discipline, applied to the branch instead of the target.
+ */
+function shipCiGrants(repoAbs, gh, issues, branch, trunk, redSha) {
+  if (!gh) {
+    return { ok: false, granted: [],
+      missing: [{ issue: null, reason: 'gh not usable (no auth / no origin) — a CI grant lives on the tracker and cannot be confirmed' }] };
+  }
+  const records = {};
+  for (const n of issues) records[n] = git.ghIssueView(repoAbs, n, ['state', 'labels', 'comments']);
+  const evRun = git.ghRunForSha(repoAbs, branch);
+  const evidence = !evRun ? null : { ok: evRun.status === 'completed' && evRun.conclusion === 'success', sha: evRun.sha };
+  return ciGrant.evaluateShipSet(issues, records, branch, trunk, redSha, evidence, labels.CI_GRANT_LABEL);
+}
+
+/**
+ * The trunk-CI-green row's --dry --json additive payload, built from the SAME grantVerdict
+ * shipCiCheck already computed (never re-derived) — so the prose detail string and the JSON field
+ * can never read differently. `null` when no grant was ever consulted: the ordinary green-trunk
+ * case, or a red integration line (grants are trunk-only, see shipCiCheck's doc comment).
+ */
+function ciGrantPayload(ciResult) {
+  if (!ciResult.grantVerdict) return null;
+  const g = ciResult.grantVerdict;
+  return {
+    ok: g.ok,
+    granted: g.granted.map((x) => ({ issue: x.issue, by: x.by, at: x.at, redSha: x.redSha, evidenceSha: x.evidenceSha })),
+    missing: g.missing.map((m) => ({ issue: m.issue, reason: m.reason })),
+  };
 }
 
 /**
@@ -4420,11 +4498,14 @@ function cmdShipDryJson(opts) {
   // #98: null when the branch carries no migration files (the ordinary case) — set alongside the
   // 'no new migrations' check, below, the moment migrations are found.
   let migrationGrantPayload = null;
+  // #105: null unless the trunk-CI-green check actually consulted a grant (i.e. the raw check
+  // already failed) — set alongside that check, below.
+  let ciGrantPayloadVal = null;
   const emit = (ok) => {
     print(JSON.stringify({
       ok, dry: true, repo: shortRepo(repoAbs), branch: sess.branch, worktree: sess.name || null,
       target, mode, issues: sess.issues, closeIssues, refsIssues, checklistFindings, checks,
-      migrationGrant: migrationGrantPayload,
+      migrationGrant: migrationGrantPayload, ciGrant: ciGrantPayloadVal,
     }, null, 2));
     return ok ? 0 : 1;
   };
@@ -4464,7 +4545,10 @@ function cmdShipDryJson(opts) {
 
   // ---- (b) the rest of the preconditions, same rules as the prose path ----
   const gh = isGhUsable(repoAbs);
-  checks.push(shipCiCheck(repoAbs, gh, target, trunk));
+  const ciResultJson = shipCiCheck(repoAbs, gh, target, trunk,
+    (redSha) => shipCiGrants(repoAbs, gh, sess.issues, sess.branch, trunk, redSha));
+  ciGrantPayloadVal = ciGrantPayload(ciResultJson);
+  checks.push({ name: ciResultJson.name, ok: ciResultJson.ok, class: ciResultJson.class, detail: ciResultJson.detail });
 
   // #74: same close-gate split the prose path runs, reported via the additive fields above.
   const refsFromFlagJson = new Set(
@@ -4748,20 +4832,15 @@ function cmdShip(argv) {
   // every ship into a line nobody has wired CI for would make the declared axis useless — which
   // pushes the work back to the undeclared workarounds. A line that HAS runs and is red still ✗:
   // once CI exists, it counts.
-  let ciOk = false;
-  const ciLabel = `${target === trunk ? 'trunk' : 'line'} CI green`;
-  if (!gh) { checks.push(['✗', ciLabel, 'gh not usable (no auth / no origin) — cannot confirm CI']); }
-  else {
-    let run = git.ghRunForSha(repoAbs, target);
-    let via = target;
-    if (run && run.status === 'none' && target !== trunk) {
-      run = git.ghRunForSha(repoAbs, trunk);
-      via = `${trunk} (line "${target}" has no runs — ungated, advisory)`;
-    }
-    if (!run) checks.push(['✗', ciLabel, 'gh run list failed']);
-    else if (run.status === 'completed' && run.conclusion === 'success') { ciOk = true; checks.push(['✓', ciLabel, `run for ${via}@${shortSha(run.sha)}: success`]); }
-    else checks.push(['✗', ciLabel, `${via}@${shortSha(run.sha)}: status=${run.status} conclusion=${run.conclusion || 'none'} (fail-to-start counts as not green; a cancelled sibling of a passing run on this sha would read success, not this)`]);
-  }
+  // #105: shipCiCheck is now the SINGLE verdict producer for this row — the JSON path (cmdShipDryJson)
+  // calls the identical function, so the two can no longer independently drift on whether CI is
+  // green. The grant lookup is passed as a THUNK (called with the red sha), not a precomputed
+  // value: shipCiCheck only invokes it when the raw verdict already failed, so an ordinary
+  // green-trunk ship makes zero extra `gh` reads for a grant nobody needs.
+  const ciResult = shipCiCheck(repoAbs, gh, target, trunk,
+    (redSha) => shipCiGrants(repoAbs, gh, sess.issues, sess.branch, trunk, redSha));
+  const ciOk = ciResult.ok;
+  checks.push([ciResult.ok ? '✓' : '✗', ciResult.name, ciResult.detail]);
   // No new migrations on the branch, measured against what it will merge into — UNLESS every
   // issue the branch carries holds a live, branch-bound migration grant (#98). Grants are read
   // from the tracker only when a migration actually exists, so the ordinary ship pays nothing.
@@ -5005,14 +5084,20 @@ function cmdShip(argv) {
   }
 
   // ---- (d) B1: re-verify CI, then squash-merge into the target ----
+  // #105: a GENUINE re-read via shipCiCheck (never cached from the precondition table above) — B1
+  // exists precisely to catch trunk going red BETWEEN the table and the merge. Passing the same
+  // grant thunk means a ci-grant that covered the earlier table also covers this re-check, but
+  // ONLY while the red sha has not moved: shipCiCheck measures target's CURRENT head sha fresh
+  // right here, and ci-grant.js's evaluateIssue refuses the moment that sha no longer matches what
+  // the grant was reviewed against — so a grant-authorized ship that itself changed trunk's head
+  // (or a trunk that moved for any other reason between the table and here) can never silently
+  // ride the same grant twice.
   if (gh) {
-    let run2 = git.ghRunForSha(repoAbs, target);
-    // Same fallback as the precondition: an ungated line borrows trunk's verdict rather than
-    // blocking. The two must agree, or a ship passes the table and dies at the re-check.
-    if (run2 && run2.status === 'none' && target !== trunk) run2 = git.ghRunForSha(repoAbs, trunk);
-    if (!(run2 && run2.status === 'completed' && run2.conclusion === 'success')) {
+    const ciResultB1 = shipCiCheck(repoAbs, gh, target, trunk,
+      (redSha) => shipCiGrants(repoAbs, gh, sess.issues, sess.branch, trunk, redSha));
+    if (!ciResultB1.ok) {
       cleanupEphemeral();
-      process.stderr.write(`✗ B1: CI for ${target} is no longer green — aborting before merge. Nothing pushed.\n`);
+      process.stderr.write(`✗ B1: CI for ${target} is no longer green — aborting before merge. Nothing pushed. (${ciResultB1.detail})\n`);
       return 1;
     }
   }
