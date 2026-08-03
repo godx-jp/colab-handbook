@@ -10,8 +10,18 @@ Runs **inside an implementing session**, either right after
 rung-1 stub hits an escalation trigger. It never runs on its own — there is no session to
 seed the plan into, and no branch or worktree for it to describe.
 
-Notation: `$N` = the feature's Issue number · plan file = `.claude/plans/issue-$N.md` in
-the **main checkout**, outside any worktree (`CONVENTIONS.md` §5, *Planning*).
+Notation: `$N` = the feature's Issue number · plan file = `$PLAN`, resolved as
+`.claude/plans/issue-$N.md` in the **main checkout**, outside any worktree
+(`CONVENTIONS.md` §5, *Planning*):
+
+```sh
+MAIN_REPO="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+PLAN="$MAIN_REPO/.claude/plans/issue-$N.md"
+```
+
+Resolve it this way even when the calling session is already inside a worktree (#113) —
+a bare `.claude/plans/issue-$N.md` resolves against `$PWD`, which is the worktree's own
+directory of the same name, not the main checkout's.
 
 ## Why a subagent, and why a stronger model
 
@@ -133,8 +143,9 @@ in the conversation.
 
 ## Verify complete
 
-- The plan file exists at `.claude/plans/issue-$N.md`, outside any worktree, with valid
-  frontmatter (`issue`, `rung: 2`, `cause`, `model`, `drafted`).
+- The plan file exists at `$PLAN` (`.claude/plans/issue-$N.md` in the **main checkout**,
+  resolved via `--git-common-dir`, never a bare relative path — #113), outside any
+  worktree, with valid frontmatter (`issue`, `rung: 2`, `cause`, `model`, `drafted`).
 - The acceptance oracle is stated precisely enough to grade a diff against later — if you
   cannot imagine `code-ship` reading it and reaching a verdict, it is not precise enough.
 - A flagged run quoted the triage reason line; a self-escalated run wrote its own,

@@ -76,11 +76,12 @@ gh issue comment $N -b "**<YYYY-MM-DD>** — did X, decided Y, left Z open."
 - **`ceremony: light` repo** — distill real gotchas only; skip the progress-commentary
   comment (the `**<YYYY-MM-DD>** — did X…` line above). A tick of the checklist and a
   genuine decision/gotcha still belong here — this thins commentary, not knowledge.
-- **Wrote or extended a plan file this session** (`.claude/plans/issue-$N.md`, #94)?
-  Anything in it worth keeping past this session moves here, now — the file itself is
-  disposable and dies at `code-ship` teardown. A rung-2 plan's *Approach* and *Risks*
-  sections are the likeliest candidates when the reasoning behind a non-obvious choice
-  would otherwise be lost with the file.
+- **Wrote or extended a plan file this session** (`$PLAN`, i.e.
+  `<main checkout>/.claude/plans/issue-$N.md` — resolve via `--git-common-dir`, never a
+  bare relative path, #113; #94)? Anything in it worth keeping past this session moves
+  here, now — the file itself is disposable and dies at `code-ship` teardown. A rung-2
+  plan's *Approach* and *Risks* sections are the likeliest candidates when the reasoning
+  behind a non-obvious choice would otherwise be lost with the file.
 
 #### Filing a follow-up here? It is agent-filed, and it must say so
 
@@ -205,9 +206,9 @@ it, don't paper over it (`CONVENTIONS.md` §8).
 
 **The gate going green against the plan's stated oracle IS the stop condition
 (#94).** Not a floor to build past — polishing beyond what the oracle asks for is
-scope creep, not diligence. If the plan file (`.claude/plans/issue-$N.md`, when one
-exists) names the oracle, that is what "done" means for this session; a green gate
-that satisfies it is the signal to move to A4, not a reason to keep going.
+scope creep, not diligence. If the plan file (`$PLAN`, when one exists) names the
+oracle, that is what "done" means for this session; a green gate that satisfies it is
+the signal to move to A4, not a reason to keep going.
 
 #### Read the verdict, not the transcript
 
@@ -278,8 +279,11 @@ never by trusting this session's word for it:
 - [ ] distill comment posted on each carried issue (A1)
 - [ ] gate result recorded — green, or red-for-an-unrelated-reason reported (A3)
 - [ ] claim(s) still held — nothing here releases them; `code-ship` B3 does
-- [ ] plan file present at `.claude/plans/issue-$N.md`, **if** one was written this
-      session (#94) — absent is fine when the work never needed one (rung 0)
+- [ ] plan file present at `$MAIN_REPO/.claude/plans/issue-$N.md` — the **absolute main
+      checkout path**, resolved via `--git-common-dir`, not "present in `.claude/plans/`"
+      relative to wherever this checklist happens to be asserted from (#113) — **if** one
+      was written this session (#94); absent is fine when the work never needed one
+      (rung 0)
 
 State this checklist, filled in, as the last thing you report. A box you cannot
 check is not a reason to force it true — say what is missing and why, and let

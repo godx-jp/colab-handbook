@@ -34,11 +34,17 @@ under any authorization.
 directly — a session's own report of its state is exactly the kind of self-grading #94
 exists to add a second check on top of:
 
+**Resolve `$MAIN_REPO` first, from wherever this coordinator session happens to be
+running** — it may itself be inside a worktree, and every plan-file path below is
+meaningless unless it is anchored to the main checkout rather than `$PWD` (#113):
+
 ```sh
+MAIN_REPO="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+
 git ls-remote origin <branch>                              # branch actually pushed?
 gh issue view $N --comments | tail -5                       # distill comment present?
 colab claims                                                 # claim(s) still held?
-ls .claude/plans/issue-$N.md 2>/dev/null                    # plan file, if one was written
+ls "$MAIN_REPO/.claude/plans/issue-$N.md" 2>/dev/null        # plan file, if one was written
 ```
 
 - **Branch not on the remote** → `code-wrap` did not finish A5. Stop; do not improvise a
@@ -242,12 +248,12 @@ this convention and be held to it retroactively).
 
 ## B1c. Grade the diff against the plan (#94)
 
-Read the plan file, if one exists, from the **main checkout** — `.claude/plans/issue-<N>.md`
-per issue in the harvested set (B1b), not the worktree, which may be mid-teardown by the
-time anything reads this:
+Read the plan file, if one exists, from the **main checkout** — `$MAIN_REPO/.claude/plans/issue-<N>.md`
+(`$MAIN_REPO` as resolved in §0, not `$PWD` — #113) per issue in the harvested set (B1b),
+not the worktree, which may be mid-teardown by the time anything reads this:
 
 ```sh
-cat .claude/plans/issue-<N>.md 2>/dev/null   # per issue that carried one
+cat "$MAIN_REPO/.claude/plans/issue-<N>.md" 2>/dev/null   # per issue that carried one
 ```
 
 - **Plan file present** → grade the diff against its *Acceptance oracle* and *Files*
@@ -563,9 +569,12 @@ leave one standing silently:
 ### Delete the plan file and journal its usage, in the same breath (#94)
 
 For **each** issue in the harvested set (B1b) that had a plan file — check the main
-checkout, not the worktree, which this step may already be removing:
+checkout, not the worktree, which this step may already be removing. `$MAIN_REPO` is
+`§0`'s resolved absolute path; re-derive it here if this step runs in a fresh shell
+that no longer has it (#113):
 
 ```sh
+MAIN_REPO="${MAIN_REPO:-$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")}"
 for N in <harvested issue numbers>; do
   PLAN="$MAIN_REPO/.claude/plans/issue-$N.md"
   [ -f "$PLAN" ] || continue

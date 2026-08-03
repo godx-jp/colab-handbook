@@ -983,6 +983,23 @@ does. The file is disposable by design; anything worth keeping past the session 
 the Issue at wrap ([code-wrap A1](skills/code-wrap/SKILL.md)), same as any other
 knowledge this convention set treats as durable.
 
+**"The main checkout" is a resolved absolute path, never a bare relative one (#113).** A
+session inside a worktree has its own `.claude/plans/` sitting one `cd` away — a bare
+`.claude/plans/issue-<N>.md` resolves against `$PWD`, which is exactly correct when `$PWD`
+is the main checkout and silently wrong (writes into, or reads from, the *worktree's* copy)
+the rest of the time, with no error to notice the mistake by. Anchor it explicitly, every
+time, the same way `code-sweep` and `code-triage` anchor their own repo-root lookups:
+
+```sh
+MAIN_REPO="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+PLAN="$MAIN_REPO/.claude/plans/issue-<N>.md"
+```
+
+`--git-common-dir` resolves to the main checkout's `.git` from *any* worktree of the same
+repo, so this is safe to run from inside one. Every skill that touches the plan file
+(`code-start`, `code-plan`, `code-wrap`'s hand-off checklist, `code-ship`) uses `$PLAN`
+computed this way — never a bare `.claude/plans/issue-<N>.md`.
+
 **Three rungs, the middle one the default:**
 
 | Rung | When | Content |

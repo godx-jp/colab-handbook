@@ -243,6 +243,17 @@ outside any worktree you are about to create in step 4** (it has to exist before
 worktree does, and survive after `code-ship` tears it down). Git-excluded, never
 committed.
 
+**Resolve the path, don't assume `$PWD` is the main checkout (#113).** You are running
+this step *before* step 4's worktree exists, so `$PWD` usually is the main checkout right
+now — but if you're resuming a session that's already inside a worktree, a bare
+`.claude/plans/issue-$N.md` silently reads/writes that worktree's own copy instead. Anchor
+it every time:
+
+```sh
+MAIN_REPO="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+PLAN="$MAIN_REPO/.claude/plans/issue-$N.md"
+```
+
 **Check for the flag first — you already have the data.** The `gh issue view $N` you ran
 above is a **direct fetch**, which is read-your-writes consistent; never re-check the flag
 through `gh issue list --search`, whose index can lag the triage run that just set it by
