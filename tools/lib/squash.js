@@ -227,6 +227,17 @@ function reconcileClosesRefsConflict(message, closeNums, conflicts) {
  * @param {Array} [conflicts]                               when given, collects `{num, from, to}` for
  *                                                          every inherited trailer `spliceCloses`
  *                                                          overruled — see `reconcileClosesRefsConflict`
+ * @param {string[]} [extraTrailerLines]                    COMPOSED trailer lines this call itself
+ *                                                          wants appended (e.g. #105's `CI-Grant:`) —
+ *                                                          NOT inherited from a commit body, so they
+ *                                                          bypass harvestTrailers entirely and are
+ *                                                          glued on with the identical "onto an
+ *                                                          existing trailer block, never mid-value"
+ *                                                          rule. Never widens TRAILER_KEYS/
+ *                                                          harvestTrailers — that allowlist is for
+ *                                                          trailers INHERITED from carried commits,
+ *                                                          a different concern from one this call
+ *                                                          composes itself.
  * @returns {string} the commit message
  *
  * Layout — subject, then body blocks in this order:
@@ -235,8 +246,9 @@ function reconcileClosesRefsConflict(message, closeNums, conflicts) {
  *   - other subjects         every commit except the chosen one, newest-first, sync-noise dropped
  *   <chosen commit's body>   verbatim
  *   <harvested trailers>     only those not already present above
+ *   <extraTrailerLines>      only those not already present above, appended last
  */
-function composeSquashMessage(commits, closes = [], refs = [], conflicts) {
+function composeSquashMessage(commits, closes = [], refs = [], conflicts, extraTrailerLines = []) {
   const list = Array.isArray(commits) ? commits.filter(Boolean) : [];
   if (list.length === 0) return '';
 
@@ -263,12 +275,23 @@ function composeSquashMessage(commits, closes = [], refs = [], conflicts) {
   // `Co-authored-by` vs `Co-Authored-By`, and an exact-match test appends a second copy of a trailer
   // the body already carries.
   const present = new Set(assembled.split('\n').map((l) => l.trim().toLowerCase()));
-  const extraTrailers = harvestTrailers(list).filter((t) => !present.has(t.toLowerCase()));
-  if (extraTrailers.length) {
+  const inheritedTrailers = harvestTrailers(list).filter((t) => !present.has(t.toLowerCase()));
+  if (inheritedTrailers.length) {
     // Glue trailers onto an existing trailer block; otherwise start a new paragraph, so git still
     // reads the last paragraph as trailers.
     const lastLine = assembled.split('\n').pop().trim();
-    assembled += (TRAILER_RE.test(lastLine) ? '\n' : '\n\n') + extraTrailers.join('\n');
+    assembled += (TRAILER_RE.test(lastLine) ? '\n' : '\n\n') + inheritedTrailers.join('\n');
+  }
+
+  // #105: trailers THIS CALL composes itself (never inherited from a carried commit) — same
+  // glue-onto-a-trailer-block-never-mid-value rule, applied after the inherited ones so a
+  // composed trailer never lands ABOVE one a commit body actually wrote.
+  const composedTrailers = (Array.isArray(extraTrailerLines) ? extraTrailerLines : [])
+    .filter(Boolean)
+    .filter((t) => !present.has(String(t).trim().toLowerCase()) && !inheritedTrailers.some((i) => i.toLowerCase() === String(t).trim().toLowerCase()));
+  if (composedTrailers.length) {
+    const lastLine = assembled.split('\n').pop().trim();
+    assembled += (TRAILER_RE.test(lastLine) ? '\n' : '\n\n') + composedTrailers.join('\n');
   }
 
   return spliceCloses(assembled, closes, refs, conflicts);

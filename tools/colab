@@ -4018,8 +4018,22 @@ function branchChangedFiles(mainRoot, base, branch) {
  * is defined to return '' for an empty commit list. Callers must treat that as "no subject to
  * derive", never as "empty string, use it" — see the two call sites below.
  */
-function buildSquashMessage(mainRoot, trunk, branch, closes, refs = [], conflicts) {
-  return squash.composeSquashMessage(branchCommits(mainRoot, trunk, branch), closes, refs, conflicts);
+function buildSquashMessage(mainRoot, trunk, branch, closes, refs = [], conflicts, extraTrailerLines = []) {
+  return squash.composeSquashMessage(branchCommits(mainRoot, trunk, branch), closes, refs, conflicts, extraTrailerLines);
+}
+
+/**
+ * The `CI-Grant:` trailer line (#105) — the audit trail for a ship that went through UNDER an
+ * exemption, belt-and-braces with the tracker comment (the commit is the artifact that survives a
+ * later tracker read failure). One line naming every granted issue, the branch, the red trunk sha
+ * it was reviewed against, and the evidence run sha — enough for a human reading `git log` alone
+ * to reconstruct what was overridden and against what, with no tracker access at all.
+ */
+function ciGrantTrailerLine(grantVerdict, branch, trunk) {
+  if (!grantVerdict || !grantVerdict.ok || !grantVerdict.granted.length) return null;
+  const g = grantVerdict.granted[0]; // redSha/evidenceSha are identical across the whole granted set (evaluateShipSet)
+  const issues = grantVerdict.granted.map((x) => '#' + x.issue).join(' ');
+  return `CI-Grant: ${issues} branch ${branch} over-red ${trunk}@${shortSha(g.redSha)} evidence ${shortSha(g.evidenceSha)}`;
 }
 
 const HELP_SHIP = `colab ship [--repo <path>] [--worktree <name> | --branch <br>] [--message "<msg>"] [--refs <N[,M]>] [--keep-worktree] [--delete-branch] [--dry] [--json]
@@ -5092,6 +5106,7 @@ function cmdShip(argv) {
   // the grant was reviewed against — so a grant-authorized ship that itself changed trunk's head
   // (or a trunk that moved for any other reason between the table and here) can never silently
   // ride the same grant twice.
+  let ciGrantForTrailer = null; // #105: set below when B1 shipped UNDER a grant — read at commit-message time
   if (gh) {
     const ciResultB1 = shipCiCheck(repoAbs, gh, target, trunk,
       (redSha) => shipCiGrants(repoAbs, gh, sess.issues, sess.branch, trunk, redSha));
@@ -5099,6 +5114,10 @@ function cmdShip(argv) {
       cleanupEphemeral();
       process.stderr.write(`✗ B1: CI for ${target} is no longer green — aborting before merge. Nothing pushed. (${ciResultB1.detail})\n`);
       return 1;
+    }
+    if (ciResultB1.grantVerdict && ciResultB1.grantVerdict.ok) {
+      warn(`  ✓ trunk CI green ONLY because of a human ci-grant — this merge carries a CI-Grant: trailer.`);
+      ciGrantForTrailer = ciResultB1.grantVerdict;
     }
   }
   // WHERE the squash happens. Into trunk it is the main checkout, which is on trunk by invariant
@@ -5125,14 +5144,22 @@ function cmdShip(argv) {
   // Collects one {num, from, to} per inherited trailer the composer overruled (#58: a branch commit
   // wrote e.g. `Refs #53` before #53 was decided as a Closes) — surfaced below, not silently dropped.
   const trailerConflicts = [];
+  // #105: the audit-trail trailer for a ship that went through under a ci-grant — empty array on
+  // the ordinary (no grant consulted) path, so this changes nothing when #105 never fires.
+  const ciTrailer = ciGrantTrailerLine(ciGrantForTrailer, sess.branch, target);
+  const ciTrailerLines = ciTrailer ? [ciTrailer] : [];
   if (opts.message) {
     // --message overrides the subject/body, but Closes is spliced in as its own paragraph — never
     // concatenated. Appending it welded ` — Closes #N` onto whatever the message ended with, which
     // for any message carrying a trailer block corrupted the last trailer's value.
     commitMsg = squash.spliceCloses(opts.message, closeIssues, refsIssues, trailerConflicts);
+    if (ciTrailer && !commitMsg.toLowerCase().includes(ciTrailer.toLowerCase())) {
+      const lastLine = commitMsg.split('\n').pop().trim();
+      commitMsg += (/^(?:Co-authored-by|Signed-off-by|Claude-Session|Reviewed-by):\s*\S/i.test(lastLine) ? '\n' : '\n\n') + ciTrailer;
+    }
   } else {
     // Preserve the branch's crafted commit (subject + footers); insert Closes/Refs above the footers.
-    commitMsg = buildSquashMessage(repoAbs, target, sess.branch, closeIssues, refsIssues, trailerConflicts);
+    commitMsg = buildSquashMessage(repoAbs, target, sess.branch, closeIssues, refsIssues, trailerConflicts, ciTrailerLines);
     if (!commitMsg) {
       // #57: no commit on the branch's own first-parent chain carries a subject to borrow. Failing
       // here, with a clear reason, beats either of the two silent alternatives — inventing one from

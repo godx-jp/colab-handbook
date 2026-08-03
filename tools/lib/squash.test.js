@@ -209,6 +209,39 @@ test('duplicate trailers collapse, case-insensitively', () => {
   assert.strictEqual(msg.match(/co-authored-by:/gi).length, 1);
 });
 
+// --- #105: extraTrailerLines — composed trailers, distinct from harvested/inherited ones --------
+
+test('extraTrailerLines: a composed trailer (e.g. CI-Grant:) lands in the block, appended after inherited ones', () => {
+  const commits = [
+    c('docs: tidy', 'Co-Authored-By: Someone <s@example.com>'),
+    c('feat: the work', 'Body of the real change.'),
+  ];
+  const msg = composeSquashMessage(commits, [], [], undefined, ['CI-Grant: #105 branch fix/x-105 over-red main@aaaaaaa evidence ccccccc']);
+  assert.match(msg, /Body of the real change\./);
+  assert.match(msg, /Co-Authored-By: Someone <s@example\.com>/);
+  assert.match(msg, /CI-Grant: #105 branch fix\/x-105 over-red main@aaaaaaa evidence ccccccc/);
+  // Appended AFTER the inherited trailer, never before it.
+  const coIdx = msg.indexOf('Co-Authored-By');
+  const grantIdx = msg.indexOf('CI-Grant');
+  assert.ok(coIdx < grantIdx, 'composed trailer must land after an inherited one, never before');
+});
+
+test('extraTrailerLines: never duplicated if the text already carries the identical line', () => {
+  const commits = [c('feat: x', 'CI-Grant: #105 branch fix/x-105 over-red main@aaaaaaa evidence ccccccc')];
+  const msg = composeSquashMessage(commits, [], [], undefined, ['CI-Grant: #105 branch fix/x-105 over-red main@aaaaaaa evidence ccccccc']);
+  assert.strictEqual((msg.match(/CI-Grant:/g) || []).length, 1);
+});
+
+test('extraTrailerLines: empty/undefined adds nothing, and never inside a trailer VALUE', () => {
+  const commits = [c('feat: x', 'Co-Authored-By: A <a@example.com>')];
+  const withNone = composeSquashMessage(commits, [], [], undefined, []);
+  const withUndef = composeSquashMessage(commits, [], [], undefined);
+  assert.strictEqual(withNone, withUndef);
+  assert.ok(!/CI-Grant/.test(withNone));
+  // The trailer's own value line must never be corrupted by a glued composed trailer.
+  assert.match(withNone, /^Co-Authored-By: A <a@example\.com>$/m);
+});
+
 test('harvestTrailers ignores prose that merely contains a colon', () => {
   const found = harvestTrailers([c('feat: x', 'Note: this is prose.\nCloses #4\nSigned-off-by: A <a@example.com>')]);
   assert.deepStrictEqual(found, ['Signed-off-by: A <a@example.com>']);
