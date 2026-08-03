@@ -60,6 +60,22 @@
  * tools/lib/migration-grant.js, and no automated path ever writes either half) — an unused label
  * is inert, an absent one is a wall.
  *
+ * `ci-granted` joined the set in #105: a human-only, per-issue, branch-bound, expiring
+ * exemption to `colab ship`'s trunk-CI-green precondition, for the one case that gate
+ * otherwise makes permanently un-shippable unattended — a GENUINELY red trunk, where the
+ * candidate branch IS the fix and cannot reach trunk without shipping, and shipping
+ * requires the green the fix would produce (CONVENTIONS.md §5, *Red-trunk exemption*). Its
+ * nearest neighbour is `migration-granted` (#98) — same shape, same write path
+ * (`COLAB_HUMAN=1`, label + branch-bound comment marker, tools/lib/ci-grant.js) — but this
+ * one is strictly more dangerous: a bad migration grant merges one reviewed schema change,
+ * a bad CI grant merges into a repo whose own test suite is known-failing. So unlike the
+ * migration grant it also carries a bound RED TRUNK SHA (the grant expires the instant
+ * trunk's head moves, granted or not) and requires MEASURED evidence — a real green run on
+ * the branch's own head — never a human's say-so alone. It joins `CONVENTION_LABELS` for
+ * the identical malignant-absence reason `migration-granted` did: a repo that adopted
+ * before this label existed cannot create a grant at all, so the fix for its own red trunk
+ * parks forever with no signal until the moment it hits the wall.
+ *
  * `delivery:*` joined the set in #112: a tracker mixes issues whose delivery is NOT a code
  * commit — a content push, an ops/production check, a docs sync outside code review — into a
  * pipeline whose every stage (worktree, gate, mergeable, squash, `Closes #N`) assumes one. Such
@@ -87,6 +103,7 @@ const CONVENTION_LABELS = [
   { name: 'needs-ruling', color: 'B60205', description: 'Needs a human design ruling before this can start' },
   { name: 'needs-plan', color: '0052CC', description: 'Triage judged this hard — code-start should run code-plan before coding' },
   { name: 'migration-granted', color: 'D93F0B', description: "A human granted this issue's branch an exemption from ship's no-new-migrations gate" },
+  { name: 'ci-granted', color: 'D73A4A', description: "A human granted this branch a one-shot exemption from ship's trunk-CI-green gate" },
   { name: 'delivery:code', color: '1D76DB', description: 'Delivery is a code commit — the ordinary code pipeline applies' },
   { name: 'delivery:content', color: 'FEF2C0', description: 'Delivery is a content push, not a code commit — route, do not start in the code pipeline' },
   { name: 'delivery:ops', color: 'D4C5F9', description: 'Delivery is an ops/production check, not a code commit — route, do not start in the code pipeline' },
@@ -248,6 +265,37 @@ function migrationGrantMissingLabelHint(present) {
     + `handbook-sync (§7) to create the convention label set, then re-run the command.`;
 }
 
+// The ci-grant marker, named once (#105). CONVENTIONS.md §5 (Red-trunk exemption) is the prose
+// source; `colab ci-grant`, `colab ship`'s grant read, and the provisioner all read the name from
+// HERE — the identical reason MIGRATION_GRANT_LABEL is a shared constant, not a literal repeated
+// at each call site.
+const CI_GRANT_LABEL = 'ci-granted';
+
+// The `gh issue edit` label arguments for owning the ci-grant marker. Pure, same shape and same
+// reason as migrationGrantLabelArgs: the write is a thin shell around
+// ghIssueEdit(repo, num, ciGrantLabelArgs(...)), and the arg vector is the part worth pinning
+// with a test that makes no network call. A DIFFERENT function from migrationGrantLabelArgs on
+// purpose — two grants that share a call site could let a caller flip one when it meant the
+// other, exactly the reason mechanicalReadinessLabelArgs stays split from readinessLabelArgs.
+function ciGrantLabelArgs({ clear } = {}) {
+  return clear
+    ? ['--remove-label', CI_GRANT_LABEL]
+    : ['--add-label', CI_GRANT_LABEL];
+}
+
+// Same diagnosis as migrationGrantMissingLabelHint, for the ci-grant marker (#105): a repo that
+// adopted before `ci-granted` entered the set has no such label, so a grant ADD hits a label that
+// does not exist. Same two-null contract: `present` null means the read itself failed (fall back
+// to the raw gh error), the label being present means the ADD failed for some other reason — this
+// function is not the one to explain that.
+function ciGrantMissingLabelHint(present) {
+  if (!present) return null;
+  if (!missingConventionLabels(present).includes(CI_GRANT_LABEL)) return null;
+  return `this repo has no \`${CI_GRANT_LABEL}\` label, so a CI grant cannot be marked — it `
+    + `adopted the conventions before that label entered the set and never back-filled it. Run `
+    + `handbook-sync (§7) to create the convention label set, then re-run the command.`;
+}
+
 // The GROUP label prefix (CONVENTIONS.md §5, Grouping). `group:<key>` records that a set of
 // issues must share one branch — the key is the branch slug minus its trailing issue numbers.
 // Deliberately NOT in CONVENTION_LABELS: it is per-group (one label PER key, not one fixed
@@ -283,6 +331,7 @@ module.exports = {
   TRACKING_LABEL,
   MECHANICAL_READINESS_LABEL, mechanicalReadinessLabelArgs,
   MIGRATION_GRANT_LABEL, migrationGrantLabelArgs, migrationGrantMissingLabelHint,
+  CI_GRANT_LABEL, ciGrantLabelArgs, ciGrantMissingLabelHint,
   GROUP_LABEL_PREFIX, isGroupLabel, groupLabelNames,
   DELIVERY_LABEL_PREFIX, NON_CODE_DELIVERY_TYPES, deliveryType, isRouteNotStart,
 };

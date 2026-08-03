@@ -20,14 +20,15 @@ const {
   READINESS_LABEL, readinessLabelArgs, readinessMissingLabelHint,
   MECHANICAL_READINESS_LABEL, mechanicalReadinessLabelArgs,
   MIGRATION_GRANT_LABEL, migrationGrantLabelArgs, migrationGrantMissingLabelHint,
+  CI_GRANT_LABEL, ciGrantLabelArgs, ciGrantMissingLabelHint,
   GROUP_LABEL_PREFIX, isGroupLabel, groupLabelNames,
   DELIVERY_LABEL_PREFIX, NON_CODE_DELIVERY_TYPES, deliveryType, isRouteNotStart,
 } = require('./labels.js');
 
-test('the convention set is exactly the eleven labels §9 provisions, in canonical order', () => {
+test('the convention set is exactly the twelve labels §9 provisions, in canonical order', () => {
   assert.deepStrictEqual(
     conventionLabelNames(),
-    ['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only'],
+    ['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'ci-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only'],
   );
   // Each carries what a provisioner needs — a name, a color, a description — so the audit
   // and `gh label create` cannot disagree about how the label is meant to look.
@@ -42,7 +43,7 @@ test('the convention set is exactly the eleven labels §9 provisions, in canonic
 
 test('a repo with every label is not flagged', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only', 'bug']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'ci-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only', 'bug']),
     [],
   );
 });
@@ -50,58 +51,65 @@ test('a repo with every label is not flagged', () => {
 test('the readiness label absent is reported — the exact gap that silently un-fills the column', () => {
   assert.deepStrictEqual(
     missingConventionLabels(['in-progress', 'bug']),
-    ['deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only'],
+    ['deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'ci-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only'],
   );
 });
 
 test('a repo with the claim label only is missing the other ten', () => {
   assert.deepStrictEqual(
     missingConventionLabels(['in-progress']),
-    ['deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only'],
+    ['deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'ci-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only'],
   );
 });
 
 test('missing preserves canonical order regardless of the input order', () => {
-  assert.deepStrictEqual(missingConventionLabels(['epic', 'agent-filed']), ['in-progress', 'deps-checked', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']);
+  assert.deepStrictEqual(missingConventionLabels(['epic', 'agent-filed']), ['in-progress', 'deps-checked', 'needs-ruling', 'needs-plan', 'migration-granted', 'ci-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']);
 });
 
 test('a repo missing only epic (adopted before #78) is flagged for exactly that gap', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'needs-ruling', 'needs-plan', 'migration-granted', 'ci-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']),
     ['epic'],
   );
 });
 
 test('a repo missing only needs-ruling (adopted before #75) is flagged for exactly that gap', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-plan', 'migration-granted', 'ci-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']),
     ['needs-ruling'],
   );
 });
 
 test('a repo missing only needs-plan (adopted before #94) is flagged for exactly that gap', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'migration-granted', 'ci-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']),
     ['needs-plan'],
   );
 });
 
 test('a repo missing only migration-granted (adopted before #98) is flagged for exactly that gap', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'ci-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']),
     ['migration-granted'],
+  );
+});
+
+test('a repo missing only ci-granted (adopted before #105) is flagged for exactly that gap', () => {
+  assert.deepStrictEqual(
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']),
+    ['ci-granted'],
   );
 });
 
 test('a repo missing only the delivery:* set (adopted before #112) is flagged for exactly that gap', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'ci-granted']),
     ['delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only'],
   );
 });
 
 test('empty / null / undefined input reports the whole set (a bare repo, or unread labels)', () => {
-  const all = ['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only'];
+  const all = ['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'ci-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only'];
   assert.deepStrictEqual(missingConventionLabels([]), all);
   assert.deepStrictEqual(missingConventionLabels(null), all);
   assert.deepStrictEqual(missingConventionLabels(undefined), all);
@@ -126,6 +134,7 @@ test('label OBJECTS count as present, not as always-missing', () => {
   const present = [
     { name: 'in-progress' }, { name: 'deps-checked' }, { name: 'agent-filed' },
     { name: 'epic' }, { name: 'needs-ruling' }, { name: 'needs-plan' }, { name: 'migration-granted' },
+    { name: 'ci-granted' },
     { name: 'delivery:code' }, { name: 'delivery:content' }, { name: 'delivery:ops' }, { name: 'delivery:docs-only' },
   ];
   assert.deepStrictEqual(missingConventionLabels(present), []);
@@ -208,7 +217,7 @@ test('graph-empty is not one of the eleven provisioned convention labels', () =>
 
 test('a repo missing graph-empty is never reported by missingConventionLabels — it is not in the set', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'ci-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']),
     [],
   );
 });
@@ -257,6 +266,48 @@ test('migrationGrantMissingLabelHint returns null when the label set could not b
   assert.equal(migrationGrantMissingLabelHint(null), null);
   assert.equal(migrationGrantMissingLabelHint(undefined), null);
   assert.match(migrationGrantMissingLabelHint([]), /migration-granted/);
+});
+
+// --- ci-grant marker (#105) ----------------------------------------------------------------
+// `ci-granted` IS one of the twelve provisioned convention labels, for the identical
+// malignant-absence reason `migration-granted` is (see the doc comment in labels.js). These
+// tests pin that it is provisioned, and that its write helper never shares a name or a code
+// path with migration-granted's — the two grants must never be interchangeable, since they
+// authorize different (and differently dangerous) exemptions.
+
+test('ci-granted IS one of the twelve provisioned convention labels', () => {
+  assert.equal(CI_GRANT_LABEL, 'ci-granted');
+  assert.ok(conventionLabelNames().includes(CI_GRANT_LABEL),
+    'unlike tracking/graph-empty, an unexempted repo silently cannot ever grant — provision it');
+});
+
+test('ciGrantLabelArgs maps set⇒add and clear⇒remove against its OWN marker name', () => {
+  assert.deepStrictEqual(ciGrantLabelArgs(), ['--add-label', 'ci-granted']);
+  assert.deepStrictEqual(ciGrantLabelArgs({}), ['--add-label', 'ci-granted']);
+  assert.deepStrictEqual(ciGrantLabelArgs({ clear: false }), ['--add-label', 'ci-granted']);
+  assert.deepStrictEqual(ciGrantLabelArgs({ clear: true }), ['--remove-label', 'ci-granted']);
+  // Never the other markers' names — the writers must not be interchangeable, migration-grant
+  // included: a bad CI grant merges into a repo whose test suite is known-failing, a bad
+  // migration grant does not, so the two must never share a write path.
+  assert.notDeepStrictEqual(ciGrantLabelArgs(), readinessLabelArgs());
+  assert.notDeepStrictEqual(ciGrantLabelArgs(), mechanicalReadinessLabelArgs());
+  assert.notDeepStrictEqual(ciGrantLabelArgs(), migrationGrantLabelArgs());
+});
+
+test('ciGrantMissingLabelHint fires exactly when the repo lacks ci-granted', () => {
+  const hint = ciGrantMissingLabelHint(['in-progress', 'bug']);
+  assert.match(hint, /ci-granted/);
+  assert.match(hint, /handbook-sync/);
+  assert.equal(ciGrantMissingLabelHint(['in-progress', 'deps-checked', 'ci-granted']), null);
+  // Objects, not just strings.
+  assert.equal(ciGrantMissingLabelHint([{ name: 'ci-granted' }]), null);
+});
+
+test('ciGrantMissingLabelHint returns null when the label set could not be READ', () => {
+  // Same contract as migrationGrantMissingLabelHint: null present ≠ empty set.
+  assert.equal(ciGrantMissingLabelHint(null), null);
+  assert.equal(ciGrantMissingLabelHint(undefined), null);
+  assert.match(ciGrantMissingLabelHint([]), /ci-granted/);
 });
 
 // --- delivery type classifier (#112) ---------------------------------------------------------
