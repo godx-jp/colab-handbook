@@ -370,13 +370,16 @@ function postClaimComment(repoAbs, num, wtName, branch, session, sessionName) {
 
 /**
  * Post `✅ Released` on an issue, UNLESS it is already CLOSED (a `Closes #N` merge already ended the
- * story). Best-effort. Used by release + worktree rm.
+ * story). Best-effort. Used by release + worktree rm. Returns true on success or intentional
+ * no-op (already closed), false when the post was attempted and failed — callers that aggregate
+ * deferred failures (colab ship, #114) use this instead of inferring it from a warn() side effect.
  */
 function postReleaseComment(repoAbs, num) {
   const info = git.ghIssueView(repoAbs, num, ['state']);
-  if (info && info.state === 'CLOSED') return; // don't chatter on a closed issue
+  if (info && info.state === 'CLOSED') return true; // don't chatter on a closed issue
   const r = git.ghIssueComment(repoAbs, num, RELEASE_MARK);
-  if (!r.ok) warn(`could not post release comment on #${num} (${r.stderr.split('\n')[0] || r.code})`);
+  if (!r.ok) { warnDeferred(`could not post release comment on #${num} (${r.stderr.split('\n')[0] || r.code})`); return false; }
+  return true;
 }
 
 /**
@@ -1781,11 +1784,19 @@ function cmdWorktreeRm(argv) {
     warn(`  directory NOT removed (${removal.reason}) — releasing claim(s)/record anyway because --force; clean up ${wt.path} by hand`);
   }
 
-  // GitHub: release each attached issue (unassign + delabel + "✅ Released" unless already CLOSED)
+  // GitHub: release each attached issue (unassign + delabel + "✅ Released" unless already CLOSED).
+  // #114: the label/assignee write goes through the same API as everything else here and can fail
+  // for a reason that has nothing to do with the issue (rate limit, network) — track it per issue
+  // instead of assuming it landed just because the LOCAL claim record is about to be dropped below.
   const gh = isGhUsable(repoAbs);
+  const trackerFailed = [];
   for (const num of attachedIssues) {
     if (gh) {
-      git.ghIssueEdit(repoAbs, num, ['--remove-assignee', '@me', '--remove-label', 'in-progress']);
+      const r = git.ghIssueEdit(repoAbs, num, ['--remove-assignee', '@me', '--remove-label', 'in-progress']);
+      if (!r.ok) {
+        warnDeferred(`could not release tracker claim on #${num} (${r.stderr.split('\n')[0] || r.code}) — GitHub still shows in-progress; local claim record cleared regardless`);
+        trackerFailed.push(num);
+      }
       postReleaseComment(repoAbs, num);
     }
   }
@@ -1802,7 +1813,14 @@ function cmdWorktreeRm(argv) {
 
   print(`✓ Removed worktree "${name}"`);
   if (removal.action === 'rm-rf') print('  (directory was a husk from an earlier interrupted removal — cleaned up directly)');
-  print(`  released ${removed.claims} claim(s)${attachedIssues.length ? ' (' + attachedIssues.map((n) => '#' + n).join(' ') + ')' : ''}${gh ? '' : ' (local-only)'}`);
+  // #114: this line used to report `removed.claims` — the LOCAL registry mutation, which cannot
+  // fail for a network reason and so always read as full success. Report what the tracker actually
+  // did instead, and name what it didn't.
+  const trackerReleased = gh ? attachedIssues.length - trackerFailed.length : 0;
+  print(`  released ${gh ? `${trackerReleased}/${attachedIssues.length}` : removed.claims} claim(s)` +
+    `${attachedIssues.length ? ' (' + attachedIssues.map((n) => '#' + n).join(' ') + ')' : ''}` +
+    `${gh ? '' : ' (local-only)'}` +
+    `${trackerFailed.length ? ` — FAILED on ${trackerFailed.map((n) => '#' + n).join(', ')}: GitHub still shows in-progress there; local claim record was cleared regardless` : ''}`);
   if (killed.length) print(`  stopped ${killed.filter((k) => k.gone).length}/${killed.length} owned process(es): ${killed.map((k) => k.pid).join(', ')}`);
 
   // "freed" must mean freed. Reporting a port as free while something still answers on it is what
@@ -5120,11 +5138,15 @@ function cmdShip(argv) {
   for (const num of closeIssues) pushEvent('issue-merged', { repo: repoAbs, issue: num, payload: { sha } });
 
   // ---- (f) B3: teardown the worktree (releases claims + ports + ✅ comments) ----
+  // #114: from here through the end of B4, defer every non-fatal write failure into one block
+  // instead of letting it warn inline and scroll off above the `✓ Shipped` line a long ship
+  // prints last — see warnDeferred's own comment for why this is scoped to exactly this window.
+  deferredCollector = [];
   const worktreeKept = !!(sess.name && opts.keepWorktree);
   if (sess.name && !opts.keepWorktree) {
     print(`B3: removing worktree ${sess.name} …`);
     try { cmdWorktreeRm([sess.name, '--repo', repoAbs, '--force']); }
-    catch (e) { warn(`worktree rm reported: ${e.message}`); }
+    catch (e) { warnDeferred(`worktree rm reported: ${e.message}`); }
   } else if (sess.name) {
     print(`B3: keeping worktree ${sess.name} (--keep-worktree)`);
   }
@@ -5153,7 +5175,41 @@ function cmdShip(argv) {
         ? `🔖 Referenced by colab ship (kept open — tracking issue) — ${sha}${onLine}${shipSess}`
         : `🚢 Shipped to ${target} by colab ship — ${sha}${onLine}${shipSess}`;
       const r = git.ghIssueComment(repoAbs, num, body);
-      if (!r.ok) warn(`could not post ship comment on #${num}`);
+      if (!r.ok) warnDeferred(`could not post ship comment on #${num}`);
+    }
+  }
+
+  // ---- (h2) B4: plan-journal + delete the plan file, per issue (#94, #115) ----
+  // `colab ship` had no implementation of this at all — only the skill's shell snippet performed
+  // it, so a ship driven through the tool alone left the plan file on disk with no journal line
+  // (verified: grep for plan-journal/plans/issue- against this file had zero matches before this).
+  // Ported here with the same two constraints as the skill's snippet: per ISSUE, not per branch
+  // (a group branch can carry several plan files), and journal-then-delete stays one chained
+  // operation — a failed journal append must leave the plan file in place, never silently destroy
+  // it with nothing to show for it. Verdict is always "pass": a "reject" grade from B1c ends the
+  // coordinator's run before it ever reaches B2, so nothing that stops at a reject gets this far.
+  {
+    const journalPath = path.join(os.homedir(), '.colab', 'plan-journal.jsonl');
+    for (const num of sess.issues) {
+      const planPath = path.join(repoAbs, '.claude', 'plans', `issue-${num}.md`);
+      if (!fs.existsSync(planPath)) continue; // rung-0 sessions never had one — silent no-op
+      let rung = '1', cause = 'none';
+      try {
+        const txt = fs.readFileSync(planPath, 'utf8');
+        const rm = txt.match(/^rung:\s*(.+)$/m); if (rm) rung = rm[1].trim();
+        const cm = txt.match(/^cause:\s*(.+)$/m); if (cm) cause = cm[1].trim();
+      } catch (_) { /* front matter is optional — the defaults above cover a plain rung-1 stub */ }
+      const line = JSON.stringify({
+        ts: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+        issue: num, rung, cause, verdict: 'pass',
+      });
+      try {
+        fs.mkdirSync(path.dirname(journalPath), { recursive: true });
+        fs.appendFileSync(journalPath, line + '\n');
+        fs.rmSync(planPath, { force: true }); // only after the journal write above landed
+      } catch (e) {
+        warnDeferred(`could not journal/delete the plan file for #${num} (${e.message}) — left in place`);
+      }
     }
   }
 
@@ -5178,6 +5234,14 @@ function cmdShip(argv) {
   print('');
   print(`✓ Shipped ${sess.branch} → ${target} @ ${sha}${sess.issues.length ? ' (' + sess.issues.map((n) => '#' + n).join(' ') + ')' : ''}`);
   if (target !== trunk) print(`  "${target}" is a declared line: this work is NOT in ${trunk} until a human merges the line.`);
+  // #114: everything deferred since B3 lands here, AFTER the success line — not scattered above it
+  // where a long ship scrolls it out of view. The merge itself already landed either way; this is
+  // strictly "what post-merge writes still need a human's attention", never a reason to re-run.
+  if (deferredCollector && deferredCollector.length) {
+    print(`  ${deferredCollector.length} post-merge write(s) need attention:`);
+    for (const msg of deferredCollector) print(`    ! ${msg}`);
+  }
+  deferredCollector = null;
   return 0;
 }
 
@@ -5573,6 +5637,15 @@ which of the two you are talking to.
 
 function print(s) { process.stdout.write(s.endsWith('\n') ? s : s + '\n'); return 0; }
 function warn(s) { process.stderr.write(`! ${s}\n`); }
+/**
+ * `colab ship` sets this to an array while it runs B3 (worktree teardown) through B4 (per-issue
+ * ship comments) so the failures those steps hit — a rate-limited label write, a comment that
+ * never posted — land in ONE block printed after the final `✓ Shipped` line, instead of scrolling
+ * off above it on a long ship (#114). `colab worktree rm` run on its own (deferredCollector still
+ * null) is unaffected: warnDeferred then behaves exactly like warn, printed immediately.
+ */
+let deferredCollector = null;
+function warnDeferred(s) { if (deferredCollector) deferredCollector.push(s); else warn(s); }
 /** 7-char sha for a CI-verdict message, or '?' when `ghRunForSha` had none to report (#92). */
 function shortSha(sha) { return sha ? String(sha).slice(0, 7) : '?'; }
 
