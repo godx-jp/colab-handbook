@@ -872,7 +872,7 @@ Each step is checked; any failure aborts **before the push**, so trunk is never 
 | a′. resolvable | the session's recorded branch resolves to a ref (locally or on `origin`) | it does not → refuse: everything below is keyed to that name, and a record nothing can act on silently costs the `Closes` |
 | a″. claim sanity | the branch resolves to at least one claimed issue | zero → **loud warning** (the squash will carry no `Closes #N`); zero **and** some claim in the repo names an unresolvable branch → refuse, because "no claims" is then a broken lookup |
 | b. preconditions | reported as a ✓/✗ table | any ✗ → abort |
-| | · trunk CI alive **and** green (`gh run list --branch <trunk> -L 1`) | not `completed`+`success` (billing fail-to-start counts as ✗) |
+| | · trunk CI alive **and** green (`gh run list --branch <trunk> -L 1`) | not `completed`+`success`, UNLESS every claimed issue holds a valid `colab ci-grant` over trunk's CURRENT red sha (#105, below) → human must run Phase B (billing fail-to-start counts as ✗ regardless — never exempted, see below) |
 | | · **no new migration files** on the branch (`database/migrations/`, `prisma/migrations/`) | any present, UNLESS every claimed issue holds a valid `colab migration-grant` for this branch (#98, below) → human must run Phase B |
 | | · trunk checkout is on trunk and clean | wrong branch / dirty tracked tree |
 | c. B0 sync | merge trunk **into** the branch | conflict in a **non-generated** file → abort (hand-merge); generated-only conflict → the repo's `.colab/hooks/pre-ship` regenerates, else abort |
@@ -972,6 +972,59 @@ the *one* precondition it targets, never reads as blanket authority. On a fully-
 `no new migrations` row in the precondition table reads ✓, exactly as if there were no migration
 at all; a partially-granted branch still reads ✗ `human-gated`, naming which issue is missing a
 grant. See `colab migration-grant --help` for the full command reference.
+
+#### CI grants (#105) — the one-shot door through a genuinely red trunk
+
+A red trunk usually means "don't merge" — but when the candidate branch's entire content IS the
+fix, that becomes a real deadlock: the fix cannot reach trunk without shipping, and shipping
+requires the green the fix would produce. This is a DIFFERENT case from the one `CONVENTIONS.md`
+already covers under "ask by commit, not by recency" (#92) — that fix resolves a FALSE red (a
+cancelled `cancel-in-progress` straggler); this is the untreated, GENUINE red.
+
+A CI grant is the same shape as a migration grant, on purpose — same precedent, same solution — but
+it is strictly MORE dangerous (a bad migration grant merges one reviewed schema change; a bad CI
+grant merges into a repo whose own test suite is known-failing), so it carries two guards the
+migration grant does not need:
+
+```sh
+# grant #105's branch an exemption over trunk's CURRENT red sha — requires COLAB_HUMAN=1
+COLAB_HUMAN=1 colab ci-grant 105 --branch fix/red-trunk-ci-grant-105
+
+# revoke it — same bar, restores the gate the same minute
+COLAB_HUMAN=1 colab ci-grant 105 --revoke
+
+# see every grant outstanding right now (read-only, no COLAB_HUMAN needed)
+colab ci-grant --list
+```
+
+- **Human-only to create, identical bar.** Same `COLAB_HUMAN=1` check, same "before any network
+  call" ordering, same test coverage (no skill in this repo ever sets it) as `migration-grant`.
+- **Bound to one issue, one branch, AND the red trunk sha it was reviewed against.** A migration
+  grant only needs the first two. This one also expires the instant trunk's head moves — granted-
+  and-consumed by this exact ship, or moved for any other reason — because a grant surviving into a
+  DIFFERENT red was never reviewed against that failure.
+- **Evidence is MEASURED, never asserted.** Creating a grant requires a completed, successful CI
+  run for the branch's own current head (the identical "ask by sha" check `ship` itself uses).
+  `--evidence-run` is a recording-only pointer for the audit trail; it never substitutes for the
+  measured run. No branch run yet? Open a PR (`gh pr create`), let CI finish, then re-run.
+- **Never stacks.** Creating a grant refuses outright against a green trunk (nothing to exempt),
+  and refuses again if a PRIOR CI grant already merged something and trunk has been red
+  continuously since — fix trunk by hand, or revert the bad merge, instead of granting again.
+- **Visible from any machine, covers the whole ship set, revocable and auditable, reviewable while
+  outstanding** — identical properties to the migration grant. A grant-authorized merge additionally
+  carries a `CI-Grant: #N branch <branch> over-red <trunk>@<sha> evidence <sha>` trailer in the
+  squash commit itself — belt and braces with the tracker comment.
+- **Scoped narrowly, mechanically so.** This exemption covers ONLY the trunk-CI-green precondition,
+  wired through exactly one integration point (`shipCiCheck`) so it cannot accidentally widen. It
+  never touches the migration gate, claim corroboration, the trunk-checkout check, the hand-merge
+  conflict preview, or `colab promote`. It is also TRUNK-ONLY — an integration line's red already
+  borrows trunk's advisory verdict when the line has no runs of its own, and this feature does not
+  widen that.
+
+**Nothing else changes.** On a fully-granted branch the `trunk CI green` row reads ✓ with a detail
+naming the override, the issue, the red sha, and the evidence run — a partially-granted branch (or
+one with no runs at all for its own head) still reads ✗ `human-gated`. See `colab ci-grant --help`
+for the full command reference.
 
 #### The squash commit message
 

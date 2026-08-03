@@ -505,6 +505,14 @@ these prefixes. A commit with no prefix is invisible in release notes.
   commit already passed — a deadlock nothing inside the merge can clear. The question is
   "does a completed, successful run exist for this branch's current head sha?"; `colab ship`
   asks it that way.
+- **That fix resolves a FALSE red — a real one has a different, human-only door (#105).**
+  Asking by commit fixes the case above precisely because the red was never real: an
+  identical run on the same sha already passed, so asking the right question clears it with
+  no human involved. A **genuinely** red trunk is the untreated case: the sha really did
+  fail, and no amount of asking differently changes the answer. When the candidate branch's
+  entire content IS the fix, this is a true deadlock — the fix cannot reach trunk without
+  shipping, and shipping requires the green the fix would produce. See *Red-trunk exemption*
+  below for the narrow, human-only exit.
 
 ### Has it landed? — the one rule, because the obvious one is wrong
 
@@ -963,6 +971,54 @@ green, claim corroboration, the trunk-checkout check, and the hand-merge conflic
 run in full on a granted branch. See [`tools/README.md`](tools/README.md#migration-grants-98--the-one-narrow-human-created-exemption)
 for the exact commands and the full precondition-table wiring.
 
+### Red-trunk exemption — the one-shot door through trunk-CI-green (#105)
+
+A **genuinely** red trunk (see *Ask by commit, not by recency*, above, for the false one) makes
+`ship`'s first precondition permanently un-satisfiable for the one branch that could clear it: the
+fix cannot reach trunk without shipping, and shipping requires the green the fix would produce.
+Left there, the repo is bricked for unattended work until a human performs the whole of Phase B by
+hand — squash trailers, guard push, teardown, evidence, claim release, group-label cleanup — which
+is exactly the surface the gates exist to get right, and the hand path is where their mistakes come
+back (a wrong `Closes #N` is immutable once pushed).
+
+**A CI grant is the same shape as a migration grant (#98) — same precedent, same solution, on
+purpose** — but it is strictly **more dangerous**, and carries two guards the migration grant does
+not need because of it: a bad migration grant merges one reviewed schema change; a bad CI grant
+merges into a repo whose *own test suite* is known-failing.
+
+- **Human-only to create, identical bar.** `colab ci-grant` refuses (exit 1) unless
+  `COLAB_HUMAN=1` — the same mechanism, the same test coverage (no skill in this repo ever sets it).
+- **Bound to one issue, the branch, AND the red trunk sha it was reviewed against.** A migration
+  grant only needs the first two; this one also expires the instant trunk's head moves — granted-
+  and-consumed by this exact ship, or moved for any other reason. A grant surviving into a
+  *different* red (trunk moved, a new and different failure) was never reviewed against that
+  failure and must not silently keep working.
+- **Evidence is MEASURED, never asserted.** Creating a grant requires a completed, successful CI
+  run for the *branch's own current head* — the identical "ask by sha" check `ship` itself uses,
+  applied to the branch instead of the target. A human's say-so alone is never enough; `--evidence-
+  run` is a recording-only pointer for the audit trail, and can never substitute for the measured
+  run.
+- **Never stacks.** Creating a grant refuses outright against a green trunk (nothing to exempt),
+  and refuses again if a *prior* CI grant already merged something and trunk has been red
+  continuously since — a second exemption on a still-broken repo is exactly the failure this gate
+  exists to prevent. Fix trunk by hand, or revert the bad merge, instead of granting again.
+- **Visible from any machine, covers the whole ship set, revocable and auditable, reviewable while
+  outstanding** — identical properties to the migration grant, for the identical reasons. A
+  grant-authorized merge additionally carries a `CI-Grant:` trailer in the squash commit itself
+  (belt and braces with the tracker comment — the commit is the artifact that survives a later
+  tracker read failure).
+
+**Scoped narrowly, and mechanically so.** This exemption covers *only* the trunk-CI-green
+precondition. It never exempts the no-new-migrations gate, claim corroboration, the trunk-checkout
+check, the hand-merge conflict preview, or `colab promote` — none of those call sites ever consult
+it, and it is wired through exactly one integration point (`shipCiCheck`) so it cannot accidentally
+widen later. It is also **trunk-only**: an integration line's red already borrows trunk's advisory
+verdict when the line has no runs of its own, and widening the exemption to cover a line too is a
+decision this feature deliberately does not make.
+
+See [`tools/README.md`](tools/README.md#ci-grants-105--the-one-shot-door-through-a-genuinely-red-trunk)
+for the exact commands.
+
 ### Planning — a plan file that outlives one command, and who drafts it (#94)
 
 Coordinator (triage/grading) and implementer (coding) sessions often run at different
@@ -1097,12 +1153,22 @@ exists to prevent, except now on a timer instead of from a single unnamed sessio
 **It may complete a trunk merge only where the repo has granted it, and only through the one
 door that checks.** [`autonomy: auto-trunk`](#6-releases) is what makes `colab ship` usable at
 all; a scheduler is not a wider grant of that permission, it is one more caller subject to the
-identical gate — CI alive and green, no new migrations (unless every claimed issue holds a valid
+identical gate — CI alive and green (unless every claimed issue holds a valid
+[CI grant](#red-trunk-exemption--the-one-shot-door-through-trunk-ci-green-105) over trunk's
+*current* red sha, #105), no new migrations (unless every claimed issue holds a valid
 [migration grant](#migration-exemption--a-narrow-human-created-door-through-no-new-migrations-98)
 for this branch, #98), no hand-merge conflict, and no `--force` override, because `ship` has
 none. A repo that has not set `autonomy: auto-trunk` gates a scheduler exactly as it gates every
 other agent: `ship` refuses, and a human runs Phase B. Nothing about running on a cadence earns a
 wider door.
+
+**A genuinely red trunk with no valid CI grant is human-gated, not self-clearing — and unlike a
+migration grant, a scheduler must not queue and wait on it.** A missing migration grant is a
+stable, expected state a driver can park on indefinitely (the issue simply is not ready yet); a
+red trunk with no grant is the repo in a broken state *right now*. A driver parks, says so once
+(the same "park-and-say-once" discipline as any other human-gated blocker), and stops — it never
+treats a persistently red trunk as "still waiting for someone," because that reads as calm when
+the correct read is "this needs a human today."
 
 **The rungs above ship stay untouched, unconditionally.** A scheduler never promotes
 (`colab promote`, trunk → main) and never tags — those remain human on every repo, on every
@@ -1779,7 +1845,7 @@ here.
    production exists, not whether shipping is automated ([§2](#2-tiers)).
 2. **Write `.github/project.yml`** ([§3](#3-githubprojectyml--the-marker)).
 3. **Create the labels — the whole set, not a subset.** They will not exist yet. All
-   eleven are required, because each powers a check that silently *cannot fire* while its
+   twelve are required, because each powers a check that silently *cannot fire* while its
    label is absent — and a check that never fires reads exactly like one that always
    passes:
    ```sh
@@ -1790,6 +1856,7 @@ here.
    gh label create needs-ruling      --color B60205 --description "Needs a human design ruling before this can start"  2>/dev/null || true
    gh label create needs-plan        --color 0052CC --description "Triage judged this hard — code-start should run code-plan before coding"  2>/dev/null || true
    gh label create migration-granted --color D93F0B --description "A human granted this issue's branch an exemption from ship's no-new-migrations gate"  2>/dev/null || true
+   gh label create ci-granted         --color D73A4A --description "A human granted this branch a one-shot exemption from ship's trunk-CI-green gate"  2>/dev/null || true
    gh label create delivery:code       --color 1D76DB --description "Delivery is a code commit — the ordinary code pipeline applies"  2>/dev/null || true
    gh label create delivery:content    --color FEF2C0 --description "Delivery is a content push, not a code commit — route, do not start in the code pipeline"  2>/dev/null || true
    gh label create delivery:ops        --color D4C5F9 --description "Delivery is an ops/production check, not a code commit — route, do not start in the code pipeline"  2>/dev/null || true
@@ -1825,6 +1892,12 @@ here.
      no-new-migrations gate at all. Unlike `tracking` or `graph-empty`, this one is NOT
      opt-in: its absence fails malignantly (a wall discovered only at the moment a repo
      hits it), not benignly, so it is provisioned and back-filled like the rest of this set.
+   - **`ci-granted`** must exist before a human can grant a red-trunk CI exemption
+     ([§5](#5-claiming-work--how-to-say-im-on-this), *Red-trunk exemption*) — absent, `colab
+     ci-grant` refuses outright rather than write a label that does not exist, so a
+     genuinely red trunk has no route past `ship`'s trunk-CI-green gate at all except by
+     hand. Same NOT-opt-in posture as `migration-granted`: absence fails malignantly,
+     discovered only the moment a repo's trunk actually goes red with no other way through.
    - **`delivery:*`** must exist before an issue's non-code delivery can be recorded at all
      ([§5](#5-claiming-work--how-to-say-im-on-this), *Delivery type*) — absent, a content
      push or an ops check has no way to say "not a diff", so it reads as a normal code
