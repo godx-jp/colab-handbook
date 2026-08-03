@@ -96,6 +96,11 @@ gh label create agent-filed --color C5DEF5 --description "Filed by an agent on i
 gh issue create --title "<type>: <thing>" --label agent-filed --body-file <tmpfile>
 ```
 
+Record the returned number and, if `colab` is installed, follow with
+`colab issue-filed <N>` — a best-effort notify event (`issue.filed`, #102) so an
+external observer learns the issue exists without waiting out its own poll
+interval. No `colab` on this machine means skip it.
+
 End the body with the origin, naming the issue you were wrapping when you found it —
 that is the breadcrumb back to the context — and, on the next line, the ask class
 (`CONVENTIONS.md` §5, *Ask*) so a decision surface never has to re-derive it from

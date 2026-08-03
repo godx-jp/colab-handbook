@@ -168,7 +168,12 @@ gh issue view $N --comments                      # prior-session log
 
   Filed-by: <boss (via <session>) | agent (<what prompted it>, session <name>)>
   ```
-  Record the returned number as `$N`.
+  Record the returned number as `$N`. If `colab` is installed, follow with
+  `colab issue-filed $N` — a best-effort notify event (`issue.filed`, #102) that lets an
+  external observer refresh its snapshot the moment the issue exists, instead of waiting
+  out its own poll interval. colab does not wrap issue creation itself, so this always runs
+  as a separate step right after `gh issue create` returns the number, never in place of it;
+  no `colab` on this machine means skip it, nothing else here depends on it.
 
   **The `Filed-by:` line is not optional, and it is about intent — not about who
   typed** (`CONVENTIONS.md` §5, *Provenance*). On this path you are almost always

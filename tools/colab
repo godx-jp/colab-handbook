@@ -585,6 +585,48 @@ function cmdRelease(argv) {
 }
 
 // ---------------------------------------------------------------------------
+// issue-filed — pure notify passthrough for an issue a raw `gh issue create` just made (#102).
+//
+// Every other pushEvent() call site sits inside a colab command that already owns some write
+// (a claim, a label, a merge) and the event just reports it. Filing an issue has no such write to
+// piggy-back on: colab has never wrapped `gh issue create`, so the number this command needs does
+// not exist until the caller's own `gh issue create` returns it. Hence a standalone command whose
+// entire job is one pushEvent() call — no state.json entry, no label edit, no gh call of its own.
+// ---------------------------------------------------------------------------
+
+const HELP_ISSUE_FILED = `colab issue-filed <issue> [--repo <path>]
+
+Fire-and-forget notify event for an issue a session just created with a raw \`gh issue create\`
+(colab does not wrap issue creation — the number only exists after gh returns it, so this runs
+immediately AFTER that call, never before or instead of it). Emits kind \`issue.filed\` (§ notify)
+so the receiver can refresh its snapshot the moment an issue appears, instead of only finding out
+when its own poll TTL expires — measured at ~11 minutes of a newly filed issue being invisible in
+the queue a human is expected to act on it from (#102).
+
+Touches nothing colab-local: no state.json entry, no claim, no label, no gh call of its own — the
+entire job is the pushEvent() call below. Silent (exit 0, no-op past printing) when notifyUrl is
+unset, same as every other action in the vocabulary; never fails the caller's script over a dead
+or absent receiver.
+
+  colab issue-filed 118                  # from inside the repo
+  colab issue-filed 118 --repo <path>    # from elsewhere (e.g. the main checkout, from a worktree)
+`;
+
+function cmdIssueFiled(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--repo': 'repo' }, flags: { '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help || opts._.length === 0) return print(HELP_ISSUE_FILED);
+  const num = normIssueNum(opts._[0]);
+  const repoAbs = opts.repo ? resolveRepo(opts) : (git.repoRoot(process.cwd()) || null);
+  if (!repoAbs) throw new UserError('not inside a git repo — pass --repo <path>');
+
+  pushEvent('issue-filed', { repo: repoAbs, issue: num });
+  print(`Notified: #${num} filed in ${shortRepo(repoAbs)} (issue.filed) — best-effort, no local state changed`);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // solo — the entry gate for solo flow (CONVENTIONS.md, Solo flow; #83).
 //
 // Solo flow lets a `ceremony: light` repo skip pre-filed issue / claim / worktree and commit
@@ -5481,6 +5523,9 @@ Three independent capabilities (each works standalone):
 Commands:
   claim <issue> [<issue>...] [--worktree N] [--branch B] [--repo P]   claim issue(s)
   release <issue> [--repo P]                                          release one issue
+  issue-filed <issue> [--repo P]                       notify event only, right after a raw
+                                        \`gh issue create\` returns its number (#102) — no colab
+                                        state written, no gh call of its own
   solo [--force] [--repo P] | solo --done [--repo P]                 entry-gated trunk-direct
                                         flow, \`ceremony: light\` only — no issue/claim/worktree (#83)
   readiness <issue> [--clear] [--mechanical] [--repo P]              own the deps-checked / graph-empty markers (§5)
@@ -5537,6 +5582,7 @@ function main(argv) {
   switch (cmd) {
     case 'claim': return cmdClaim(rest);
     case 'release': return cmdRelease(rest);
+    case 'issue-filed': return cmdIssueFiled(rest);
     case 'solo': return cmdSolo(rest);
     case 'readiness': return cmdReadiness(rest);
     case 'migration-grant': return cmdMigrationGrant(rest);

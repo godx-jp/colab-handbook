@@ -69,6 +69,14 @@ const ACTION_KIND = Object.freeze({
   // sha (a payload field) is the evidence; repo and issue ride the envelope. Agreed one-per-issue,
   // not a fan-out — the shape the receiver ingests.
   'issue-merged': 'issue.merged',
+  // issue-filed reports work APPEARING rather than finishing (#102) — the gap the other two kinds
+  // leave: a session that files, labels, and rewires several issues in a row has no event at all
+  // today, so the receiver only learns about them when its own snapshot TTL expires. There is no
+  // colab command that creates an issue (every call site still runs a raw `gh issue create`), so
+  // this kind is pushed by a standalone command (`colab issue-filed`) run right after, rather than
+  // falling out of a write colab already owns the way `readiness` and `issue-merged` do. Payload
+  // carries nothing beyond repo + issue — the receiver's response is the same refresh either way.
+  'issue-filed': 'issue.filed',
 });
 
 /** Actions this module knows how to report. Exported so a caller can be checked against it. */
