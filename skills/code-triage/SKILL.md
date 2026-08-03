@@ -335,6 +335,24 @@ but for a different reason: it is not that someone else holds it, it is that the
 code to write for it directly. Still report it, in its own bucket, so it does not read as
 silently dropped — see §6.
 
+**Non-code delivery — route, not start:**
+
+```sh
+gh issue list --state open --search "label:delivery:content,delivery:ops,delivery:docs-only" \
+  --json number -q '.[].number'
+```
+
+An issue carrying `delivery:content`, `delivery:ops` or `delivery:docs-only` is real work
+whose completion is not a code commit — a content push, an ops/production check, a docs
+sync outside code review (`CONVENTIONS.md` §5, *Delivery type*). Leave it off the ranked
+list the same way an epic is: not because someone holds it, but because there is nothing
+to branch on in *this* pipeline. Report it in its own **route** bucket, distinct from the
+epic bucket — see §6 — so a human sees where it actually needs to go instead of it reading
+as silently dropped. **No `delivery:*` label at all is NOT this bucket** — absence means
+*not asked*, not non-code; an unlabelled issue proceeds through the rest of triage exactly
+as before this label set existed. `delivery:code` also proceeds normally — it is the
+explicit code affirmative, not a routing signal.
+
 ## 3. Group — this is a correctness constraint, not tidiness
 
 **Issues that touch the same files must become one branch.** Two sessions editing
@@ -544,6 +562,12 @@ with the blocker named:
       candidate for anyone, manual or scheduled, until a human clears the label —
       report it exactly as any other blocker, naming the label as what must be
       cleared and by whom.
+- [ ] **Delivery type is code, or not asked** — no `delivery:content` / `delivery:ops` /
+      `delivery:docs-only` label (`CONVENTIONS.md` §5, *Delivery type*). This issue was
+      already filtered out at §2 if it carries one; this bullet is the reminder for a
+      caller checking a single issue outside a full triage pass. **Absence is not this
+      gate** — an unlabelled issue and one explicitly `delivery:code` both pass through
+      unaffected; only an explicit non-code value routes.
 
 ### 5.1 An open blocker is not one verdict — look at what state it is in
 
@@ -640,10 +664,12 @@ Then, briefly:
 - **close these** — already shipped, with the evidence you found.
 - **epics** — one line each, naming the container and (if its table is hand-maintained)
   whether it looks current. Never a start candidate; see §2.
+- **route** — one line each, naming the delivery type (`content` / `ops` / `docs-only`)
+  and where it actually needs to go. Never a start candidate for the code pipeline; see §2.
 
 **Do not let an Issue vanish.** Every open number ends the pass in exactly one
-bucket — ready, blocked, taken, epic, or close-it. A number that quietly falls off the
-list gets re-triaged from scratch next time, which is how the same work gets
+bucket — ready, blocked, taken, epic, route, or close-it. A number that quietly falls off
+the list gets re-triaged from scratch next time, which is how the same work gets
 discovered three times.
 
 ### Then persist each verdict — the report is not the only consumer

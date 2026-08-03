@@ -1439,6 +1439,61 @@ An epic still gets closed and referenced exactly as any other issue does once it
 children finish — this label changes nothing about *that*; it only keeps a driver from
 mistaking the map for the territory.
 
+### Delivery type — route, not start (#112)
+
+*Epics*, just above, answers "is this a unit of work at all?" A related but distinct
+question sits beside it: **when it is a unit of work, does finishing it produce a code
+commit?** A tracker mixes issues whose delivery is *not* a code commit — a content push,
+an ops/production check, a docs sync outside code review — into a pipeline whose every
+stage assumes one: worktree, gate, mergeable, squash, `Closes #N`. Such an issue can
+never reach a mergeable state, so it reads as **eternally stuck**, and its real
+completion (an evidence comment, an ops verification) is invisible to landed-detection.
+The expensive half: it still looks **startable** to triage and a scheduled driver alike,
+because nothing in the existing readiness vocabulary says "this is real work, but not a
+diff" the way `epic` says "this is not a unit of work at all" — `deps-checked` means "no
+blocker", not "this is a commit".
+
+**Four labels — `delivery:code`, `delivery:content`, `delivery:ops`,
+`delivery:docs-only`** — name the delivery type explicitly. The classifier they power is
+**three-valued, not boolean**, and the third value is load-bearing:
+
+| label state | reads as |
+|---|---|
+| no `delivery:*` label at all | **not asked** — behaves exactly as before this label set existed |
+| `delivery:code` | code — the ordinary pipeline applies |
+| `delivery:content` / `delivery:ops` / `delivery:docs-only` | non-code — **route, do not start** |
+
+**"Not asked" must never collapse into "non-code".** Every issue in every tracker is
+unlabelled the day this set is adopted; if absence read as non-code, triage and every
+scheduled driver would freeze on that day. This is the same failure class *Readiness*
+warns about for an empty blocker list: an absent value is not a meaningful value, and
+optimism and pessimism both point the wrong way from "nobody said".
+
+**`content` / `ops` / `docs-only` gate exactly like `needs-ruling`, not like a softer
+advisory.** A non-code delivery type is not a start candidate for anyone, manual or
+scheduled, in the code pipeline — the same posture *Design ruling* takes for an
+unapproved surface, and the same reason *Epics* excludes a container: not every open,
+unclaimed, human-filed issue is code to write. Route it to wherever its actual delivery
+happens (a content calendar, an ops runbook, a docs platform); do not open a worktree for
+it, and do not report it as blocked — it was never going to unblock, because there is no
+diff on the other side of it. A session that lands on one distills that onto the issue and
+ends the session, the same closing move as landing on a design-decision-only issue with no
+code product ([`CLAUDE.md`](CLAUDE.md)).
+
+**Who sets the label:** whoever files or triages the issue, deciding what the issue's
+*deliverable* is — the identical placement `needs-ruling` gets from the designer producing
+the spec. No mechanical rule infers it from a title or a body; a docs-sounding title can
+still be `delivery:code` (updating a `.md` this repo reviews and merges as code), and a
+code-sounding title can be `delivery:ops` (verifying a deploy, not shipping one).
+
+**This is why `delivery:*` lives in the convention label set ([§9](#9-adopting-this)) and
+not in a repo-opt-in list like `tracking`.** The bar is the same one `epic` and
+`needs-ruling` meet: an unattended driver's start-or-skip decision depends on being able
+to read the three states apart, and a repo that adopted before this set existed cannot
+create the label at all — the label is provisioned, not invented on demand the way
+`group:<key>` is, because its four values are fixed and every adopting repo needs them
+before the first triage pass can classify anything.
+
 ### Tracking issues — claimed but referenced, not closed
 
 Most issues are a unit of work: a branch completes them, and the merge closes them with
@@ -1724,7 +1779,7 @@ here.
    production exists, not whether shipping is automated ([§2](#2-tiers)).
 2. **Write `.github/project.yml`** ([§3](#3-githubprojectyml--the-marker)).
 3. **Create the labels — the whole set, not a subset.** They will not exist yet. All
-   seven are required, because each powers a check that silently *cannot fire* while its
+   eleven are required, because each powers a check that silently *cannot fire* while its
    label is absent — and a check that never fires reads exactly like one that always
    passes:
    ```sh
@@ -1735,6 +1790,10 @@ here.
    gh label create needs-ruling      --color B60205 --description "Needs a human design ruling before this can start"  2>/dev/null || true
    gh label create needs-plan        --color 0052CC --description "Triage judged this hard — code-start should run code-plan before coding"  2>/dev/null || true
    gh label create migration-granted --color D93F0B --description "A human granted this issue's branch an exemption from ship's no-new-migrations gate"  2>/dev/null || true
+   gh label create delivery:code       --color 1D76DB --description "Delivery is a code commit — the ordinary code pipeline applies"  2>/dev/null || true
+   gh label create delivery:content    --color FEF2C0 --description "Delivery is a content push, not a code commit — route, do not start in the code pipeline"  2>/dev/null || true
+   gh label create delivery:ops        --color D4C5F9 --description "Delivery is an ops/production check, not a code commit — route, do not start in the code pipeline"  2>/dev/null || true
+   gh label create delivery:docs-only  --color BFD4F2 --description "Delivery is a docs sync outside code review, not a commit — route, don't start"  2>/dev/null || true
    ```
    The `|| true` makes this **idempotent** — partial adoption is the normal case, so
    re-running must be safe. What each absence costs:
@@ -1766,6 +1825,13 @@ here.
      no-new-migrations gate at all. Unlike `tracking` or `graph-empty`, this one is NOT
      opt-in: its absence fails malignantly (a wall discovered only at the moment a repo
      hits it), not benignly, so it is provisioned and back-filled like the rest of this set.
+   - **`delivery:*`** must exist before an issue's non-code delivery can be recorded at all
+     ([§5](#5-claiming-work--how-to-say-im-on-this), *Delivery type*) — absent, a content
+     push or an ops check has no way to say "not a diff", so it reads as a normal code
+     start candidate to triage and a scheduled driver, jamming the code pipeline with work
+     that can never reach a mergeable state. All four values are provisioned together: the
+     set is fixed, and a repo missing even one (most often `delivery:code`, the explicit
+     affirmative) cannot classify every issue's delivery type, only some of them.
 
    This full set is provisioned again on every sync, not only at adoption: a repo that
    adopted at an older handbook version — before a label entered the set — never
@@ -1900,6 +1966,7 @@ gh issue list --label in-progress                 # what's taken
 gh issue list --label agent-filed                 # filed by an agent — no human approved it yet
 gh issue list --label epic                        # a container for sub-issues — never a start candidate
 gh issue list --label group:<key>                 # must share one branch — start them together
+gh issue list --search "label:delivery:content,delivery:ops,delivery:docs-only"  # non-code — route, don't start
 gh issue edit N --add-assignee @me --add-label in-progress
 git checkout -b feat/<slug>-N origin/<trunk>      # trunk = main (B) or dev (A)
 

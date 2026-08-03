@@ -21,24 +21,28 @@ const {
   MECHANICAL_READINESS_LABEL, mechanicalReadinessLabelArgs,
   MIGRATION_GRANT_LABEL, migrationGrantLabelArgs, migrationGrantMissingLabelHint,
   GROUP_LABEL_PREFIX, isGroupLabel, groupLabelNames,
+  DELIVERY_LABEL_PREFIX, NON_CODE_DELIVERY_TYPES, deliveryType, isRouteNotStart,
 } = require('./labels.js');
 
-test('the convention set is exactly the seven labels §9 provisions, in canonical order', () => {
+test('the convention set is exactly the eleven labels §9 provisions, in canonical order', () => {
   assert.deepStrictEqual(
     conventionLabelNames(),
-    ['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted'],
+    ['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only'],
   );
   // Each carries what a provisioner needs — a name, a color, a description — so the audit
   // and `gh label create` cannot disagree about how the label is meant to look.
   for (const l of CONVENTION_LABELS) {
     assert.match(l.color, /^[0-9A-Fa-f]{6}$/, `${l.name} needs a 6-hex color`);
     assert.ok(l.description && l.description.length, `${l.name} needs a description`);
+    // GitHub's real cap (#112: `gh label create` 422'd on a 107-char delivery:docs-only
+    // description that read fine here — nothing pinned the limit before this).
+    assert.ok(l.description.length <= 100, `${l.name}'s description is ${l.description.length} chars — gh label create rejects anything over 100`);
   }
 });
 
 test('a repo with every label is not flagged', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'bug']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only', 'bug']),
     [],
   );
 });
@@ -46,51 +50,58 @@ test('a repo with every label is not flagged', () => {
 test('the readiness label absent is reported — the exact gap that silently un-fills the column', () => {
   assert.deepStrictEqual(
     missingConventionLabels(['in-progress', 'bug']),
-    ['deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted'],
+    ['deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only'],
   );
 });
 
-test('a repo with the claim label only is missing the other six', () => {
+test('a repo with the claim label only is missing the other ten', () => {
   assert.deepStrictEqual(
     missingConventionLabels(['in-progress']),
-    ['deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted'],
+    ['deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only'],
   );
 });
 
 test('missing preserves canonical order regardless of the input order', () => {
-  assert.deepStrictEqual(missingConventionLabels(['epic', 'agent-filed']), ['in-progress', 'deps-checked', 'needs-ruling', 'needs-plan', 'migration-granted']);
+  assert.deepStrictEqual(missingConventionLabels(['epic', 'agent-filed']), ['in-progress', 'deps-checked', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']);
 });
 
 test('a repo missing only epic (adopted before #78) is flagged for exactly that gap', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'needs-ruling', 'needs-plan', 'migration-granted']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']),
     ['epic'],
   );
 });
 
 test('a repo missing only needs-ruling (adopted before #75) is flagged for exactly that gap', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-plan', 'migration-granted']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']),
     ['needs-ruling'],
   );
 });
 
 test('a repo missing only needs-plan (adopted before #94) is flagged for exactly that gap', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'migration-granted']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']),
     ['needs-plan'],
   );
 });
 
 test('a repo missing only migration-granted (adopted before #98) is flagged for exactly that gap', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']),
     ['migration-granted'],
   );
 });
 
+test('a repo missing only the delivery:* set (adopted before #112) is flagged for exactly that gap', () => {
+  assert.deepStrictEqual(
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted']),
+    ['delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only'],
+  );
+});
+
 test('empty / null / undefined input reports the whole set (a bare repo, or unread labels)', () => {
-  const all = ['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted'];
+  const all = ['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only'];
   assert.deepStrictEqual(missingConventionLabels([]), all);
   assert.deepStrictEqual(missingConventionLabels(null), all);
   assert.deepStrictEqual(missingConventionLabels(undefined), all);
@@ -115,6 +126,7 @@ test('label OBJECTS count as present, not as always-missing', () => {
   const present = [
     { name: 'in-progress' }, { name: 'deps-checked' }, { name: 'agent-filed' },
     { name: 'epic' }, { name: 'needs-ruling' }, { name: 'needs-plan' }, { name: 'migration-granted' },
+    { name: 'delivery:code' }, { name: 'delivery:content' }, { name: 'delivery:ops' }, { name: 'delivery:docs-only' },
   ];
   assert.deepStrictEqual(missingConventionLabels(present), []);
 });
@@ -188,7 +200,7 @@ test('groupLabelNames tolerates empty / null / undefined the same way missingCon
 // unattended adoption/sync/audit provisions (opt-in, like `tracking`), and that its write helper
 // never shares a name or a code path with `readinessLabelArgs`.
 
-test('graph-empty is not one of the six provisioned convention labels', () => {
+test('graph-empty is not one of the eleven provisioned convention labels', () => {
   assert.equal(MECHANICAL_READINESS_LABEL, 'graph-empty');
   assert.ok(!conventionLabelNames().includes(MECHANICAL_READINESS_LABEL),
     'a mechanical-only check must stay opt-in — forcing it defeats the point of a cheaper lane');
@@ -196,7 +208,7 @@ test('graph-empty is not one of the six provisioned convention labels', () => {
 
 test('a repo missing graph-empty is never reported by missingConventionLabels — it is not in the set', () => {
   assert.deepStrictEqual(
-    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted']),
+    missingConventionLabels(['in-progress', 'deps-checked', 'agent-filed', 'epic', 'needs-ruling', 'needs-plan', 'migration-granted', 'delivery:code', 'delivery:content', 'delivery:ops', 'delivery:docs-only']),
     [],
   );
 });
@@ -210,12 +222,12 @@ test('mechanicalReadinessLabelArgs maps set⇒add and clear⇒remove against its
 });
 
 // --- migration-grant marker (#98) ---------------------------------------------------------
-// `migration-granted` IS one of the seven provisioned convention labels (unlike `tracking` /
+// `migration-granted` IS one of the eleven provisioned convention labels (unlike `tracking` /
 // `graph-empty` above) — see the doc comment in labels.js for why its absence fails malignantly
 // rather than benignly. These tests pin that it is provisioned, and that its write helper never
 // shares a name or a code path with the other markers'.
 
-test('migration-granted IS one of the seven provisioned convention labels', () => {
+test('migration-granted IS one of the eleven provisioned convention labels', () => {
   assert.equal(MIGRATION_GRANT_LABEL, 'migration-granted');
   assert.ok(conventionLabelNames().includes(MIGRATION_GRANT_LABEL),
     'unlike tracking/graph-empty, an unexempted repo silently cannot ever grant — provision it');
@@ -245,4 +257,44 @@ test('migrationGrantMissingLabelHint returns null when the label set could not b
   assert.equal(migrationGrantMissingLabelHint(null), null);
   assert.equal(migrationGrantMissingLabelHint(undefined), null);
   assert.match(migrationGrantMissingLabelHint([]), /migration-granted/);
+});
+
+// --- delivery type classifier (#112) ---------------------------------------------------------
+// Three-valued by design (CONVENTIONS.md §5, *Delivery type*): "not asked" must never collapse
+// into "non-code", or the start gate freezes the day this label set lands on an unlabelled
+// tracker. These tests pin all four label values and the null/absent case.
+
+test('deliveryType is null — NOT ASKED — when no delivery:* label is present', () => {
+  assert.equal(deliveryType([]), null);
+  assert.equal(deliveryType(null), null);
+  assert.equal(deliveryType(undefined), null);
+  assert.equal(deliveryType(['in-progress', 'bug']), null);
+});
+
+test('deliveryType reads each of the four explicit values', () => {
+  assert.equal(deliveryType(['delivery:code']), 'code');
+  assert.equal(deliveryType(['delivery:content']), 'content');
+  assert.equal(deliveryType(['delivery:ops']), 'ops');
+  assert.equal(deliveryType(['delivery:docs-only']), 'docs-only');
+});
+
+test('deliveryType accepts label OBJECTS, the shape gh issue view actually returns', () => {
+  assert.equal(deliveryType([{ name: 'delivery:content' }]), 'content');
+});
+
+test('isRouteNotStart is false for NOT ASKED and for delivery:code — only the three non-code types route', () => {
+  assert.equal(isRouteNotStart([]), false);
+  assert.equal(isRouteNotStart(['delivery:code']), false);
+  assert.equal(isRouteNotStart(['delivery:content']), true);
+  assert.equal(isRouteNotStart(['delivery:ops']), true);
+  assert.equal(isRouteNotStart(['delivery:docs-only']), true);
+});
+
+test('NON_CODE_DELIVERY_TYPES excludes code and DELIVERY_LABEL_PREFIX matches the label set', () => {
+  assert.deepStrictEqual(NON_CODE_DELIVERY_TYPES, ['content', 'ops', 'docs-only']);
+  assert.equal(DELIVERY_LABEL_PREFIX, 'delivery:');
+  for (const type of NON_CODE_DELIVERY_TYPES) {
+    assert.ok(conventionLabelNames().includes(`${DELIVERY_LABEL_PREFIX}${type}`));
+  }
+  assert.ok(conventionLabelNames().includes('delivery:code'));
 });

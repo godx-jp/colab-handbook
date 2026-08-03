@@ -59,6 +59,24 @@
  * The label alone authorizes nothing (the branch binding lives in a comment marker,
  * tools/lib/migration-grant.js, and no automated path ever writes either half) — an unused label
  * is inert, an absent one is a wall.
+ *
+ * `delivery:*` joined the set in #112: a tracker mixes issues whose delivery is NOT a code
+ * commit — a content push, an ops/production check, a docs sync outside code review — into a
+ * pipeline whose every stage (worktree, gate, mergeable, squash, `Closes #N`) assumes one. Such
+ * an issue can never reach a mergeable state, so it reads as eternally stuck, and — the expensive
+ * half — it looks STARTABLE to triage and a scheduled driver alike, because no existing readiness
+ * label says "this is real work, but not a diff" the way `epic` says "this is not a unit of work
+ * at all". Four labels, one classifier, deliberately THREE-VALUED rather than boolean
+ * (CONVENTIONS.md §5, *Delivery type*): no `delivery:*` label at all reads as **not asked**, and
+ * must behave exactly as before this label set existed — every issue in every tracker is
+ * unlabelled the day this lands, so absence collapsing into "non-code" would freeze the start
+ * gate for everyone on day one. `delivery:code` is the explicit affirmative for a code issue;
+ * `content` / `ops` / `docs-only` are the explicit non-code types, which triage and the readiness
+ * gate treat as route-not-start — a companion to the `epic` rule and the `needs-ruling` gate, not
+ * a merge of either. It joins `CONVENTION_LABELS` for the same reason `epic` did: an unattended
+ * decision (a scheduler's or triage's start-or-skip) depends on being able to tell the three
+ * states apart, and a repo that adopted before this set existed cannot create the label at all —
+ * the malignant-absence failure this file's opening paragraph names.
  */
 
 const CONVENTION_LABELS = [
@@ -69,7 +87,50 @@ const CONVENTION_LABELS = [
   { name: 'needs-ruling', color: 'B60205', description: 'Needs a human design ruling before this can start' },
   { name: 'needs-plan', color: '0052CC', description: 'Triage judged this hard — code-start should run code-plan before coding' },
   { name: 'migration-granted', color: 'D93F0B', description: "A human granted this issue's branch an exemption from ship's no-new-migrations gate" },
+  { name: 'delivery:code', color: '1D76DB', description: 'Delivery is a code commit — the ordinary code pipeline applies' },
+  { name: 'delivery:content', color: 'FEF2C0', description: 'Delivery is a content push, not a code commit — route, do not start in the code pipeline' },
+  { name: 'delivery:ops', color: 'D4C5F9', description: 'Delivery is an ops/production check, not a code commit — route, do not start in the code pipeline' },
+  { name: 'delivery:docs-only', color: 'BFD4F2', description: "Delivery is a docs sync outside code review, not a commit — route, don't start" },
 ];
+
+// The DELIVERY label prefix (CONVENTIONS.md §5, Delivery type). Four fixed values, unlike
+// `group:<key>` — provisioned up front in CONVENTION_LABELS above, not created on demand.
+const DELIVERY_LABEL_PREFIX = 'delivery:';
+
+// The three non-code delivery types — the ones triage and the readiness gate treat as
+// route-not-start. `delivery:code` is deliberately excluded: it is the explicit CODE
+// affirmative, not a non-code type.
+const NON_CODE_DELIVERY_TYPES = ['content', 'ops', 'docs-only'];
+
+/**
+ * The three-valued delivery classifier (CONVENTIONS.md §5, *Delivery type*).
+ *
+ * Returns one of:
+ *   - `null`     — NOT ASKED. No `delivery:*` label present. Must read identically to how the
+ *                  issue behaved before this label set existed — never as non-code.
+ *   - `'code'`   — `delivery:code` present.
+ *   - `'content' | 'ops' | 'docs-only'` — the matching `delivery:*` label present.
+ *
+ * Tolerant of label objects or bare strings, the same shape every other helper in this file
+ * accepts. If more than one `delivery:*` label is somehow present (a tracker mistake, not a
+ * state this repo's tooling ever writes), the first match in CONVENTION_LABELS order wins —
+ * deterministic, and it is a contradiction worth surfacing rather than silently averaging.
+ */
+function deliveryType(present) {
+  const have = new Set(
+    (present || []).map((n) => (n && typeof n === 'object' ? n.name : n)).map((n) => String(n)),
+  );
+  for (const type of ['code', ...NON_CODE_DELIVERY_TYPES]) {
+    if (have.has(`${DELIVERY_LABEL_PREFIX}${type}`)) return type;
+  }
+  return null;
+}
+
+// Is this issue's delivery type one triage/the readiness gate should route rather than start?
+// `null` (not asked) and `'code'` both read false here — only an explicit non-code type routes.
+function isRouteNotStart(present) {
+  return NON_CODE_DELIVERY_TYPES.includes(deliveryType(present));
+}
 
 function conventionLabelNames() {
   return CONVENTION_LABELS.map((l) => l.name);
@@ -223,4 +284,5 @@ module.exports = {
   MECHANICAL_READINESS_LABEL, mechanicalReadinessLabelArgs,
   MIGRATION_GRANT_LABEL, migrationGrantLabelArgs, migrationGrantMissingLabelHint,
   GROUP_LABEL_PREFIX, isGroupLabel, groupLabelNames,
+  DELIVERY_LABEL_PREFIX, NON_CODE_DELIVERY_TYPES, deliveryType, isRouteNotStart,
 };
