@@ -158,6 +158,7 @@ test('a non-tag-gated repo is reported n-a with a reason, never silently dropped
   execFileSync('git', ['init', '-q', '-b', 'main', work], { encoding: 'utf8' });
   g(work, 'config', 'user.email', 'test@example.invalid');
   g(work, 'config', 'user.name', 'colab release-status test');
+  g(work, 'config', 'core.hooksPath', path.join(root, '.nohooks'));
   fs.mkdirSync(path.join(work, '.github'), { recursive: true });
   fs.writeFileSync(path.join(work, '.github', 'project.yml'),
     'tier: B\ntrunk: main\nproduction: null\ndeploy: none\nstack: node\n');
@@ -191,6 +192,7 @@ test('breaking-change commit (!) since the last tag suggests a major bump', () =
   execFileSync('git', ['init', '-q', '-b', 'main', work], { encoding: 'utf8' });
   g(work, 'config', 'user.email', 'test@example.invalid');
   g(work, 'config', 'user.name', 'colab release-status test');
+  g(work, 'config', 'core.hooksPath', path.join(root, '.nohooks'));
   g(work, 'remote', 'add', 'origin', origin);
   fs.mkdirSync(path.join(work, '.github'), { recursive: true });
   fs.writeFileSync(path.join(work, '.github', 'project.yml'),

@@ -1589,6 +1589,25 @@ nowhere to declare the value. **A missing template is not a neutral absence** �
 stop adoption, it redirects it into a worse form, and leaves behind a file whose header
 lies about what it is.
 
+### Test fixtures — neutralise ambient machine state, don't inherit it
+
+**A test asserting a specific message or refusal must neutralise ambient credentials and
+configuration rather than inherit them.** A fixture that spins up a real throwaway git repo runs
+on the machine's real global git config unless it says otherwise — and this handbook installs a
+global `core.hooksPath`, so a fixture that both `git init`s and `git commit`s without locally
+overriding it runs the *developer's real pre-commit hook* inside a repo that is not a real
+project. On a clean CI runner this is invisible (no global hooks path there), which is exactly
+what makes it a trap: the failure is developer-local and shows up as tests going red for reasons
+that have nothing to do with the change someone is testing.
+
+This has now happened twice, in the identical shape — a fixture copied from a sibling test file
+with one guard dropped: ambient `gh` credentials the first time, ambient `core.hooksPath` the
+second (`tools/lib/orphan-worktree.test.js`, fixed alongside a grep-based regression check in
+`tools/lib/fixture-hooks-lint.test.js` so the next copy cannot drop the line silently). The pattern,
+not just either instance, is the rule: a git fixture helper sets `user.email`, `user.name`, **and**
+`core.hooksPath` (pointed at a nonexistent directory, e.g. `path.join(dir, '.nohooks')`) before it
+ever commits.
+
 ---
 
 ## 8. Conformance and reconciliation

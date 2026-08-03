@@ -191,6 +191,7 @@ function fixture() {
   execFileSync('git', ['init', '-q', '-b', 'main', work], { encoding: 'utf8' });
   g(work, 'config', 'user.email', 'test@example.invalid');
   g(work, 'config', 'user.name', 'ghrun test');
+  g(work, 'config', 'core.hooksPath', path.join(root, '.nohooks'));
   g(work, 'remote', 'add', 'origin', origin);
   fs.writeFileSync(path.join(work, 'f.txt'), 'x\n');
   g(work, 'add', '-A');

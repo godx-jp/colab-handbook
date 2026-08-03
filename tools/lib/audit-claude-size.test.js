@@ -42,6 +42,9 @@ function fixture(claudeMd) {
   g('init', '-q', '-b', 'main', '.');
   g('config', 'user.email', 'test@example.invalid');
   g('config', 'user.name', 'audit test');
+  // A global `core.hooksPath` (this handbook installs one) must not run the repo's real hooks
+  // inside a fixture that is not a real project — see tools/lib/orphan-worktree.test.js:107 (#108).
+  g('config', 'core.hooksPath', path.join(dir, '.nohooks'));
   fs.mkdirSync(path.join(dir, '.github'), { recursive: true });
   fs.writeFileSync(
     path.join(dir, '.github', 'project.yml'),

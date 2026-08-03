@@ -220,6 +220,9 @@ function tempRepoWithWorktree(t) {
   git(['init', '-q', '-b', 'main'], main);
   git(['config', 'user.email', 'test@example.invalid'], main);
   git(['config', 'user.name', 'test'], main);
+  // A global `core.hooksPath` (this handbook installs one) must not run the repo's real hooks
+  // inside a fixture that is not a real project — see tools/lib/orphan-worktree.test.js:107 (#108).
+  git(['config', 'core.hooksPath', path.join(main, '.nohooks')], main);
   fs.writeFileSync(path.join(main, 'README.md'), 'x\n');
   git(['add', '-A'], main);
   git(['commit', '-qm', 'init'], main);
@@ -316,6 +319,9 @@ function tempHandbook(t) {
   git('init', '-q', '-b', 'main');
   git('config', 'user.email', 'test@example.invalid');
   git('config', 'user.name', 'test');
+  // A global `core.hooksPath` (this handbook installs one) must not run the repo's real hooks
+  // inside a fixture that is not a real project — see tools/lib/orphan-worktree.test.js:107 (#108).
+  git('config', 'core.hooksPath', path.join(root, '.nohooks'));
   write('tools/colab', '#!/usr/bin/env node\n');
   write('tools/lib/state.js', 'module.exports = {};\n');
   write('README.md', 'docs\n');

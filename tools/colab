@@ -1397,9 +1397,17 @@ dependency symlinking, dev-server restarts) live in OPTIONAL repo hooks, not her
       interrupted \`worktree rm\`, #62) is reported separately — never silently absent. #67: a
       worktree missing from this enumeration was invisible to code-sweep too, since it reads this
       command; ground truth is now git, not state.json.
-      --json emits \`{"worktrees": {...}, "unrecorded": [...]}\` — NOT a bare worktrees map (breaking
-      shape change, #67; nothing in this repo consumed the old bare-map shape besides this CLI's own
-      skills, which were updated in the same change).
+      Also flags directories that LOOK like a worktree (CLAUDE.md + .github/project.yml) but that
+      git never linked at all — no .git inside (#99) — reported only, never pruned. This scan's
+      recall is bounded and the bound is not stated elsewhere, so read it here (#109): depth-1 only
+      (immediate children of the known worktree-subdir names, not a nested walk); only today's
+      worktreeSubdir config value plus known historical ones, never an arbitrary path; and a repo
+      with no .github/project.yml cannot produce a flagged directory at all, since the shape
+      signals require one. Those are a deliberate tradeoff for zero false positives, not gaps to
+      close — a clean result means "none found where this scan looks", not "none anywhere".
+      --json emits \`{"worktrees": {...}, "unrecorded": [...], "orphaned": [...]}\` — NOT a bare
+      worktrees map (breaking shape change, #67; nothing in this repo consumed the old bare-map
+      shape besides this CLI's own skills, which were updated in the same change).
 
 HOOKS (optional, provided by the adopting repo):
   <repo>/.colab/hooks/post-create   run after worktree creation (if present & executable)
@@ -1902,35 +1910,29 @@ function knownReposFor(st) {
  * structurally cannot see a directory git never knew about in the first place (#99, following
  * #97's discovery of the shape).
  *
- * Scoped to the SAME known-repo set `unrecordedWorktrees()` uses (see `knownReposFor`), and within
- * each repo, only to `orphanLib.worktreeSubdirCandidates(config)` paths — never a filesystem-wide
- * scan. `classifyOrphanCandidate` (tools/lib/orphan-worktree.js) is the pure verdict; this function
- * only resolves the fs booleans it needs and walks the bounded path list.
+ * Scoped to the SAME known-repo set `unrecordedWorktrees()` uses (see `knownReposFor`). The walk
+ * itself — `orphanLib.scanForOrphans()` — lives in tools/lib/orphan-worktree.js (#107, so the
+ * shipped walk is the one thing tests exercise, not a copy); this function only resolves the repo
+ * list and the git cross-check the walk needs, both of which require `git`, a dependency the lib
+ * module deliberately stays free of.
+ *
+ * The cross-check is `linkedPaths`: every path `git worktree list` already reports for these repos
+ * (#106). A directory whose `.git` FILE was lost mid-teardown keeps its admin entry in the main
+ * repo, so git still lists it as prunable — "no `.git` file" does not mean "git never linked it",
+ * and without this check that husk is flagged here as an orphan while `unrecordedWorktrees()`
+ * simultaneously reports it as a git-known directory colab has no record of: one command
+ * contradicting itself about the same path.
  */
 function orphanWorktreeDirs(st, config) {
-  const repos = knownReposFor(st);
-  const out = [];
+  const repos = [...knownReposFor(st)].filter((repo) => repo && fs.existsSync(repo) && git.repoRoot(repo));
+  const linkedPaths = new Set();
   for (const repo of repos) {
-    if (!repo || !fs.existsSync(repo) || !git.repoRoot(repo)) continue;
-    for (const sub of orphanLib.worktreeSubdirCandidates(config)) {
-      const base = path.join(repo, sub);
-      if (!fs.existsSync(base)) continue;
-      let entries;
-      try { entries = fs.readdirSync(base); } catch { continue; }
-      for (const name of entries) {
-        const cand = path.join(base, name);
-        let isDir;
-        try { isDir = fs.statSync(cand).isDirectory(); } catch { continue; }
-        if (!isDir) continue;
-        const hasGitEntry = fs.existsSync(path.join(cand, '.git'));
-        const hasClaudeMd = fs.existsSync(path.join(cand, 'CLAUDE.md'));
-        const hasProjectYml = fs.existsSync(path.join(cand, '.github/project.yml'));
-        const verdict = orphanLib.classifyOrphanCandidate({ hasClaudeMd, hasProjectYml, hasGitEntry });
-        if (verdict === 'orphan') out.push({ repo, path: path.resolve(cand) });
-      }
+    for (const w of git.worktreeListDetailed(repo)) {
+      if (w.bare) continue;
+      linkedPaths.add(path.resolve(w.path));
     }
   }
-  return out;
+  return orphanLib.scanForOrphans(repos, config, { linkedPaths });
 }
 
 function cmdWorktrees(argv) {
@@ -1942,7 +1944,11 @@ function cmdWorktrees(argv) {
   const orphaned = orphanWorktreeDirs(st, config);
   if (opts.json) { print(JSON.stringify({ worktrees: st.worktrees, unrecorded, orphaned }, null, 2)); return 0; }
   const wts = Object.values(st.worktrees);
-  if (wts.length === 0 && unrecorded.length === 0 && orphaned.length === 0) { print('No worktrees.'); return 0; }
+  if (wts.length === 0 && unrecorded.length === 0 && orphaned.length === 0) {
+    print('No worktrees.');
+    print(ORPHAN_SCAN_LIMITS);
+    return 0;
+  }
   if (wts.length) {
     const rows = wts.map((wt) => {
       const claims = Object.values(st.claims).filter((c) => c.worktree === wt.name).map((c) => c.issue).join(' ') || '-';
@@ -1989,8 +1995,34 @@ function cmdWorktrees(argv) {
     print('  still mid-creation, then either finish linking it (`git worktree add` against it) or');
     print('  remove it by hand — this check only reports, it never prunes.');
   }
+  print('');
+  print(ORPHAN_SCAN_LIMITS);
   return 0;
 }
+
+/**
+ * The recall limits of `orphanWorktreeDirs()` above, in prose — #109. A clean scan reads as "no
+ * orphan directories", which is stronger than what the scan actually supports: it only ever looks
+ * where it is told to look. Printed by `cmdWorktrees` on every run (clean or not), right after the
+ * orphan section, so the reader always sees which question the scan answered. HELP_WORKTREE states
+ * the same limits in its own words for the pre-run reader (a static template literal defined
+ * earlier in this file cannot reference a `const` declared here without a load-order dance) — keep
+ * the two in sync by hand if the scope ever changes.
+ *
+ *   - Depth-1 only: reads the immediate children of each worktreeSubdir candidate, never nested
+ *     deeper. Not a scope choice, an implementation detail — worth knowing, not worth trusting.
+ *   - Two subdir names only (today's `worktreeSubdir` config value + known historical ones, see
+ *     tools/lib/orphan-worktree.js worktreeSubdirCandidates) — a worktree created at an explicit
+ *     path outside them is out of scope by construction.
+ *   - A repo with no `.github/project.yml` cannot produce a flagged directory: the shape signals
+ *     require one, so a non-adopting repo's orphans are structurally invisible.
+ *   Both of those are the deliberate tradeoff that keeps false positives at zero — state them,
+ *   don't "fix" them into a noisier scan.
+ */
+const ORPHAN_SCAN_LIMITS =
+  '  Scans only the immediate children of known worktree-subdir names, in repos colab already has\n' +
+  '  a record for (or the current repo) — not a nested walk, not other paths, not a repo with no\n' +
+  '  .github/project.yml. A clean result answers "none THERE", not "none anywhere".';
 
 // ---------------------------------------------------------------------------
 // doctor

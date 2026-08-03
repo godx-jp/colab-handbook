@@ -58,6 +58,7 @@ function fakeHandbook() {
   g('init', '-q', '-b', 'main', '.');
   g('config', 'user.email', 'test@example.invalid');
   g('config', 'user.name', 'audit test');
+  g('config', 'core.hooksPath', path.join(dir, '.nohooks'));
   fs.mkdirSync(path.join(dir, 'templates'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'templates', 'ci-node.yml'), 'name: ci-node v1\n');
   fs.writeFileSync(path.join(dir, 'templates', 'repo-CLAUDE-block.md'), 'block v1\n');
