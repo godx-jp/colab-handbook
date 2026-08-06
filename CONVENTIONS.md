@@ -559,7 +559,9 @@ Do not collapse them.
 
 Parallel sessions and parallel agents must not collide on the same Issue. Two layers:
 
-### Source of truth — GitHub
+### Who holds this
+
+#### Source of truth — GitHub
 
 ```sh
 gh issue list --label in-progress                               # check, before taking work
@@ -573,7 +575,7 @@ your phone.
 
 The label does not exist in a fresh repo. Creating it is part of adoption ([§9](#9-adopting-this)).
 
-### Fast path — local cache
+#### Fast path — local cache
 
 The `colab` CLI keeps a machine-local cache at **`~/.colab/state.json`** (override the
 directory with `COLAB_HOME`), written automatically when you claim an issue or create a
@@ -591,7 +593,169 @@ colab claims --sync      # reconcile local cache against GitHub
 colab doctor --prune     # free claims whose worktrees no longer exist
 ```
 
-### Readiness — open and unclaimed is not enough
+#### Rules
+
+- Claim **before** you start, not when you open the PR. An unclaimed issue is fair game.
+- **A live claim is enforced, not advisory.** `colab claim` and `colab worktree new`
+  *refuse* an issue that already has a live claim (local state for same-machine, GitHub for
+  cross-machine), naming the holder. `--force` takes over loudly — a takeover is always a
+  visible, logged act. Advisory warnings were tried first; measurement showed they get
+  skipped exactly when they matter.
+
+  Know the limit of that guarantee: it protects an issue only while a claim is *live*, and
+  since a session releases its whole group at wrap, an issue you left unfinished is
+  immediately claimable again. The refusal prevents two sessions holding one issue at the
+  same time; it does not reserve work for later. If you intend to come back to something,
+  say so on the Issue — the claim will not hold it for you.
+- **A claim carries its details as a structured Issue comment** —
+  `🔒 Claimed — worktree … · branch … · host … · <timestamp>` on claim, `✅ Released` on
+  release. The label answers *whether* an issue is taken; the comment answers *by what*,
+  from any machine, with an audit trail unlabeling could never keep.
+  - **The same pattern names code-ship's evidence comment** (B2b, `ceremony:
+    standard` only): one invisible marker line, `<!-- colab:evidence sha=<trunk-sha> -->`,
+    prepended to otherwise-free prose. A stable first line as wire format, everything after
+    it human — deliberately not a structured evidence schema, which would invite padding
+    instead of honesty. **Degrade, never gate**: a comment missing the marker (an older
+    wrap, a hand-written one) still counts as evidence: no consumer may treat its absence as
+    "no evidence exists".
+- **Simultaneous claims break ties deterministically.** GitHub has no atomic check-and-set,
+  so two racers can both claim within the same second. After claiming, re-read the issue:
+  the earliest live claim comment (by GitHub's own `createdAt`) wins; the loser posts
+  `✅ Released (yielded — …)` and moves on. Both racers reach the same verdict
+  independently — no coordinator needed.
+- Release the claim even if you did not finish. A stale claim is worse than no claim, because
+  it silently blocks other people. (`colab doctor --prune` frees claims whose worktrees died,
+  so stale state can never block work forever.)
+- For long-running work, comment on the Issue with progress. The Issue is the feature's
+  external memory — anyone resuming should get full context from `gh issue view N` without
+  re-reading the codebase.
+
+#### Tracking issues — claimed but referenced, not closed
+
+Most issues are a unit of work: a branch completes them, and the merge closes them with
+`Closes #N`. But a repo may keep a **long-lived memory / tracking issue** — external memory
+for a whole domain, holding accumulated decisions and gotchas plus a checklist of still-open
+items. A session doing a small hygiene fix in that domain legitimately **claims** the tracking
+issue (to signal work in the area) and **references** it, but does not complete it: its
+checklist still has open items.
+
+Closing such an issue at merge would bury its knowledge and its still-open items behind a
+closed-issue lookup. So a tracking issue is **referenced, not closed** — the merge message says
+`Refs #N` (which GitHub links but does not auto-close) instead of `Closes #N`. Two ways to say
+which issues these are, and they compose:
+
+- **A `tracking` label on the issue** — declarative and durable. Any session that claims a
+  labelled issue references it automatically. This is the robust choice: the property lives on
+  the long-lived issue, so every session touching the domain honours it without having to know.
+- **`colab ship --refs <N[,M]>`** — explicit, per-ship, for an issue not labelled.
+
+**The claim is released unconditionally either way** — exactly as for a closed issue (a stale
+claim blocks others; §5 *Rules*). Only the keyword changes: `Refs` instead of `Closes`. The
+`tracking` label is deliberately **not** in the convention label set (§9): its absence breaks no
+check — every issue simply closes as before — so adoption does not provision it and the audit
+does not report it missing. A repo that wants the behaviour creates the label and applies it.
+
+One edge the tool cannot fix by itself: if a commit *body* on the branch literally writes
+`Closes #N` for a tracking issue, GitHub closes it on merge regardless — a message keyword
+cannot un-close it. `colab ship` detects this after the push (the referenced issue reads
+`CLOSED`) and warns you to reopen it by hand. Do not write `Closes #<tracking>` in a commit body.
+
+The reverse direction is **not** the same kind of edge, and `ship` fixes it rather than
+warning about it: a commit body may carry `Refs #N` written while N was still open, and by
+the time `ship` runs N is one of the issues this branch *closes*. Nothing needs GitHub to
+un-do anything here, so the composer drops the stale `Refs #N` and keeps its own `Closes #N`
+before the push, instead of shipping a commit that says both (#58).
+
+### Who decided it should exist
+
+#### Provenance — who decided the work should exist
+
+Issues now arrive from three directions: a person, an agent that hit something while
+coding, and an agent filing a follow-up as it wraps a session. Readiness above answers
+*can this be started*. Provenance answers a different question, and the one that matters
+the moment anything starts work in batches: **has a human decided this work should
+happen at all?**
+
+Nothing else in the model answers it. An agent-filed issue is open, unclaimed and
+unblocked the instant it is created — indistinguishable, to every check in this section,
+from work a person asked for.
+
+**So an agent that files an issue on its own initiative labels it `agent-filed` and ends
+the body with a machine-readable line:**
+
+```
+Filed-by: agent (during code-wrap of #48, session <name>)
+Filed-by: boss (via discussion session <name>)
+```
+
+- **No label means a human filed it.** That is the default, so existing issues need no
+  backfill and a repo adopting this mid-life is instantly consistent.
+- **Provenance is whose *intent* it was, not whose keyboard.** An agent transcribing what
+  a person just decided in a discussion writes `Filed-by: boss` and adds **no** label —
+  the person decided the work exists; the agent only typed it. An agent that noticed a
+  problem by itself and filed it is `agent-filed`, even if a human was in the room.
+- The `Filed-by:` line is the durable record and stands alone; the label exists so the
+  distinction is **queryable** (`gh issue list --label agent-filed`) without reading
+  bodies. Write both.
+
+**Why this is a convention and not a tooling detail:** anything that starts work in bulk —
+a start button, a batch triage, a scheduled sweep — must be able to exclude work no human
+approved. Without the distinction, the closed loop is available by default: an agent files
+work, a fan-out tool starts it, that session files more. The label is what lets the
+default be *excluded, and started only when a person clicks* — which makes the click the
+approval. A tool cannot construct that gate from an issue's contents; only whoever filed
+it knows the answer, and only at filing time.
+
+##### Ask — the filer declares the ask class (#89)
+
+`agent-filed` says *a human did not decide this work should exist*; it does not say what
+kind of decision the issue is waiting on. Measured on a live 34-item approve queue
+(2026-08-01): the queue decomposed into six ask-classes with different verbs — a
+permission to touch prod state, a design or process ruling, a bug someone needs to accept,
+a work proposal, a self-deferred item waiting on a trigger, an epic — but a reader detected
+the lane heuristically, from labels and title phrasing ("needs an explicit OK", "needs an
+operator decision", "blocked until <trigger>"). The filer *knows* the class the moment it
+writes the issue; nothing downstream should have to guess it back out of prose.
+
+**So an `agent-filed` issue ends its body with one more machine-readable line, next to
+`Filed-by:`:**
+
+```
+Ask: permission | backlog | ruling | deferred(<trigger>)
+```
+
+- **`permission`** — asking to touch machine or production state (a cert, a deploy, a
+  config a human must authorize) before the agent proceeds.
+- **`backlog`** — a work proposal: code someone should accept and schedule, not a decision
+  in itself. This is also the class an absent line means (below) — most `agent-filed`
+  issues are exactly this, and the line only earns its keep on the other three.
+- **`ruling`** — a question that resolves to a human judgment, not a diff. *Never startable
+  as code* — the same class *Design ruling* and *Scheduled drivers* already treat as a
+  gate, generalized past the design-specific case that motivated `needs-ruling`.
+- **`deferred(<trigger>)`** — the filer has already decided no action is needed *now*; the
+  issue carries its own wake condition (`deferred(dep #91 lands)`) and demands no decision
+  today.
+- **Absent line means `backlog`.** Every `agent-filed` issue written before this convention
+  existed reads as the common case with no backfill required — the same compatibility
+  `Filed-by:`'s own default gives *Provenance*.
+- **Consumers.** A decision surface (an approve queue, a triage board) groups by this line
+  instead of re-deriving the lane from title text; *Scheduled drivers* (below) excludes
+  `ruling` and `permission` the same way it already excludes a live `needs-ruling` — a
+  human judgment or a permission grant is not a thing a driver infers its way past by
+  reading the body closely enough.
+- **Written at filing time, by whoever files.** Like `Filed-by:`, this is not something a
+  reader reconstructs after the fact — an issue that turns out to need a ruling only once a
+  session is already elbow-deep in it gets the line added then, not left absent because the
+  filer didn't know yet.
+
+This line only ever appears on `agent-filed` issues. A human filing an issue for a human
+audience does not need a machine-readable ask class — the whole apparatus above exists to
+let a tool tell an agent's request-for-permission apart from an agent's plain proposal
+without reading either one's prose.
+
+### What may start
+
+#### Readiness — open and unclaimed is not enough
 
 An issue is **ready to start** when it is open, unclaimed, **and nothing it depends on is
 still missing**. That third condition is neither a boolean nor a matter of opinion — it is
@@ -685,7 +849,7 @@ blocker removes it. Prefer leaving it off to leaving it wrong — an absent labe
 check, a stale one costs the wall you walk into. A prose note saying "checked, no blockers"
 does **not** count; that is the practice this section replaces, wearing a different hat.
 
-#### Readiness is not a boolean — read the blocker's state, not just its existence
+##### Readiness is not a boolean — read the blocker's state, not just its existence
 
 An open blocker used to end the question. That yes/no hides two situations that are not
 alike: a blocker **nobody has started**, where no code exists anywhere, and a blocker
@@ -738,7 +902,7 @@ pure — facts in, verdict out — and takes its "is the blocker's code written 
 answer from `tools/lib/landed.js` rather than counting commits a second time. Prose states
 the rule; the module is one implementation of it; the tests keep them from drifting apart.
 
-#### Mechanical readiness — a weaker, honest claim for the empty case (#69)
+##### Mechanical readiness — a weaker, honest claim for the empty case (#69)
 
 `deps-checked` asserts *somebody looked* — a reasoning session read the issue and judged it
 clear. That is a **stronger** claim than "the encoded dependency graph, read via the API,
@@ -798,92 +962,7 @@ claim it is actually capable of making, which is framing 1 (split the value) doi
 work, surfaced to a consumer the way framing 3 sketched it: as an opt-in sibling signal that
 never changes what `deps-checked` means or what today's conservative consumers do by default.
 
-### Provenance — who decided the work should exist
-
-Issues now arrive from three directions: a person, an agent that hit something while
-coding, and an agent filing a follow-up as it wraps a session. Readiness above answers
-*can this be started*. Provenance answers a different question, and the one that matters
-the moment anything starts work in batches: **has a human decided this work should
-happen at all?**
-
-Nothing else in the model answers it. An agent-filed issue is open, unclaimed and
-unblocked the instant it is created — indistinguishable, to every check in this section,
-from work a person asked for.
-
-**So an agent that files an issue on its own initiative labels it `agent-filed` and ends
-the body with a machine-readable line:**
-
-```
-Filed-by: agent (during code-wrap of #48, session <name>)
-Filed-by: boss (via discussion session <name>)
-```
-
-- **No label means a human filed it.** That is the default, so existing issues need no
-  backfill and a repo adopting this mid-life is instantly consistent.
-- **Provenance is whose *intent* it was, not whose keyboard.** An agent transcribing what
-  a person just decided in a discussion writes `Filed-by: boss` and adds **no** label —
-  the person decided the work exists; the agent only typed it. An agent that noticed a
-  problem by itself and filed it is `agent-filed`, even if a human was in the room.
-- The `Filed-by:` line is the durable record and stands alone; the label exists so the
-  distinction is **queryable** (`gh issue list --label agent-filed`) without reading
-  bodies. Write both.
-
-**Why this is a convention and not a tooling detail:** anything that starts work in bulk —
-a start button, a batch triage, a scheduled sweep — must be able to exclude work no human
-approved. Without the distinction, the closed loop is available by default: an agent files
-work, a fan-out tool starts it, that session files more. The label is what lets the
-default be *excluded, and started only when a person clicks* — which makes the click the
-approval. A tool cannot construct that gate from an issue's contents; only whoever filed
-it knows the answer, and only at filing time.
-
-#### Ask — the filer declares the ask class (#89)
-
-`agent-filed` says *a human did not decide this work should exist*; it does not say what
-kind of decision the issue is waiting on. Measured on a live 34-item approve queue
-(2026-08-01): the queue decomposed into six ask-classes with different verbs — a
-permission to touch prod state, a design or process ruling, a bug someone needs to accept,
-a work proposal, a self-deferred item waiting on a trigger, an epic — but a reader detected
-the lane heuristically, from labels and title phrasing ("needs an explicit OK", "needs an
-operator decision", "blocked until <trigger>"). The filer *knows* the class the moment it
-writes the issue; nothing downstream should have to guess it back out of prose.
-
-**So an `agent-filed` issue ends its body with one more machine-readable line, next to
-`Filed-by:`:**
-
-```
-Ask: permission | backlog | ruling | deferred(<trigger>)
-```
-
-- **`permission`** — asking to touch machine or production state (a cert, a deploy, a
-  config a human must authorize) before the agent proceeds.
-- **`backlog`** — a work proposal: code someone should accept and schedule, not a decision
-  in itself. This is also the class an absent line means (below) — most `agent-filed`
-  issues are exactly this, and the line only earns its keep on the other three.
-- **`ruling`** — a question that resolves to a human judgment, not a diff. *Never startable
-  as code* — the same class *Design ruling* and *Scheduled drivers* already treat as a
-  gate, generalized past the design-specific case that motivated `needs-ruling`.
-- **`deferred(<trigger>)`** — the filer has already decided no action is needed *now*; the
-  issue carries its own wake condition (`deferred(dep #91 lands)`) and demands no decision
-  today.
-- **Absent line means `backlog`.** Every `agent-filed` issue written before this convention
-  existed reads as the common case with no backfill required — the same compatibility
-  `Filed-by:`'s own default gives *Provenance*.
-- **Consumers.** A decision surface (an approve queue, a triage board) groups by this line
-  instead of re-deriving the lane from title text; *Scheduled drivers* (below) excludes
-  `ruling` and `permission` the same way it already excludes a live `needs-ruling` — a
-  human judgment or a permission grant is not a thing a driver infers its way past by
-  reading the body closely enough.
-- **Written at filing time, by whoever files.** Like `Filed-by:`, this is not something a
-  reader reconstructs after the fact — an issue that turns out to need a ruling only once a
-  session is already elbow-deep in it gets the line added then, not left absent because the
-  filer didn't know yet.
-
-This line only ever appears on `agent-filed` issues. A human filing an issue for a human
-audience does not need a machine-readable ask class — the whole apparatus above exists to
-let a tool tell an agent's request-for-permission apart from an agent's plain proposal
-without reading either one's prose.
-
-### Design ruling — a human must approve the design first
+#### Design ruling — a human must approve the design first
 
 *Readiness* and *Provenance* each answer a different question about whether an issue may
 be picked up. A third belongs beside them, for one specific class of surface: **has a
@@ -918,7 +997,7 @@ Applies in every mode. A human-opened session and a scheduled driver honor the i
 gate, for the identical reason *Scheduled drivers* gives for `agent-filed` and `epic`: a
 label a person has not cleared is not a decision a tool gets to infer around.
 
-### Migration exemption — a narrow, human-created door through no-new-migrations (#98)
+#### Migration exemption — a narrow, human-created door through no-new-migrations (#98)
 
 `colab ship` refuses a branch that touches `database/migrations/` or `prisma/migrations/` —
 absolutely, by default, with no flag, env var, or `project.yml` field to lower the bar. That
@@ -971,7 +1050,7 @@ green, claim corroboration, the trunk-checkout check, and the hand-merge conflic
 run in full on a granted branch. See [`tools/README.md`](tools/README.md#migration-grants-98--the-one-narrow-human-created-exemption)
 for the exact commands and the full precondition-table wiring.
 
-### Red-trunk exemption — the one-shot door through trunk-CI-green (#105)
+#### Red-trunk exemption — the one-shot door through trunk-CI-green (#105)
 
 A **genuinely** red trunk (see *Ask by commit, not by recency*, above, for the false one) makes
 `ship`'s first precondition permanently un-satisfiable for the one branch that could clear it: the
@@ -1019,88 +1098,7 @@ decision this feature deliberately does not make.
 See [`tools/README.md`](tools/README.md#ci-grants-105--the-one-shot-door-through-a-genuinely-red-trunk)
 for the exact commands.
 
-### Planning — a plan file that outlives one command, and who drafts it (#94)
-
-Coordinator (triage/grading) and implementer (coding) sessions often run at different
-model tiers — a strong model plans and grades cheaply, a cheaper model executes the
-lanes — and until #94 nothing carried the coordinator's read of the work across that
-seam: the implementing session re-derived intent and approach from scratch, from a much
-narrower view than the one that decided the work was startable in the first place.
-
-**The plan is a repo-local scratch file, not an Issue comment.** Coordinator and
-implementer sessions share one machine and one filesystem, so a file is the cheapest bus,
-and it never touches the tracker at all. Convention: `.claude/plans/issue-<N>.md` in the
-**main checkout — outside any worktree.** That placement is deliberate, not incidental:
-it exists before the worktree is created (a session can write to it from step 0) and
-survives the worktree's teardown (a grading session reads it after `code-ship` has
-already removed the tree it was written for). Git-excluded, **never committed** — every
-adopting repo's own `.gitignore` should carry `.claude/plans/`, the way this repo's
-does. The file is disposable by design; anything worth keeping past the session moves to
-the Issue at wrap ([code-wrap A1](skills/code-wrap/SKILL.md)), same as any other
-knowledge this convention set treats as durable.
-
-**"The main checkout" is a resolved absolute path, never a bare relative one (#113).** A
-session inside a worktree has its own `.claude/plans/` sitting one `cd` away — a bare
-`.claude/plans/issue-<N>.md` resolves against `$PWD`, which is exactly correct when `$PWD`
-is the main checkout and silently wrong (writes into, or reads from, the *worktree's* copy)
-the rest of the time, with no error to notice the mistake by. Anchor it explicitly, every
-time, the same way `code-sweep` and `code-triage` anchor their own repo-root lookups:
-
-```sh
-MAIN_REPO="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
-PLAN="$MAIN_REPO/.claude/plans/issue-<N>.md"
-```
-
-`--git-common-dir` resolves to the main checkout's `.git` from *any* worktree of the same
-repo, so this is safe to run from inside one. Every skill that touches the plan file
-(`code-start`, `code-plan`, `code-wrap`'s hand-off checklist, `code-ship`) uses `$PLAN`
-computed this way — never a bare `.claude/plans/issue-<N>.md`.
-
-**Three rungs, the middle one the default:**
-
-| Rung | When | Content |
-|---|---|---|
-| 0 — none | trivial/mechanical work, the acceptance oracle is self-evident | nothing |
-| **1 — plan-lite (DEFAULT)** | every other session | 3-5 lines, written at session start after reading the Issue: intent in one sentence · files expected to move · the acceptance oracle (what proves it done) · a stop condition |
-| 2 — full plan | `needs-plan` is set (below), or a trigger fires mid-session: the ask turned out ambiguous, the design has no precedent in this repo, a long dependency chain, several issues coupled by more than file overlap | drafted by [`code-plan`](skills/code-plan/SKILL.md) into the same file |
-
-**Failing to state rung 1's oracle in one line is itself the signal to stop and ask on
-the Issue** — a session that cannot say what proves the work done should not guess and
-should not silently drop to rung 0.
-
-**Who flags, who drafts, and when — not the same actor.** `code-triage` may flag a group
-it judges hard with the `needs-plan` label plus a one-line reason comment on the group's
-lead issue — the flag is a **cross-backlog judgement**, the one thing that dies with the
-triage session if it goes unwritten, not a plan of its own. It never drafts the plan
-itself: authoring at triage time produced stale artifacts for groups that are reported
-startable but not started soon, which is why the earlier design of this feature dropped
-per-beat plan authoring entirely. **The plan is drafted at code-session start, inside the
-implementing session**, by a stronger-model planning subagent seeded with the Issue plus
-the triage reason line — against the repo as it actually is at coding time, not as it was
-at triage. A rung-1 stub may still upgrade to rung 2 mid-session on a self-escalation
-trigger; the flag decides the *default*, it never caps the ladder.
-
-**Read the flag by direct issue fetch, never the Search API.** `gh issue view <N>` is
-read-your-writes consistent — a flag `code-triage` set seconds ago is visible to the very
-next session. `gh issue list --search 'label:needs-plan'` reads the eventually-consistent
-search index, which can lag by minutes — long enough to miss exactly the flags a triage
-run just set. `code-start` already fetches the issue by number for its own context load
-([§2](skills/code-start/SKILL.md)), so this rides that call for free; `code-plan`
-inherits the same rule rather than re-deciding it.
-
-**A stub still upgrades mid-session, and a plan can still be wrong.** Rung 1 written at
-session start is not a contract any more than rung 2 is — the implementer may deviate
-when the code demonstrates the plan is wrong, but says so where the plan lives (this
-file), so a resuming or grading session reads the actual reasoning rather than a stale
-sketch.
-
-**Provisioning.** `needs-plan` joins the label set [§9](#9-adopting-this) provisions on
-adoption and back-fills on sync, the identical idempotent pattern as every other fixed
-convention label — never created on demand the way a per-group `group:<key>` label is,
-because its name is fixed and every repo needs it before the first triage pass can flag
-anything.
-
-### Scheduled drivers — provenance and autonomy meet a caller that is not a person
+#### Scheduled drivers — provenance and autonomy meet a caller that is not a person
 
 Everything above — provenance, readiness, the autonomy ladder — was written assuming the
 caller deciding to act is a person, or an agent a person is watching. A **scheduled
@@ -1204,7 +1202,7 @@ rather than rogue, in the same way [§5](#5-claiming-work--how-to-say-im-on-this
 must have. A repo adopting a different scheduler owes it these same five properties, not a
 rewrite of them.
 
-### Grouping — issues that must share one branch
+#### Grouping — issues that must share one branch
 
 *Readiness* gave two relationships a native home: parent/child as sub-issues, sequence as
 blocked-by. A third one this model leans on constantly had none, and it is the one that
@@ -1303,7 +1301,196 @@ exists only *after* someone has claimed, so it cannot inform the decision to cla
 one moment the group must be readable. It records a human having acted on triage's
 judgement, which is not the same thing as the judgement.
 
-### Writing a conclusion down — the decision and the document are two units
+#### Scope — diagnosing across repos is not license to act in them
+
+A recurring shape across a fleet of repos: a session working an issue in one repo
+traces the actual root cause to a different one — a shared tool repo this one depends
+on, a library, another service in the same system. **Reading and diagnosing across
+repos to find a root cause is expected.** Everything else in this section — the label,
+the worktree, the local cache, the human go-ahead before a trunk merge — is scoped to
+**the repo a session is nominally working in**, and none of it authorizes acting in a
+different one just because the diagnosis pointed there.
+
+**Acting in another repo — branching, committing, pushing, rebasing or force-pushing an
+existing branch, merging — requires that repo's own claim and its own explicit
+go-ahead, scoped to that repo**, even when the session is confident it found the real
+fix. The correct move is to report the finding — an Issue there, or a comment pointing
+at the existing branch — and stop.
+
+Measured: a session working a downstream repo's issue correctly traced the root cause
+to an existing branch in the upstream tool repo the issue pointed at, then — with no
+claim there and no go-ahead scoped to it — rebased that branch (which had drifted
+materially behind trunk) and force-pushed the result. It was caught and reverted before
+anything merged, so no lasting damage landed; the sequence of actions is what this rule
+exists to prevent, not the eventual outcome.
+
+#### Epics — a container is not a start candidate
+
+*Readiness* and *Provenance* both answer whether an issue is safe to pick up: is it
+unblocked, and did a human approve it. Neither answers a third question a scheduled
+driver (*Scheduled drivers*, above) or a batch triage needs answered before either of
+those: **is this issue a unit of work at all?** An epic — the parent issue that groups a
+body of child work — can sail through both existing gates: open, unclaimed, human-filed,
+even `deps-checked`, and still be nothing a session should ever branch on, because there
+is no code to write for "ship the whole redesign", only for its children.
+
+**The `epic` label marks exactly that: a container for sub-issues, informative, never a
+start candidate, never claimed as a unit of work.** Secondary signals corroborate it — an
+`epic(` title prefix, native sub-issue parenthood (`subIssuesSummary.total > 0`) — but the
+label is the one an unattended tool can filter on without inferring anything from prose or
+counting children itself. Apply it when you file (or convert) an epic; a scheduler and a
+triage pass both exclude it from what they start, the same way they exclude `agent-filed`
+work, and for a related but distinct reason: provenance asks *did a human approve this*,
+this asks *is it shaped like a task at all*.
+
+**This is why `epic` lives in the convention label set ([§9](#9-adopting-this)) and
+`tracking` (below) does not.** The bar for that set is "an unattended driver's decision
+depends on it" — the same bar `in-progress`, `deps-checked` and `agent-filed` each meet.
+The scheduled-drivers model (*Scheduled drivers*, above) needs to exclude epics from what
+it starts; nothing unattended yet reads `tracking`, so it stays repo-local and opt-in.
+An epic still gets closed and referenced exactly as any other issue does once its
+children finish — this label changes nothing about *that*; it only keeps a driver from
+mistaking the map for the territory.
+
+#### Delivery type — route, not start (#112)
+
+*Epics*, just above, answers "is this a unit of work at all?" A related but distinct
+question sits beside it: **when it is a unit of work, does finishing it produce a code
+commit?** A tracker mixes issues whose delivery is *not* a code commit — a content push,
+an ops/production check, a docs sync outside code review — into a pipeline whose every
+stage assumes one: worktree, gate, mergeable, squash, `Closes #N`. Such an issue can
+never reach a mergeable state, so it reads as **eternally stuck**, and its real
+completion (an evidence comment, an ops verification) is invisible to landed-detection.
+The expensive half: it still looks **startable** to triage and a scheduled driver alike,
+because nothing in the existing readiness vocabulary says "this is real work, but not a
+diff" the way `epic` says "this is not a unit of work at all" — `deps-checked` means "no
+blocker", not "this is a commit".
+
+**Four labels — `delivery:code`, `delivery:content`, `delivery:ops`,
+`delivery:docs-only`** — name the delivery type explicitly. The classifier they power is
+**three-valued, not boolean**, and the third value is load-bearing:
+
+| label state | reads as |
+|---|---|
+| no `delivery:*` label at all | **not asked** — behaves exactly as before this label set existed |
+| `delivery:code` | code — the ordinary pipeline applies |
+| `delivery:content` / `delivery:ops` / `delivery:docs-only` | non-code — **route, do not start** |
+
+**"Not asked" must never collapse into "non-code".** Every issue in every tracker is
+unlabelled the day this set is adopted; if absence read as non-code, triage and every
+scheduled driver would freeze on that day. This is the same failure class *Readiness*
+warns about for an empty blocker list: an absent value is not a meaningful value, and
+optimism and pessimism both point the wrong way from "nobody said".
+
+**`content` / `ops` / `docs-only` gate exactly like `needs-ruling`, not like a softer
+advisory.** A non-code delivery type is not a start candidate for anyone, manual or
+scheduled, in the code pipeline — the same posture *Design ruling* takes for an
+unapproved surface, and the same reason *Epics* excludes a container: not every open,
+unclaimed, human-filed issue is code to write. Route it to wherever its actual delivery
+happens (a content calendar, an ops runbook, a docs platform); do not open a worktree for
+it, and do not report it as blocked — it was never going to unblock, because there is no
+diff on the other side of it. A session that lands on one distills that onto the issue and
+ends the session, the same closing move as landing on a design-decision-only issue with no
+code product ([`CLAUDE.md`](CLAUDE.md)).
+
+**Who sets the label:** whoever files or triages the issue, deciding what the issue's
+*deliverable* is — the identical placement `needs-ruling` gets from the designer producing
+the spec. No mechanical rule infers it from a title or a body; a docs-sounding title can
+still be `delivery:code` (updating a `.md` this repo reviews and merges as code), and a
+code-sounding title can be `delivery:ops` (verifying a deploy, not shipping one).
+
+**This is why `delivery:*` lives in the convention label set ([§9](#9-adopting-this)) and
+not in a repo-opt-in list like `tracking`.** The bar is the same one `epic` and
+`needs-ruling` meet: an unattended driver's start-or-skip decision depends on being able
+to read the three states apart, and a repo that adopted before this set existed cannot
+create the label at all — the label is provisioned, not invented on demand the way
+`group:<key>` is, because its four values are fixed and every adopting repo needs them
+before the first triage pass can classify anything.
+
+### How a decision is recorded
+
+#### Planning — a plan file that outlives one command, and who drafts it (#94)
+
+Coordinator (triage/grading) and implementer (coding) sessions often run at different
+model tiers — a strong model plans and grades cheaply, a cheaper model executes the
+lanes — and until #94 nothing carried the coordinator's read of the work across that
+seam: the implementing session re-derived intent and approach from scratch, from a much
+narrower view than the one that decided the work was startable in the first place.
+
+**The plan is a repo-local scratch file, not an Issue comment.** Coordinator and
+implementer sessions share one machine and one filesystem, so a file is the cheapest bus,
+and it never touches the tracker at all. Convention: `.claude/plans/issue-<N>.md` in the
+**main checkout — outside any worktree.** That placement is deliberate, not incidental:
+it exists before the worktree is created (a session can write to it from step 0) and
+survives the worktree's teardown (a grading session reads it after `code-ship` has
+already removed the tree it was written for). Git-excluded, **never committed** — every
+adopting repo's own `.gitignore` should carry `.claude/plans/`, the way this repo's
+does. The file is disposable by design; anything worth keeping past the session moves to
+the Issue at wrap ([code-wrap A1](skills/code-wrap/SKILL.md)), same as any other
+knowledge this convention set treats as durable.
+
+**"The main checkout" is a resolved absolute path, never a bare relative one (#113).** A
+session inside a worktree has its own `.claude/plans/` sitting one `cd` away — a bare
+`.claude/plans/issue-<N>.md` resolves against `$PWD`, which is exactly correct when `$PWD`
+is the main checkout and silently wrong (writes into, or reads from, the *worktree's* copy)
+the rest of the time, with no error to notice the mistake by. Anchor it explicitly, every
+time, the same way `code-sweep` and `code-triage` anchor their own repo-root lookups:
+
+```sh
+MAIN_REPO="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+PLAN="$MAIN_REPO/.claude/plans/issue-<N>.md"
+```
+
+`--git-common-dir` resolves to the main checkout's `.git` from *any* worktree of the same
+repo, so this is safe to run from inside one. Every skill that touches the plan file
+(`code-start`, `code-plan`, `code-wrap`'s hand-off checklist, `code-ship`) uses `$PLAN`
+computed this way — never a bare `.claude/plans/issue-<N>.md`.
+
+**Three rungs, the middle one the default:**
+
+| Rung | When | Content |
+|---|---|---|
+| 0 — none | trivial/mechanical work, the acceptance oracle is self-evident | nothing |
+| **1 — plan-lite (DEFAULT)** | every other session | 3-5 lines, written at session start after reading the Issue: intent in one sentence · files expected to move · the acceptance oracle (what proves it done) · a stop condition |
+| 2 — full plan | `needs-plan` is set (below), or a trigger fires mid-session: the ask turned out ambiguous, the design has no precedent in this repo, a long dependency chain, several issues coupled by more than file overlap | drafted by [`code-plan`](skills/code-plan/SKILL.md) into the same file |
+
+**Failing to state rung 1's oracle in one line is itself the signal to stop and ask on
+the Issue** — a session that cannot say what proves the work done should not guess and
+should not silently drop to rung 0.
+
+**Who flags, who drafts, and when — not the same actor.** `code-triage` may flag a group
+it judges hard with the `needs-plan` label plus a one-line reason comment on the group's
+lead issue — the flag is a **cross-backlog judgement**, the one thing that dies with the
+triage session if it goes unwritten, not a plan of its own. It never drafts the plan
+itself: authoring at triage time produced stale artifacts for groups that are reported
+startable but not started soon, which is why the earlier design of this feature dropped
+per-beat plan authoring entirely. **The plan is drafted at code-session start, inside the
+implementing session**, by a stronger-model planning subagent seeded with the Issue plus
+the triage reason line — against the repo as it actually is at coding time, not as it was
+at triage. A rung-1 stub may still upgrade to rung 2 mid-session on a self-escalation
+trigger; the flag decides the *default*, it never caps the ladder.
+
+**Read the flag by direct issue fetch, never the Search API.** `gh issue view <N>` is
+read-your-writes consistent — a flag `code-triage` set seconds ago is visible to the very
+next session. `gh issue list --search 'label:needs-plan'` reads the eventually-consistent
+search index, which can lag by minutes — long enough to miss exactly the flags a triage
+run just set. `code-start` already fetches the issue by number for its own context load
+([§2](skills/code-start/SKILL.md)), so this rides that call for free; `code-plan`
+inherits the same rule rather than re-deciding it.
+
+**A stub still upgrades mid-session, and a plan can still be wrong.** Rung 1 written at
+session start is not a contract any more than rung 2 is — the implementer may deviate
+when the code demonstrates the plan is wrong, but says so where the plan lives (this
+file), so a resuming or grading session reads the actual reasoning rather than a stale
+sketch.
+
+**Provisioning.** `needs-plan` joins the label set [§9](#9-adopting-this) provisions on
+adoption and back-fills on sync, the identical idempotent pattern as every other fixed
+convention label — never created on demand the way a per-group `group:<key>` label is,
+because its name is fixed and every repo needs it before the first triage pass can flag
+anything.
+
+#### Writing a conclusion down — the decision and the document are two units
 
 A session can produce nothing but a conclusion. A discussion that settles a rule, a review
 that finds a gotcha, a wrap that learns something outliving its feature — the output is
@@ -1361,7 +1548,7 @@ Two rules already stated apply here with unusual force, because prose hides thei
   clean resolution. Measured, on two adjacent edits to one paragraph — the correct resolution
   was their union, not either side.
 
-#### Design conclusions are three units, not two
+##### Design conclusions are three units, not two
 
 A design ruling is the conclusion above, plus one part a prose conclusion does not need:
 **an immutable visual record.** Repo files drift and supersede — the two-unit shape above
@@ -1392,7 +1579,7 @@ gives: a file loaded into every session is the worst place for an archive that o
 `CLAUDE.md` gets one pointer row into `docs/design/`; the design index maintains itself
 there.
 
-#### Design exploration files its Issue first — before the first mockup, not after
+##### Design exploration files its Issue first — before the first mockup, not after
 
 A mockup happens before any coding session exists for the feature, so the ordinary
 sequencing note above — own Issue, claim, branch off trunk — needs one further promise:
@@ -1416,185 +1603,6 @@ from the file ceremony above — a mockup lives as a preview link in conversatio
 keeping at all. This section defines storage, reference and sequencing; the approval gate
 itself is [*Design ruling*](#design-ruling--a-human-must-approve-the-design-first) — the
 two land together where grouped, but rule on different things.
-
-### Scope — diagnosing across repos is not license to act in them
-
-A recurring shape across a fleet of repos: a session working an issue in one repo
-traces the actual root cause to a different one — a shared tool repo this one depends
-on, a library, another service in the same system. **Reading and diagnosing across
-repos to find a root cause is expected.** Everything else in this section — the label,
-the worktree, the local cache, the human go-ahead before a trunk merge — is scoped to
-**the repo a session is nominally working in**, and none of it authorizes acting in a
-different one just because the diagnosis pointed there.
-
-**Acting in another repo — branching, committing, pushing, rebasing or force-pushing an
-existing branch, merging — requires that repo's own claim and its own explicit
-go-ahead, scoped to that repo**, even when the session is confident it found the real
-fix. The correct move is to report the finding — an Issue there, or a comment pointing
-at the existing branch — and stop.
-
-Measured: a session working a downstream repo's issue correctly traced the root cause
-to an existing branch in the upstream tool repo the issue pointed at, then — with no
-claim there and no go-ahead scoped to it — rebased that branch (which had drifted
-materially behind trunk) and force-pushed the result. It was caught and reverted before
-anything merged, so no lasting damage landed; the sequence of actions is what this rule
-exists to prevent, not the eventual outcome.
-
-### Rules
-
-- Claim **before** you start, not when you open the PR. An unclaimed issue is fair game.
-- **A live claim is enforced, not advisory.** `colab claim` and `colab worktree new`
-  *refuse* an issue that already has a live claim (local state for same-machine, GitHub for
-  cross-machine), naming the holder. `--force` takes over loudly — a takeover is always a
-  visible, logged act. Advisory warnings were tried first; measurement showed they get
-  skipped exactly when they matter.
-
-  Know the limit of that guarantee: it protects an issue only while a claim is *live*, and
-  since a session releases its whole group at wrap, an issue you left unfinished is
-  immediately claimable again. The refusal prevents two sessions holding one issue at the
-  same time; it does not reserve work for later. If you intend to come back to something,
-  say so on the Issue — the claim will not hold it for you.
-- **A claim carries its details as a structured Issue comment** —
-  `🔒 Claimed — worktree … · branch … · host … · <timestamp>` on claim, `✅ Released` on
-  release. The label answers *whether* an issue is taken; the comment answers *by what*,
-  from any machine, with an audit trail unlabeling could never keep.
-  - **The same pattern names code-ship's evidence comment** (B2b, `ceremony:
-    standard` only): one invisible marker line, `<!-- colab:evidence sha=<trunk-sha> -->`,
-    prepended to otherwise-free prose. A stable first line as wire format, everything after
-    it human — deliberately not a structured evidence schema, which would invite padding
-    instead of honesty. **Degrade, never gate**: a comment missing the marker (an older
-    wrap, a hand-written one) still counts as evidence: no consumer may treat its absence as
-    "no evidence exists".
-- **Simultaneous claims break ties deterministically.** GitHub has no atomic check-and-set,
-  so two racers can both claim within the same second. After claiming, re-read the issue:
-  the earliest live claim comment (by GitHub's own `createdAt`) wins; the loser posts
-  `✅ Released (yielded — …)` and moves on. Both racers reach the same verdict
-  independently — no coordinator needed.
-- Release the claim even if you did not finish. A stale claim is worse than no claim, because
-  it silently blocks other people. (`colab doctor --prune` frees claims whose worktrees died,
-  so stale state can never block work forever.)
-- For long-running work, comment on the Issue with progress. The Issue is the feature's
-  external memory — anyone resuming should get full context from `gh issue view N` without
-  re-reading the codebase.
-
-### Epics — a container is not a start candidate
-
-*Readiness* and *Provenance* both answer whether an issue is safe to pick up: is it
-unblocked, and did a human approve it. Neither answers a third question a scheduled
-driver (*Scheduled drivers*, above) or a batch triage needs answered before either of
-those: **is this issue a unit of work at all?** An epic — the parent issue that groups a
-body of child work — can sail through both existing gates: open, unclaimed, human-filed,
-even `deps-checked`, and still be nothing a session should ever branch on, because there
-is no code to write for "ship the whole redesign", only for its children.
-
-**The `epic` label marks exactly that: a container for sub-issues, informative, never a
-start candidate, never claimed as a unit of work.** Secondary signals corroborate it — an
-`epic(` title prefix, native sub-issue parenthood (`subIssuesSummary.total > 0`) — but the
-label is the one an unattended tool can filter on without inferring anything from prose or
-counting children itself. Apply it when you file (or convert) an epic; a scheduler and a
-triage pass both exclude it from what they start, the same way they exclude `agent-filed`
-work, and for a related but distinct reason: provenance asks *did a human approve this*,
-this asks *is it shaped like a task at all*.
-
-**This is why `epic` lives in the convention label set ([§9](#9-adopting-this)) and
-`tracking` (below) does not.** The bar for that set is "an unattended driver's decision
-depends on it" — the same bar `in-progress`, `deps-checked` and `agent-filed` each meet.
-The scheduled-drivers model (*Scheduled drivers*, above) needs to exclude epics from what
-it starts; nothing unattended yet reads `tracking`, so it stays repo-local and opt-in.
-An epic still gets closed and referenced exactly as any other issue does once its
-children finish — this label changes nothing about *that*; it only keeps a driver from
-mistaking the map for the territory.
-
-### Delivery type — route, not start (#112)
-
-*Epics*, just above, answers "is this a unit of work at all?" A related but distinct
-question sits beside it: **when it is a unit of work, does finishing it produce a code
-commit?** A tracker mixes issues whose delivery is *not* a code commit — a content push,
-an ops/production check, a docs sync outside code review — into a pipeline whose every
-stage assumes one: worktree, gate, mergeable, squash, `Closes #N`. Such an issue can
-never reach a mergeable state, so it reads as **eternally stuck**, and its real
-completion (an evidence comment, an ops verification) is invisible to landed-detection.
-The expensive half: it still looks **startable** to triage and a scheduled driver alike,
-because nothing in the existing readiness vocabulary says "this is real work, but not a
-diff" the way `epic` says "this is not a unit of work at all" — `deps-checked` means "no
-blocker", not "this is a commit".
-
-**Four labels — `delivery:code`, `delivery:content`, `delivery:ops`,
-`delivery:docs-only`** — name the delivery type explicitly. The classifier they power is
-**three-valued, not boolean**, and the third value is load-bearing:
-
-| label state | reads as |
-|---|---|
-| no `delivery:*` label at all | **not asked** — behaves exactly as before this label set existed |
-| `delivery:code` | code — the ordinary pipeline applies |
-| `delivery:content` / `delivery:ops` / `delivery:docs-only` | non-code — **route, do not start** |
-
-**"Not asked" must never collapse into "non-code".** Every issue in every tracker is
-unlabelled the day this set is adopted; if absence read as non-code, triage and every
-scheduled driver would freeze on that day. This is the same failure class *Readiness*
-warns about for an empty blocker list: an absent value is not a meaningful value, and
-optimism and pessimism both point the wrong way from "nobody said".
-
-**`content` / `ops` / `docs-only` gate exactly like `needs-ruling`, not like a softer
-advisory.** A non-code delivery type is not a start candidate for anyone, manual or
-scheduled, in the code pipeline — the same posture *Design ruling* takes for an
-unapproved surface, and the same reason *Epics* excludes a container: not every open,
-unclaimed, human-filed issue is code to write. Route it to wherever its actual delivery
-happens (a content calendar, an ops runbook, a docs platform); do not open a worktree for
-it, and do not report it as blocked — it was never going to unblock, because there is no
-diff on the other side of it. A session that lands on one distills that onto the issue and
-ends the session, the same closing move as landing on a design-decision-only issue with no
-code product ([`CLAUDE.md`](CLAUDE.md)).
-
-**Who sets the label:** whoever files or triages the issue, deciding what the issue's
-*deliverable* is — the identical placement `needs-ruling` gets from the designer producing
-the spec. No mechanical rule infers it from a title or a body; a docs-sounding title can
-still be `delivery:code` (updating a `.md` this repo reviews and merges as code), and a
-code-sounding title can be `delivery:ops` (verifying a deploy, not shipping one).
-
-**This is why `delivery:*` lives in the convention label set ([§9](#9-adopting-this)) and
-not in a repo-opt-in list like `tracking`.** The bar is the same one `epic` and
-`needs-ruling` meet: an unattended driver's start-or-skip decision depends on being able
-to read the three states apart, and a repo that adopted before this set existed cannot
-create the label at all — the label is provisioned, not invented on demand the way
-`group:<key>` is, because its four values are fixed and every adopting repo needs them
-before the first triage pass can classify anything.
-
-### Tracking issues — claimed but referenced, not closed
-
-Most issues are a unit of work: a branch completes them, and the merge closes them with
-`Closes #N`. But a repo may keep a **long-lived memory / tracking issue** — external memory
-for a whole domain, holding accumulated decisions and gotchas plus a checklist of still-open
-items. A session doing a small hygiene fix in that domain legitimately **claims** the tracking
-issue (to signal work in the area) and **references** it, but does not complete it: its
-checklist still has open items.
-
-Closing such an issue at merge would bury its knowledge and its still-open items behind a
-closed-issue lookup. So a tracking issue is **referenced, not closed** — the merge message says
-`Refs #N` (which GitHub links but does not auto-close) instead of `Closes #N`. Two ways to say
-which issues these are, and they compose:
-
-- **A `tracking` label on the issue** — declarative and durable. Any session that claims a
-  labelled issue references it automatically. This is the robust choice: the property lives on
-  the long-lived issue, so every session touching the domain honours it without having to know.
-- **`colab ship --refs <N[,M]>`** — explicit, per-ship, for an issue not labelled.
-
-**The claim is released unconditionally either way** — exactly as for a closed issue (a stale
-claim blocks others; §5 *Rules*). Only the keyword changes: `Refs` instead of `Closes`. The
-`tracking` label is deliberately **not** in the convention label set (§9): its absence breaks no
-check — every issue simply closes as before — so adoption does not provision it and the audit
-does not report it missing. A repo that wants the behaviour creates the label and applies it.
-
-One edge the tool cannot fix by itself: if a commit *body* on the branch literally writes
-`Closes #N` for a tracking issue, GitHub closes it on merge regardless — a message keyword
-cannot un-close it. `colab ship` detects this after the push (the referenced issue reads
-`CLOSED`) and warns you to reopen it by hand. Do not write `Closes #<tracking>` in a commit body.
-
-The reverse direction is **not** the same kind of edge, and `ship` fixes it rather than
-warning about it: a commit body may carry `Refs #N` written while N was still open, and by
-the time `ship` runs N is one of the issues this branch *closes*. Nothing needs GitHub to
-un-do anything here, so the composer drops the stale `Refs #N` and keeps its own `Closes #N`
-before the push, instead of shipping a commit that says both (#58).
 
 ---
 
