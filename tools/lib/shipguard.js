@@ -16,7 +16,19 @@
  * corrected without a force-push that rewrites published history and any tag pointing at it, and a
  * `Closes #N` GitHub has honoured cannot be un-honoured — reopening leaves the false claim in the
  * commit. Check before the merge, not after.
+ *
+ * A FOURTH GUARD, added for #119: `closesCoverage` re-reads the FINAL message — the exact string
+ * about to be handed to `git commit -m` — and asserts every issue this ship resolved to CLOSE has a
+ * `Closes #N` line in it. Investigation for #119 found both message paths (`--message` override and
+ * the composed path) already funnel through `lib/squash.js`'s `spliceCloses`, which guarantees this
+ * on every reachable path today — so the hard gate here is regression-proofing against a future
+ * path that composes a message some other way, not a fix for a currently-reachable failure. The
+ * genuinely reachable incident #119 describes (a branch's own `Closes #N`, written in a commit body
+ * that the squash does not carry verbatim, silently dropped) is caught by this same function as an
+ * ADVISORY finding (`dropped`), not a hard failure — see the doc comment on `closesCoverage`.
  */
+
+const squash = require('./squash.js');
 
 /**
  * Issue numbers a branch NAME claims, per CONVENTIONS.md §4: the numbers live in one trailing run.
@@ -194,7 +206,66 @@ function hasEvidence(comments) {
   return evidenceComments(comments).length > 0;
 }
 
+/**
+ * The #119 gate: does the FINAL squash message — exactly the string about to be passed to
+ * `git commit -m` — carry a `Closes #N` for every issue this ship resolved to close?
+ *
+ * Uses `squash.closedIssueNumbers`, the SAME recogniser `spliceCloses` uses to decide what still
+ * needs adding, deliberately — a second, independently-written regex here is exactly the drift that
+ * would let this guard and the composer disagree about a message they are both looking at.
+ *
+ * Three findings, two different severities (see the module header for why they split this way):
+ *
+ *   - `missing`: a number in `closeIssues` with no `Closes #N` in `message`. HARD FAILURE — this is
+ *     ship's own resolved intent contradicting the text it is about to commit, with no inference
+ *     involved. Investigation for #119 found no path today that reaches this (both `--message` and
+ *     the composed path already run through `spliceCloses`, which guarantees it) — so this is
+ *     regression-proofing a future composer bypass, not a fix for a reachable bug.
+ *   - `dropped`: a number some commit's own text closes, that is in none of `closeIssues`,
+ *     `refsIssues`, or `message` — the genuinely reachable #119 incident: a branch's own `Closes #N`
+ *     lived in a commit body the squash did not carry verbatim (only the CHOSEN commit's body
+ *     survives; others contribute only their subject as a bullet), and the number was never in the
+ *     claim registry to begin with. ADVISORY — inferred from prose, which can be a mention of
+ *     another repo's issue, a revert note, or a deliberate `--refs` decision the operator already
+ *     made; not authoritative enough to block.
+ *   - `stray`: a number `message` closes that is NOT in `closeIssues` — the mirror image. Tagged
+ *     `refs` when the operator explicitly kept it open (`refsIssues`, the settled case
+ *     `squash.js:176`/`reconcileClosesRefsConflict` documents: GitHub still honours an inherited
+ *     `Closes #N` even when a `Refs #N` sits beside it, and this is deliberately NOT rewritten —
+ *     ship already warns after the push), `not-carried` otherwise. ADVISORY for the same reason
+ *     `dropped` is: rejecting a hand-written `Closes` here would overturn that settled rule, not add
+ *     to it.
+ *
+ * @param {string}                 o.message      the FINAL message, exactly as passed to `git commit -m`
+ * @param {Array<number|string>}   o.closeIssues  what ship resolved to CLOSE
+ * @param {Array<number|string>}   [o.refsIssues] what ship resolved to keep open
+ * @param {Array<{subject,body}>}  [o.commits]    branchCommits() output — feeds `dropped` only
+ * @returns {{ok:boolean, missing:number[], dropped:number[],
+ *            stray: Array<{issue:number, reason:'refs'|'not-carried'}>}}
+ */
+function closesCoverage({ message, closeIssues, refsIssues = [], commits = [] }) {
+  const closed = new Set(squash.closedIssueNumbers(message).map(Number));
+  const closeSet = new Set((Array.isArray(closeIssues) ? closeIssues : []).map(Number));
+  const refsSet = new Set((Array.isArray(refsIssues) ? refsIssues : []).map(Number));
+
+  const missing = [...closeSet].filter((n) => !closed.has(n));
+
+  const fromCommits = new Set();
+  for (const c of Array.isArray(commits) ? commits : []) {
+    const text = `${(c && c.subject) || ''}\n${(c && c.body) || ''}`;
+    for (const n of squash.closedIssueNumbers(text)) fromCommits.add(Number(n));
+  }
+  const dropped = [...fromCommits].filter((n) => !closeSet.has(n) && !refsSet.has(n) && !closed.has(n));
+
+  const stray = [...closed]
+    .filter((n) => !closeSet.has(n))
+    .map((n) => ({ issue: n, reason: refsSet.has(n) ? 'refs' : 'not-carried' }));
+
+  return { ok: missing.length === 0, missing, dropped, stray };
+}
+
 module.exports = {
   branchIssueNumbers, commitIssueNumbers, corroborateIssues, branchType,
   subjectSanity, bodyShaClaims, evidenceComments, hasEvidence, TOOL_MARKS,
+  closesCoverage,
 };

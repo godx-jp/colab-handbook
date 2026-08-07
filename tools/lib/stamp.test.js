@@ -404,6 +404,36 @@ test('an untagged handbook deactivates the comparison, as it does for templates'
   assert.match(c.reason, /untagged/);
 });
 
+// --- handbookInfo must not answer for an ENCLOSING repo (#145) --------------
+//
+// `git -C <root> rev-parse --show-toplevel` does not fail when `root` itself has no `.git` — it
+// walks UP and reports the nearest enclosing repository. A root that is not itself a repo therefore
+// still gets `ok: true` from that command, and branching on success alone (the pre-fix code) reports
+// `hasGit: true` plus a version taken from the WRONG repository's tags, silently. This arises for
+// real when a parent directory is itself a git repo and a project directory nested inside it
+// legitimately lacks its own `.git` (working trees file-synced between machines while git metadata
+// deliberately is not).
+
+test('a non-git directory nested inside a git repo is NOT reported as that repo', (t) => {
+  const h = tempHandbook(t);
+  h.git('tag', 'v1.0.0');
+  const nested = path.join(h.root, 'no-git-here');
+  fs.mkdirSync(nested);
+  const info = stamp.handbookInfo(nested);
+  assert.strictEqual(info.hasGit, false, 'must not borrow the enclosing repo\'s git-ness');
+  assert.strictEqual(info.untagged, true);
+  assert.strictEqual(info.version, 'v0', 'must not borrow the enclosing repo\'s tag');
+});
+
+test('handbookInfo still recognises the repo when root genuinely IS its toplevel', (t) => {
+  const h = tempHandbook(t);
+  h.git('tag', 'v1.0.0');
+  const info = stamp.handbookInfo(h.root);
+  assert.strictEqual(info.hasGit, true);
+  assert.strictEqual(info.untagged, false);
+  assert.strictEqual(info.version, 'v1.0.0');
+});
+
 // --- the maintainer case: unreleased work must not mark every machine stale ---
 //
 // Every test above tags immediately after the commit it makes, so HEAD and the latest tag coincide

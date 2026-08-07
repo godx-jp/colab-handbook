@@ -1073,30 +1073,114 @@ const CLAUDE_MD_MAX_BYTES = 40 * 1024; // near the handbook's own cited worst ca
 const CLAUDE_MD_LINE_MULTIPLE = 6; // "some small multiple of the [file's] median row"
 const CLAUDE_MD_LINE_ABS_FLOOR = 2048; // below this, flagging on multiple alone is noise (tiny medians make everything look huge)
 
+// #117: the byte ceiling above was built to catch hand-written accretion, but it counts
+// TOTAL file bytes — which also charges a repo for content it cannot shorten by the rule's
+// own logic: a derived block (e.g. a generated table of contents a script rebuilds from
+// another doc's headings) that a test elsewhere asserts matches byte-for-byte. That content
+// grows by construction, one line per source fact, and editing it by hand to "fix" the
+// advisory makes the repo's OWN gate red. A repo following the router rule perfectly still
+// gets charged for adopting a pattern the handbook prefers.
+//
+// The fix: let a repo mark a span as derived, and gate the advisory on AUTHORED bytes
+// (total minus every marked span) instead of total. Total is still reported — a file that
+// is mostly derived is still fully loaded into every session, and that cost stays visible —
+// but only authored bytes decide whether the finding fires. `id=` is required so a repo
+// with more than one generated block (e.g. a TOC and a changelog) can have both.
+const DERIVED_START_RE = /^<!--\s*colab:derived:start\s+id=(\S+)\s*-->\s*$/;
+const DERIVED_END_RE = /^<!--\s*colab:derived:end\s*-->\s*$/;
+
+/**
+ * Splits `text` into `{ authoredLines, derivedBytes, malformed }`. `authoredLines` holds
+ * every physical line (marker lines included, since they are structural annotations, not
+ * prose) EXCEPT lines inside a well-formed derived span. `malformed` lists any marker
+ * problem (unterminated start, stray end, nested start) — on malformed input we fail open:
+ * the offending span and everything after its unmatched marker is treated as AUTHORED, so a
+ * broken marker never hides real prose from the advisory it exists to inform.
+ */
+function splitDerivedSpans(text) {
+  const lines = text.split(/\r?\n/);
+  const authoredLines = [];
+  const malformed = [];
+  let openId = null;
+  let spanLines = [];
+
+  for (const line of lines) {
+    if (openId === null) {
+      const m = line.match(DERIVED_START_RE);
+      if (m) {
+        openId = m[1];
+        spanLines = [line];
+        continue;
+      }
+      if (DERIVED_END_RE.test(line)) {
+        malformed.push(`a colab:derived:end with no matching start`);
+        authoredLines.push(line); // stray end — keep it, it's just text at that point
+        continue;
+      }
+      authoredLines.push(line);
+    } else {
+      if (DERIVED_START_RE.test(line)) {
+        malformed.push(`nested colab:derived:start (id=${openId} was still open)`);
+        // Fail open: treat the whole thing-so-far as authored and stop tracking a span.
+        authoredLines.push(...spanLines, line);
+        openId = null;
+        spanLines = [];
+        continue;
+      }
+      spanLines.push(line);
+      if (DERIVED_END_RE.test(line)) {
+        openId = null; // well-formed span closes; its lines are NOT authored
+        spanLines = [];
+      }
+    }
+  }
+
+  if (openId !== null) {
+    malformed.push(`colab:derived:start id=${openId} was never closed`);
+    authoredLines.push(...spanLines); // fail open — count the unterminated span as authored
+  }
+
+  return { authoredLines, malformed };
+}
+
 function checkClaudeMdSize(src, warn) {
   const text = src.readFile("CLAUDE.md");
   if (text === null) return; // no CLAUDE.md here — a separate concern (project.yml already covers "undescribed")
 
   const bytes = Buffer.byteLength(text, "utf8");
-  if (bytes > CLAUDE_MD_MAX_BYTES) {
+  const { authoredLines, malformed } = splitDerivedSpans(text);
+  for (const problem of malformed) {
+    warn(`CLAUDE.md has a malformed colab:derived marker (${problem}) — treating the affected span as authored, not derived, until it's fixed`);
+  }
+
+  const authoredText = authoredLines.join("\n");
+  const authoredBytes = Buffer.byteLength(authoredText, "utf8");
+  const derivedBytes = Math.max(0, bytes - authoredBytes);
+
+  if (authoredBytes > CLAUDE_MD_MAX_BYTES) {
+    const totalNote = derivedBytes > 0
+      ? ` (of ${bytes} bytes total; ${derivedBytes} bytes are marked colab:derived and excluded — #117)`
+      : "";
     warn(
-      `CLAUDE.md is ${bytes} bytes (~${(bytes / 1024).toFixed(1)} KB) — over the ${CLAUDE_MD_MAX_BYTES / 1024} KB ` +
-      `advisory ceiling (#64). It is loaded in full into every session before any work starts; if the ` +
-      `knowledge belongs in docs/, the CLAUDE.md change is a pointer, not a copy (code-wrap A2)`,
+      `CLAUDE.md is ${authoredBytes} bytes (~${(authoredBytes / 1024).toFixed(1)} KB)${totalNote} — over the ` +
+      `${CLAUDE_MD_MAX_BYTES / 1024} KB advisory ceiling (#64). It is loaded in full into every session before ` +
+      `any work starts; if the knowledge belongs in docs/, the CLAUDE.md change is a pointer, not a copy (code-wrap A2)`,
     );
   }
 
-  // Median over non-empty PHYSICAL lines — a monster line is one that never wrapped, so a
-  // line-count-based reader (like A2's own cited metric) never sees it either.
-  const lens = text.split(/\r?\n/).filter((l) => l.length > 0).map((l) => Buffer.byteLength(l, "utf8")).sort((a, b) => a - b);
+  // Median over non-empty PHYSICAL lines, derived spans excluded — a monster line is one
+  // that never wrapped, so a line-count-based reader (like A2's own cited metric) never
+  // sees it either. Excluding derived lines here too: a generated block can legitimately
+  // contain a long row, and that is not the "pointer became a copy" signature this hunts.
+  const lens = authoredLines.filter((l) => l.length > 0).map((l) => Buffer.byteLength(l, "utf8")).sort((a, b) => a - b);
   if (lens.length < 2) return; // no meaningful median from 0 or 1 lines
   const median = lens[Math.floor(lens.length / 2)];
   const worst = lens[lens.length - 1];
   if (median > 0 && worst > CLAUDE_MD_LINE_ABS_FLOOR && worst > median * CLAUDE_MD_LINE_MULTIPLE) {
-    const pct = ((worst / bytes) * 100).toFixed(1);
+    const pct = ((worst / authoredBytes) * 100).toFixed(1);
     warn(
       `CLAUDE.md has a single line of ${worst} bytes — ${(worst / median).toFixed(1)}x the file's median line ` +
-      `(${median} bytes), ${pct}% of the whole file (#64). That is the "pointer became a copy" signature: a ` +
+      `(${median} bytes), ${pct}% of authored content (#64). That is the "pointer became a copy" signature: a ` +
       `router line should name where the depth lives, not reproduce it`,
     );
   }

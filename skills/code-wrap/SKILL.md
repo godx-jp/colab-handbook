@@ -251,6 +251,24 @@ pass/fail counts and failing test names, not the runner's default default verbos
   still — the filtered command above avoids ever emitting the noise, rather than
   hoping the reader's truncation point lands somewhere safe.
 
+#### Notify the dashboard, best-effort
+
+Once the verdict is known, report it to the dev-dashboard's hand-off checklist mark
+("does this branch have a recorded quality-gate result?") — read-side and persistence
+already live there; this is the only write call site (#116):
+
+```sh
+colab gate-recorded             # gate came back green
+colab gate-recorded --fail      # gate is red, for a reason unrelated to this branch's own change
+```
+
+Same posture as every other `colab` notify call: silent when `notifyUrl` is unset
+(the default — nothing above breaks without it), fire-and-forget, never fails or
+slows this step. It resolves the worktree from cwd against `colab worktrees` and
+`HEAD`'s own sha automatically — pass `--worktree <name>` / `--sha <sha>` only when
+running it from somewhere other than the worktree whose gate just ran. No `colab`
+installed → skip this call; A3's own verdict (above) is still what governs A4/A5.
+
 ### A4. Commit only the deliverable paths
 
 ```sh

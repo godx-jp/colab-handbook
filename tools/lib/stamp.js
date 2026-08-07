@@ -61,9 +61,20 @@ function gitIn(root, args) {
  * Before the first tag exists the version is 'v0' and `untagged` is true, which DEACTIVATES stamp
  * comparison in both callers — there is no real version line to compare against, and inventing one
  * would mark every adopter stale against a version that never shipped.
+ *
+ * `git -C <root> rev-parse --show-toplevel` does not fail when `root` itself has no `.git` — it
+ * walks UP and answers about the nearest ENCLOSING repository. So a root that is not itself a repo
+ * still returns `ok`, and treating success alone as "hasGit: true" reports the wrong repo's tags
+ * with no error and no advisory (root is a subdirectory that legitimately has no `.git` of its own
+ * — e.g. working trees file-synced between machines while git metadata deliberately is not, nested
+ * inside a parent that IS a repo). The fix is the comparison this function was missing: the
+ * toplevel git actually found must equal `root` itself, not merely exist. realPath both sides —
+ * `--show-toplevel` resolves symlinks, so a symlinked root would otherwise never match its own
+ * unresolved spelling (same reasoning as `realPath` above, applied here for the same failure mode).
  */
 function handbookInfo(root) {
-  if (!gitIn(root, ['rev-parse', '--show-toplevel']).ok) {
+  const top = gitIn(root, ['rev-parse', '--show-toplevel']);
+  if (!top.ok || realPath(top.out) !== realPath(require('path').resolve(root))) {
     return { root, hasGit: false, untagged: true, version: 'v0' };
   }
   const d = gitIn(root, ['describe', '--tags', '--abbrev=0']);

@@ -77,6 +77,15 @@ const ACTION_KIND = Object.freeze({
   // falling out of a write colab already owns the way `readiness` and `issue-merged` do. Payload
   // carries nothing beyond repo + issue — the receiver's response is the same refresh either way.
   'issue-filed': 'issue.filed',
+  // gate-recorded reports a PROVIDER-INDEPENDENT fact: code-wrap's own A3 step ("run the repo's
+  // quality gate") already knows its verdict the moment the gate finishes, so this fires right after
+  // that run rather than falling out of a write colab already owns (#116). It backs one mark on the
+  // receiver's per-branch hand-off checklist — "does this branch have a recorded quality-gate
+  // result?" — which reads "unknown" until an event with a matching sha arrives; a stale event (an
+  // old sha behind the branch's current HEAD) collapses back to "unknown" rather than being trusted.
+  // Payload is { ok: boolean, sha: string }; repo + worktree ride the envelope as the join key, and
+  // worktree must match exactly what `colab worktrees` lists for it.
+  'gate-recorded': 'gate.recorded',
 });
 
 /** Actions this module knows how to report. Exported so a caller can be checked against it. */

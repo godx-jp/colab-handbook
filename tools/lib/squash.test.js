@@ -406,3 +406,35 @@ test('reconcileClosesRefsConflict is a no-op with no closeNums, and safe on a me
   assert.strictEqual(squash.reconcileClosesRefsConflict('fix: x\n\nRefs #53', [], []), 'fix: x\n\nRefs #53');
   assert.strictEqual(squash.reconcileClosesRefsConflict('fix: x\n\nno reference here', ['53'], []), 'fix: x\n\nno reference here');
 });
+
+// --- #119: closedIssueNumbers is the SAME recogniser spliceCloses uses — anti-drift ---
+
+test('closedIssueNumbers finds every Closes #N, de-duplicated, case-insensitive keyword', () => {
+  assert.deepStrictEqual(squash.closedIssueNumbers('feat: x\n\nCloses #58, closes #59\n\nCloses #58'), ['58', '59']);
+  assert.deepStrictEqual(squash.closedIssueNumbers('no closing directive here, just #58 mentioned'), []);
+  assert.deepStrictEqual(squash.closedIssueNumbers(''), []);
+  assert.deepStrictEqual(squash.closedIssueNumbers(null), []);
+});
+
+test('closedIssueNumbers does not false-positive on a near-miss number', () => {
+  assert.deepStrictEqual(squash.closedIssueNumbers('Closes #5'), ['5']);
+  assert.ok(!squash.closedIssueNumbers('Closes #58').includes('5'));
+});
+
+test('anti-drift: every number closedIssueNumbers reports, spliceCloses leaves untouched; every number it does not, spliceCloses adds', () => {
+  const cases = [
+    'feat: x\n\nCloses #58, Closes #59\n\nbody',
+    'fix: x',
+    'feat: x\n\nCloses #7\n\nCo-authored-by: a <a@x.com>',
+  ];
+  for (const msg of cases) {
+    const already = squash.closedIssueNumbers(msg);
+    for (const n of already) {
+      const out = squash.spliceCloses(msg, [n]);
+      assert.strictEqual(out, msg, `spliceCloses should not re-add an already-closed #${n} in: ${msg}`);
+    }
+    const notYet = '999999';
+    assert.ok(!already.includes(notYet));
+    assert.match(squash.spliceCloses(msg, [notYet]), new RegExp(`Closes #${notYet}\\b`));
+  }
+});

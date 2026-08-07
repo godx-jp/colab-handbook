@@ -387,6 +387,7 @@ colab config set notifyUrl ""      # unset — same state on disk as never havin
 | `readiness <N>` / `readiness <N> --clear` | `readiness.marked` (payload `{state: 'checked'\|'unchecked'}`; `--mechanical` emits nothing — see below) |
 | `ship`, once per issue the merge carried | `issue.merged` (payload `{sha}`) |
 | `issue-filed <N>` | `issue.filed` — the ONLY command here with no local write of its own; it exists purely to notify after a raw `gh issue create` (#102) |
+| `gate-recorded [--fail]` | `gate.recorded` (payload `{ok, sha}`, keyed by repo + worktree name) — no local write of its own either; run right after code-wrap's own A3 quality-gate step (#116) |
 
 Body: `{kind, ts, repo?, issue?, worktree?, session?, payload?}`.
 
@@ -670,6 +671,7 @@ Run `colab <cmd> --help` for full detail.
 | `claim <issue>... [--worktree N] [--branch B] [--session S] [--session-name S] [--force] [--repo P]` | claim one or many issues (atomic; onto one worktree). **Enforced** — see *Claim lifecycle* below |
 | `release <issue> [--repo P]` | release a single issue; siblings + worktree survive |
 | `issue-filed <issue> [--repo P]` | notify-only event (`issue.filed`, #102) for an issue a raw `gh issue create` just made — no state.json entry, no label, no gh call of its own |
+| `gate-recorded [--sha S] [--fail] [--worktree N] [--repo P]` | notify-only event (`gate.recorded`, #116) for code-wrap's own A3 quality-gate step — no state.json entry, no label, no gh call of its own |
 | `solo [--force] [--session S] [--session-name S] [--repo P]` \| `solo --done [--repo P]` | entry-gated trunk-direct flow — `ceremony: light` only, no issue/claim/worktree (see *Solo flow*, CONVENTIONS.md) |
 | `readiness <issue> [--clear] [--repo P]` | own the `deps-checked` marker (§5): add it after verifying no open blocker, `--clear` on a new blocker or reopen. Journaled; refuses when `gh` is unusable (the marker has no local-only form) |
 | `claims [--json] [--sync [--prune]]` | list (grouped by worktree); `--sync` **adds** claims found on GitHub (assigned + in-progress); `--prune` also **removes** local claims GitHub no longer shows |

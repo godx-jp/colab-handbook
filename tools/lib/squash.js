@@ -327,6 +327,27 @@ function composeSquashMessage(commits, closes = [], refs = [], conflicts, extraT
  * @param {Array<number|string>} refs
  * @param {Array} [conflicts]  see `reconcileClosesRefsConflict` — passed straight through
  */
+/**
+ * Every issue number `message` carries a closing directive for (`Closes #N` / `closes #N`), as
+ * strings, de-duplicated. THE single recogniser for "this text closes #N" — `spliceCloses` uses
+ * it to decide what still needs ADDING (#119), and `shipguard.closesCoverage` uses the identical
+ * function to decide what is MISSING from the final message. Sharing it is the point: a second,
+ * independently-written regex is exactly the drift that would let the composer and the guard
+ * disagree about a message they are both looking at.
+ *
+ * Deliberately narrow, matching `spliceCloses`'s own recognition rule: `Closes` only, not `Fixes` /
+ * `Resolves` / `Fixed` / an `owner/repo#N` form — those are GitHub's closing vocabulary, not this
+ * repo's, and widening it would change what `spliceCloses` treats as "already present" (out of
+ * scope for #119).
+ */
+function closedIssueNumbers(message) {
+  const out = new Set();
+  const re = /[Cc]loses #(\d+)\b/g;
+  let m;
+  while ((m = re.exec(String(message || '')))) out.add(m[1]);
+  return [...out];
+}
+
 function spliceCloses(message, closes = [], refs = [], conflicts) {
   const norm = (arr) => (arr || []).map((n) => String(n).replace(/^#/, '')).filter(Boolean);
   const refNums = norm(refs);
@@ -338,8 +359,9 @@ function spliceCloses(message, closes = [], refs = [], conflicts) {
   // freshly composed `Closes #N` (#58).
   const text = reconcileClosesRefsConflict(message, closeNums, conflicts);
 
+  const closedAlready = new Set(closedIssueNumbers(text));
   const missingCloses = closeNums
-    .filter((n) => !new RegExp(`[Cc]loses #${n}\\b`).test(text));
+    .filter((n) => !closedAlready.has(n));
   const missingRefs = refNums
     // Skip a ref already referenced. Also skip one the message already CLOSES: this layer only adds
     // text, so it cannot un-close it — ship warns after the push instead of us emitting both keywords.
@@ -361,5 +383,5 @@ function spliceCloses(message, closes = [], refs = [], conflicts) {
 module.exports = {
   TYPE_WEIGHT, BREAKING_BONUS, TRAILER_RE,
   isSyncNoise, parseSubject, commitWeight, unweightedCommits, pickSubjectIndex, harvestTrailers,
-  composeSquashMessage, spliceCloses, reconcileClosesRefsConflict,
+  composeSquashMessage, spliceCloses, reconcileClosesRefsConflict, closedIssueNumbers,
 };

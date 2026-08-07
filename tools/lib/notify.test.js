@@ -110,6 +110,7 @@ test('buildEvent: kinds come from the closed map, never from the action name', (
   assert.equal(buildEvent('readiness', {}).kind, 'readiness.marked');
   assert.equal(buildEvent('issue-merged', {}).kind, 'issue.merged');
   assert.equal(buildEvent('issue-filed', {}).kind, 'issue.filed');
+  assert.equal(buildEvent('gate-recorded', {}).kind, 'gate.recorded');
   // Guard the shape of the map itself: a kind added here without agreeing it with the receiver
   // first is the exact drift the closed vocabulary exists to prevent.
   assert.deepEqual(Object.keys(ACTION_KIND).sort(), [...ACTIONS].sort());
@@ -128,6 +129,16 @@ test('buildEvent: only a positive integer issue survives', () => {
     assert.ok(!('issue' in buildEvent('claim', { repo: '/r', issue: bad })), `issue ${String(bad)} must be dropped`);
   }
   assert.equal(buildEvent('claim', { issue: 12 }).issue, 12);
+});
+
+test('buildEvent: gate-recorded carries {ok, sha} in payload, keyed by worktree not branch', () => {
+  const ev = buildEvent('gate-recorded', { repo: '/r', worktree: 'gate-recorded-event-116', payload: { ok: true, sha: 'abc123' } });
+  assert.equal(ev.kind, 'gate.recorded');
+  assert.equal(ev.repo, '/r');
+  assert.equal(ev.worktree, 'gate-recorded-event-116');
+  assert.deepEqual(ev.payload, { ok: true, sha: 'abc123' });
+  const red = buildEvent('gate-recorded', { repo: '/r', worktree: 'w', payload: { ok: false, sha: 'def456' } });
+  assert.deepEqual(red.payload, { ok: false, sha: 'def456' });
 });
 
 test('delivery: the child really posts the event body', async () => {

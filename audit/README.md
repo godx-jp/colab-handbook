@@ -117,7 +117,7 @@ the handbook's current version, so a scheduled run is self-documenting.
   rewrite a copy that is provably pristine, and refuses to touch a hand-edited one. See
   `tools/README.md`.
 
-- **`CLAUDE.md` size (#64)** — code-wrap's A2 rule ("router, not an archive") was
+- **`CLAUDE.md` size (#64, #117)** — code-wrap's A2 rule ("router, not an archive") was
   prose-only, and its own worst-case citation is framed in *lines*, which is blind to
   the failure that actually occurs: a single "pointer" line growing into a full copy of
   the doc it points at. Two independent, advisory (⚠→`warn`, never `fail`) checks:
@@ -130,6 +130,18 @@ the handbook's current version, so a scheduled run is self-documenting.
     table syntax.
   Both thresholds are explicitly a starting point offered by the issue for calibration
   across adopting repos, not a settled gate — hence `warn`, not `fail`.
+  **Both checks gate on *authored* bytes, not total (#117).** Wrap a generated span —
+  one a script rebuilds and a test asserts byte-for-byte, e.g. a table of contents built
+  from another doc's headings — in `<!-- colab:derived:start id=<name> -->` /
+  `<!-- colab:derived:end -->`, and its bytes and lines are excluded from both ceilings.
+  That content is unshortenable by construction (editing it by hand makes the repo's own
+  regeneration test fail), so it should not be charged against a budget meant for prose a
+  session can actually trim. The finding still reports the file's *total* size when a
+  derived span is present — the byte cost of loading the file stays visible even though it
+  no longer decides the verdict. A malformed marker (unterminated start, stray end, nested
+  start) fails open: the audit warns about the malformed marker separately and counts the
+  affected span as authored, so a broken marker can never hide real prose from the ceiling
+  it exists to inform.
 
 - **Convention labels present on the tracker** (`in-progress`, `deps-checked`,
   `agent-filed`, `epic` — `tools/lib/labels.js`) — **advisory**, and only when the repo

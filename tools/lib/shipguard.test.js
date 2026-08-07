@@ -150,3 +150,89 @@ test('no comments at all is no evidence — and an empty/whitespace comment does
   assert.strictEqual(g.hasEvidence(null), false);
   assert.strictEqual(g.hasEvidence([{ body: '   ' }]), false);
 });
+
+// --- #119: the final squash message must actually close everything ship resolved to close ---
+
+test('closesCoverage: all closes present — ok, everything empty', () => {
+  const r = g.closesCoverage({
+    message: 'feat: x\n\nCloses #58, Closes #59, Closes #60\n\nbody',
+    closeIssues: [58, 59, 60],
+  });
+  assert.strictEqual(r.ok, true);
+  assert.deepStrictEqual(r.missing, []);
+  assert.deepStrictEqual(r.dropped, []);
+  assert.deepStrictEqual(r.stray, []);
+});
+
+test('closesCoverage: missing one — hard failure, named', () => {
+  const r = g.closesCoverage({
+    message: 'feat: x\n\nCloses #58, Closes #59\n\nbody',
+    closeIssues: [58, 59, 60],
+  });
+  assert.strictEqual(r.ok, false);
+  assert.deepStrictEqual(r.missing, [60]);
+});
+
+test('closesCoverage: the #119 incident — a branch Closes not carried by this ship is a DROPPED warning, not a failure', () => {
+  // Three grouped issues; the chosen commit's body closes #58, an earlier (non-chosen) commit's body
+  // closes #60 — but this ship's claim registry only carries #58 and #59. #60 is silently dropped by
+  // the composer (it only carries the chosen commit's body verbatim), and closesCoverage must SEE it
+  // without blocking the ship, because nothing ship resolved to close is missing.
+  const commits = [
+    { subject: 'feat: part one', body: 'Closes #60' },
+    { subject: 'feat: part two (chosen)', body: 'Closes #58' },
+    { subject: 'chore: tidy', body: '' },
+  ];
+  const r = g.closesCoverage({
+    message: 'feat: part two (chosen)\n\nCloses #58, Closes #59\n\nbody',
+    closeIssues: [58, 59],
+    commits,
+  });
+  assert.strictEqual(r.ok, true);
+  assert.deepStrictEqual(r.missing, []);
+  assert.deepStrictEqual(r.dropped, [60]);
+});
+
+test('closesCoverage: a dropped number that was deliberately --refs is NOT a dropped finding', () => {
+  const commits = [{ subject: 'feat: part one', body: 'Closes #60' }];
+  const r = g.closesCoverage({
+    message: 'feat: x\n\nCloses #58\n\nbody',
+    closeIssues: [58],
+    refsIssues: [60],
+    commits,
+  });
+  assert.deepStrictEqual(r.dropped, []);
+});
+
+test('closesCoverage: stray Closes for an issue not carried — advisory, ok stays true, tagged by reason', () => {
+  const notCarried = g.closesCoverage({
+    message: 'feat: x\n\nCloses #58, Closes #12\n\nbody',
+    closeIssues: [58],
+  });
+  assert.strictEqual(notCarried.ok, true);
+  assert.deepStrictEqual(notCarried.stray, [{ issue: 12, reason: 'not-carried' }]);
+
+  const keptOpen = g.closesCoverage({
+    message: 'feat: x\n\nCloses #58, Closes #12\n\nbody',
+    closeIssues: [58],
+    refsIssues: [12],
+  });
+  assert.strictEqual(keptOpen.ok, true);
+  assert.deepStrictEqual(keptOpen.stray, [{ issue: 12, reason: 'refs' }]);
+});
+
+test('closesCoverage: no near-miss — #5 does not satisfy a claim on #58 and vice versa', () => {
+  const a = g.closesCoverage({ message: 'feat: x\n\nCloses #5\n\nbody', closeIssues: [58] });
+  assert.strictEqual(a.ok, false);
+  assert.deepStrictEqual(a.missing, [58]);
+
+  const b = g.closesCoverage({ message: 'feat: x\n\nCloses #58\n\nbody', closeIssues: [5] });
+  assert.strictEqual(b.ok, false);
+  assert.deepStrictEqual(b.missing, [5]);
+});
+
+test('closesCoverage: no claimed issues at all is vacuously ok', () => {
+  const r = g.closesCoverage({ message: 'feat: x\n\nbody', closeIssues: [] });
+  assert.strictEqual(r.ok, true);
+  assert.deepStrictEqual(r.missing, []);
+});

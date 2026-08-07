@@ -150,3 +150,53 @@ test('both findings can fire together and neither is ever a fail', () => {
   assert.deepStrictEqual(r.fails, []);
   assert.ok(r.ok);
 });
+
+// --- #117: colab:derived spans are subtracted before comparing to the ceiling ----
+
+function derivedSpan(id, innerLine, count) {
+  return `<!-- colab:derived:start id=${id} -->\n` + (innerLine + '\n').repeat(count) + `<!-- colab:derived:end -->\n`;
+}
+
+test('authored content alone under the ceiling does not warn, even with a huge derived span pushing total bytes over it', () => {
+  const authored = '# CLAUDE.md\n\nSome router text.\n\n| doc | what |\n|---|---|\n| docs/a.md | thing a |\n';
+  // The derived span alone clears 40 KB; authored content is tiny.
+  const derived = derivedSpan('toc', '| docs/x.md | a generated index row |', 700); // ~40 * 700 ≈ 28 KB, push a bit more
+  const bigDerived = derivedSpan('toc', '| docs/x.md | a generated index row pushing past forty kilobytes total |', 700);
+  const body = authored + bigDerived;
+  const r = audit(fixture(body));
+  assert.ok(!hasText(r.warns, /CLAUDE\.md is \d+ bytes/), r.warns.join(' | '));
+  assert.ok(r.ok, `fails: ${r.fails.join(' | ')}`);
+});
+
+test('authored content alone over the ceiling still warns, and the finding names the derived split', () => {
+  const line = '- `docs/topic.md` — a router line describing where the depth actually lives.\n';
+  const authored = '# CLAUDE.md\n\n' + line.repeat(700); // ~55 KB authored, over the ceiling on its own
+  const derived = derivedSpan('toc', '| docs/x.md | row |', 50);
+  const body = authored + derived;
+  const r = audit(fixture(body));
+  assert.ok(hasText(r.warns, /CLAUDE\.md is \d+ bytes.*advisory ceiling \(#64\)/), r.warns.join(' | '));
+  assert.ok(hasText(r.warns, /bytes are marked colab:derived and excluded/), r.warns.join(' | '));
+  assert.ok(r.ok, `must stay advisory, got fails: ${r.fails.join(' | ')}`);
+});
+
+test('a monster line inside a derived span does not trip the per-line "pointer became a copy" check', () => {
+  const short = '- `docs/topic-a.md` — short pointer line.\n';
+  const monsterInsideDerived = derivedSpan('toc', 'x'.repeat(5000), 1);
+  const body = '# CLAUDE.md\n\n' + short.repeat(20) + monsterInsideDerived;
+  const r = audit(fixture(body));
+  assert.ok(!hasText(r.warns, /pointer became a copy/), r.warns.join(' | '));
+});
+
+test('an unterminated colab:derived:start fails open — the span counts as authored and a malformed-marker warning fires', () => {
+  const body = '# CLAUDE.md\n\nSome text.\n\n<!-- colab:derived:start id=toc -->\n' + 'x'.repeat(CLAUDE_MD_TOO_BIG_BYTES()) + '\n';
+  const r = audit(fixture(body));
+  assert.ok(hasText(r.warns, /malformed colab:derived marker.*never closed/), r.warns.join(' | '));
+  assert.ok(hasText(r.warns, /CLAUDE\.md is \d+ bytes/), r.warns.join(' | '));
+});
+
+test('a stray colab:derived:end with no matching start is reported and the content stays authored', () => {
+  const body = '# CLAUDE.md\n\nSome text.\n<!-- colab:derived:end -->\nmore text.\n';
+  const r = audit(fixture(body));
+  assert.ok(hasText(r.warns, /malformed colab:derived marker.*no matching start/), r.warns.join(' | '));
+  assert.ok(!hasText(r.warns, /CLAUDE\.md is \d+ bytes/), r.warns.join(' | '));
+});

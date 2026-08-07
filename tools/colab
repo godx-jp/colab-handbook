@@ -631,6 +631,74 @@ function cmdIssueFiled(argv) {
 }
 
 // ---------------------------------------------------------------------------
+// gate-recorded — pure notify passthrough for code-wrap's A3 quality-gate run (#116).
+//
+// Same shape as issue-filed: no state.json entry, no claim, no label, no gh call — the entire job
+// is one pushEvent() call. A3 already knows its own verdict the moment the gate finishes; this
+// just reports it, best-effort, to the receiver's per-branch hand-off checklist. The event is
+// keyed by repo + WORKTREE NAME (not branch), because that is the join key `colab worktrees`
+// already exposes to the receiver — so this command resolves the worktree from cwd against
+// state.json rather than accept a branch name, and refuses rather than guess when it can't.
+// ---------------------------------------------------------------------------
+
+const HELP_GATE_RECORDED = `colab gate-recorded [--sha <sha>] [--fail] [--worktree <name>] [--repo <path>]
+
+Fire-and-forget notify event for code-wrap's own A3 step ("run the repo's own quality gate") right
+after that gate finishes (#116). Emits kind \`gate.recorded\` (§ notify), payload
+\`{ok: boolean, sha}\`, keyed by repo + worktree name. The receiver's per-branch hand-off checklist
+reads this as "does this branch have a recorded quality-gate result?" and compares the event's sha
+against the branch's current HEAD — a stale event (an old sha) collapses back to "unknown" rather
+than being trusted, so there is no harm in this firing on every gate run, including unchanged ones.
+
+Touches nothing colab-local: no state.json entry, no claim, no label, no gh call of its own — same
+posture as \`colab issue-filed\`. Silent (exit 0, no-op past printing) when notifyUrl is unset.
+
+  --sha <sha>        commit the gate ran against (default: HEAD in the current directory)
+  --fail             record ok:false — the gate came back red (A3's own posture: best-effort,
+                     record the verdict either way, never let this block on it). Omit for green.
+  --worktree <name>  the worktree name from \`colab worktrees\` (default: resolved from cwd —
+                     refuses if cwd is not inside a known worktree and none was given, because a
+                     guessed name would defeat the join key the receiver relies on)
+  --repo <path>      resolve the repo from elsewhere than cwd
+
+  colab gate-recorded                  # from inside the worktree, gate passed
+  colab gate-recorded --fail           # gate ran red (pre-existing/unrelated failure)
+`;
+
+function cmdGateRecorded(argv) {
+  const opts = parseArgs(argv, {
+    values: { '--repo': 'repo', '--worktree': 'worktree', '--sha': 'sha' },
+    flags: { '--fail': 'fail', '-h': 'help', '--help': 'help' },
+  });
+  if (opts.help) return print(HELP_GATE_RECORDED);
+
+  const repoAbs = opts.repo ? resolveRepo(opts) : (git.mainRepoRoot(process.cwd()) || null);
+  if (!repoAbs) throw new UserError('not inside a git repo — pass --repo <path>');
+
+  let wtName = opts.worktree || null;
+  const st = state.loadState();
+  if (wtName) {
+    if (!st.worktrees[wtName]) throw new UserError(`No worktree "${wtName}" in state (see \`colab worktrees\`)`);
+  } else {
+    // The MAIN repo root (repoAbs, above) is the wrong thing to match a worktree's own path
+    // against — every worktree entry is keyed by ITS OWN toplevel, which repoRoot() (not
+    // mainRepoRoot()) reports from inside it.
+    const cwdRoot = git.repoRoot(process.cwd());
+    const wt = cwdRoot && Object.values(st.worktrees).find((w) => w.repo === repoAbs && w.path === cwdRoot);
+    if (!wt) throw new UserError('could not resolve the current worktree from cwd — pass --worktree <name> (see `colab worktrees`)');
+    wtName = wt.name;
+  }
+
+  const sha = opts.sha || git.git(['rev-parse', 'HEAD'], process.cwd()).stdout || '';
+  if (!sha) throw new UserError('could not resolve HEAD — pass --sha <sha>');
+
+  const ok = !opts.fail;
+  pushEvent('gate-recorded', { repo: repoAbs, worktree: wtName, payload: { ok, sha } });
+  print(`Notified: gate ${ok ? 'passed' : 'failed'} for "${wtName}" in ${shortRepo(repoAbs)} (gate.recorded, sha ${sha.slice(0, 7)}) — best-effort, no local state changed`);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // solo — the entry gate for solo flow (CONVENTIONS.md, Solo flow; #83).
 //
 // Solo flow lets a `ceremony: light` repo skip pre-filed issue / claim / worktree and commit
@@ -5495,6 +5563,34 @@ function cmdShip(argv) {
     warn(`#${cf.num}: the branch commit said "${cf.from} #${cf.num}" but this ship closes it (${cf.to} #${cf.num}) — inherited trailer dropped, kept ship's own.`);
   }
 
+  // #119: re-read the FINAL message — exactly what is about to be committed, including any
+  // --message override and the CI-Grant trailer appended above — and assert it actually closes
+  // everything ship resolved to close. See lib/shipguard.js's closesCoverage doc for why `missing`
+  // is a hard gate (ship's own resolved intent contradicting its own commit text) while `dropped`
+  // and `stray` are advisory (inferred from prose, not authoritative enough to block).
+  const coverage = shipguard.closesCoverage({ message: commitMsg, closeIssues, refsIssues, commits: shipCommits });
+  if (!coverage.ok) {
+    cleanupEphemeral(); cleanupTarget();
+    process.stderr.write(
+      `✗ B1: the final squash message carries no \`Closes\` line for ${coverage.missing.map((n) => '#' + n).join(', ')} — ` +
+      'the merge would land and ' + (coverage.missing.length > 1 ? 'those issues would' : 'that issue would') +
+      ' stay OPEN with its work already shipped. Nothing pushed.\n' +
+      `  Add to the message and re-run:   ${coverage.missing.map((n) => `Closes #${n}`).join(', ')}\n` +
+      `  (or \`colab ship … --refs ${coverage.missing.join(',')}\` if this ship does not complete ${coverage.missing.length > 1 ? 'them' : 'it'})\n`);
+    return 1;
+  }
+  for (const d of coverage.dropped) {
+    warn(`#${d}: the branch's commits say they close it, but this ship is not carrying it — the squash message`);
+    warn(`  will NOT close it, so it stays open with its code merged. Claim it, or reword that commit to \`Refs #${d}\`.`);
+  }
+  for (const s of coverage.stray) {
+    if (s.reason === 'refs') {
+      warn(`#${s.issue}: kept open on purpose (--refs), but the squash message also closes it — GitHub will close it on merge anyway.`);
+    } else {
+      warn(`#${s.issue}: the squash message closes it but this ship is not carrying it — GitHub will close it on merge.`);
+    }
+  }
+
   print(`B1: squash-merging ${sess.branch} → ${target} …`);
   const sq = git.git(['merge', '--squash', sess.branch], targetDir);
   if (!sq.ok) {
@@ -6002,6 +6098,9 @@ Commands:
   issue-filed <issue> [--repo P]                       notify event only, right after a raw
                                         \`gh issue create\` returns its number (#102) — no colab
                                         state written, no gh call of its own
+  gate-recorded [--sha S] [--fail] [--worktree N] [--repo P]         notify event only, from
+                                        code-wrap's A3 quality-gate step (#116) — no colab state
+                                        written, no gh call of its own
   solo [--force] [--repo P] | solo --done [--repo P]                 entry-gated trunk-direct
                                         flow, \`ceremony: light\` only — no issue/claim/worktree (#83)
   readiness <issue> [--clear] [--mechanical] [--repo P]              own the deps-checked / graph-empty markers (§5)
@@ -6069,6 +6168,7 @@ function main(argv) {
     case 'claim': return cmdClaim(rest);
     case 'release': return cmdRelease(rest);
     case 'issue-filed': return cmdIssueFiled(rest);
+    case 'gate-recorded': return cmdGateRecorded(rest);
     case 'solo': return cmdSolo(rest);
     case 'readiness': return cmdReadiness(rest);
     case 'migration-grant': return cmdMigrationGrant(rest);
