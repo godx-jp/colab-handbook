@@ -21,6 +21,22 @@ tool you must adopt.
 
 ## 1. The model in one picture
 
+> This handbook is not documentation. It is the **substitute for shared context between
+> parties that cannot accumulate shared context.** Every rule exists because one party
+> could not see what the other assumed.
+
+Two corollaries follow from that, and later sections cite them rather than re-arguing:
+
+1. **Humans fail by drift; agents fail by confident speed.** So the same sentence is a
+   *reminder* to a human and must be a *rail* for an agent — anything guarding against
+   agent failure has to be machine-checked, because an agent will never feel the
+   hesitation that saves a human. Every rule this repo promoted from prose into tooling
+   was promoted after an agent walked through the prose version at speed.
+2. **A new axis is warranted when a class of context one party structurally cannot hold
+   is not made visible by an existing axis** — not when a repo merely feels different.
+   This test has already refused things: it is why deploy-channel visibility became
+   part of an existing axis rather than a fourth one.
+
 Which model a repo uses depends on **two questions: does it deploy to production, and
 if so, what gates that deploy?**
 
